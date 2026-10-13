@@ -136,6 +136,10 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 		if !info.Mode().IsRegular() {
 			return failedf("PACKAGE_INVALID", "validation", "special file is not allowed: %s", relative)
 		}
+		// Skill 只有根目录 SKILL.md 是 Manifest；嵌套同名文件会让 Cloud/安装器产生歧义。
+		if kind == KindSkill && relative != "SKILL.md" && strings.HasSuffix(relative, "/SKILL.md") {
+			return failedf("PACKAGE_INVALID", "validation", "managed Skill export contains a nested SKILL.md: %s", relative)
+		}
 		if !allowedFile(kind, relative) {
 			return failedf("PACKAGE_NOT_PORTABLE", "validation", "path is outside the portable allowlist: %s", relative)
 		}

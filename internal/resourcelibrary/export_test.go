@@ -57,6 +57,17 @@ func TestExportDirectory_拒绝符号链接特殊文件和白名单外路径(t *
 	}
 }
 
+func TestExportDirectory_Skill只允许根目录Manifest(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export demo.\n---\n")
+	writeFile(t, filepath.Join(root, "docs", "SKILL.md"), "---\nname: stale-copy\ndescription: Old manifest.\n---\n")
+
+	_, err := ExportDirectory(root, KindSkill, filepath.Join(t.TempDir(), "skill.zip"))
+	if err == nil || !errorCode(err, "PACKAGE_INVALID") {
+		t.Fatalf("nested SKILL.md error = %v", err)
+	}
+}
+
 func TestExportDirectory_插件只导出可移植快照(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "plugin.json"), `{"name":"demo-plugin","version":"1.0.0","description":"Demo"}`)

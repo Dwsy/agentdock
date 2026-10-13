@@ -135,6 +135,21 @@ func TestUploadAuthorizedPath_流式PUT且不跟随重定向(t *testing.T) {
 		t.Fatalf("upload error leaked a token: %v", err)
 	}
 
+	rejected := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "manifest mismatch", http.StatusBadRequest)
+	}))
+	defer rejected.Close()
+	rejectedFile, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rejectedFile.Close()
+	_, rejectedClient := pinnedTestClient(t, rejected, "device-token")
+	err = uploadWith(context.Background(), rejectedClient, "/v1/nodes/library/transfer/ticket-ok", rejectedFile, int64(len(payload)))
+	if err == nil || !errorCode(err, "UPLOAD_REJECTED") {
+		t.Fatalf("rejected upload error = %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	var cancelledCalls atomic.Int32

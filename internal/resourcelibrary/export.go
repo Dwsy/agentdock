@@ -2,14 +2,12 @@ package resourcelibrary
 
 import (
 	"archive/zip"
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -30,22 +28,8 @@ type FileEntry struct {
 	Size int64  `json:"size"`
 }
 
-var hardcodedSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----`),
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
-	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|secret|password|passwd)\s*[:=]\s*['"][A-Za-z0-9+/=_\-]{8,}`),
-}
-
-var devicePathMarkers = []string{
-	"/.agentdock/",
-	`\.agentdock\`,
-	"AGENTDOCK_HOME",
-	"SKILL_DATA_DIR",
-	"PLUGIN_DATA_DIR",
-}
-
 // ExportDirectory 把一个已安装的受管目录打成 ZIP。
-// 安装器已经接纳的源码不再经第二套扩展名或目录白名单筛选，只排除缓存并拒绝私有数据。
+// 从已安装的受管目录导出完整资源，不对凭据、缓存或普通文件做隐式剔除。
 func ExportDirectory(root, kind, destination string) (Export, error) {
 	if kind != KindSkill && kind != KindPlugin {
 		return Export{}, failed("PACKAGE_KIND_INVALID", "validation", "package kind must be skill or plugin")
@@ -58,7 +42,7 @@ func ExportDirectory(root, kind, destination string) (Export, error) {
 		return Export{}, failed("PACKAGE_INVALID", "validation", "managed package must be a regular directory")
 	}
 
-	files, warnings, err := collectPortableFiles(root, kind)
+	files, err := collectPortableFiles(root, kind)
 	if err != nil {
 		return Export{}, err
 	}
@@ -69,13 +53,13 @@ func ExportDirectory(root, kind, destination string) (Export, error) {
 		return Export{}, failed("PACKAGE_INVALID", "validation", "managed Plugin export requires plugin.json")
 	}
 
-	// 内容摘要必须对应实际备份的文件；原目录可能包含被忽略的缓存与来源元数据。
+	// 摘要按实际文件集计算，原生安装器仅忽略操作系统 ZIP 传输元数据。
 	size, archiveDigest, contentDigest, err := writePortableZip(root, files, destination, archiveLimit(kind))
 	if err != nil {
 		return Export{}, err
 	}
 	return Export{
-		Files: files, Warnings: warnings, Size: size,
+		Files: files, Size: size,
 		ArchiveDigest: archiveDigest, ContentDigest: contentDigest,
 	}, nil
 }
@@ -89,15 +73,14 @@ func hasFile(files []FileEntry, name string) bool {
 	return false
 }
 
-func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
+func collectPortableFiles(root, kind string) ([]FileEntry, error) {
 	fsRoot, err := os.OpenRoot(root)
 	if err != nil {
-		return nil, nil, failed("PACKAGE_INVALID", "validation", "managed package directory cannot be opened")
+		return nil, failed("PACKAGE_INVALID", "validation", "managed package directory cannot be opened")
 	}
 	defer fsRoot.Close()
 
 	files := make([]FileEntry, 0)
-	warnings := make([]string, 0)
 	var total int64
 	err = filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -117,14 +100,6 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 			}
 			return nil
 		}
-		if ignoredExportPath(relative) {
-			// 不默默丢掉可能需要重新安装的依赖，向 Cloud 明确报告被排除的路径。
-			warnings = append(warnings, relative+" was excluded from backup (local metadata or generated dependencies)")
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		// os.Root 逐段拒绝符号链接替换。WalkDir 看到的类型不够，因为中间目录可能在遍历后被换掉。
 		info, err := fsRoot.Lstat(relative)
 		if err != nil {
@@ -135,15 +110,6 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 		}
 		if err := validateArchiveName(relative); err != nil {
 			return err
-		}
-		if reason := rejectedPrivatePath(relative); reason != "" {
-			// 私密文件不能离开用户设备，但也不应该阻断整个 Skill/Plugin 备份。
-			// 跳过源文件，不改动本地安装；让用户知道恢复时需重新配置凭证。
-			warnings = append(warnings, relative+" was excluded from backup ("+reason+"); reconfigure on restore")
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
 		}
 		if info.IsDir() {
 			return nil
@@ -162,67 +128,17 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 		if len(files)+1 > MaxPackageFiles {
 			return failedf("PACKAGE_INVALID", "validation", "package exceeds %d files", MaxPackageFiles)
 		}
-		found, scanErr := scanHardcodedSecrets(fsRoot, relative)
-		if scanErr != nil {
-			return scanErr
-		}
-		warnings = append(warnings, found...)
 		files = append(files, FileEntry{Path: relative, Size: info.Size()})
 		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if len(files) == 0 {
-		return nil, nil, failed("PACKAGE_INVALID", "validation", "managed package has no portable files")
+		return nil, failed("PACKAGE_INVALID", "validation", "managed package has no portable files")
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	return files, warnings, nil
-}
-
-func scanHardcodedSecrets(root *os.Root, relative string) ([]string, error) {
-	extension := strings.ToLower(filepath.Ext(relative))
-	switch extension {
-	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
-		return nil, nil
-	}
-	file, err := root.Open(relative)
-	if err != nil {
-		return nil, failed("PACKAGE_INVALID", "validation", "managed package file cannot be read")
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxSecretScanBytes+1))
-	if err != nil {
-		return nil, failed("PACKAGE_INVALID", "validation", "managed package file cannot be read")
-	}
-	if bytes.IndexByte(data, 0) >= 0 {
-		return nil, nil
-	}
-	scanned := data
-	partial := false
-	if int64(len(data)) > maxSecretScanBytes {
-		scanned = data[:maxSecretScanBytes]
-		partial = true
-	}
-	text := string(scanned)
-	warnings := make([]string, 0, 1)
-	for _, pattern := range hardcodedSecretPatterns {
-		if pattern.MatchString(text) {
-			// 警告只指向文件，不回显匹配片段，避免把凭证再写进控制面响应。
-			warnings = append(warnings, relative+" may contain a hardcoded credential")
-			break
-		}
-	}
-	for _, marker := range devicePathMarkers {
-		if strings.Contains(text, marker) {
-			warnings = append(warnings, relative+" may contain a device-local path")
-			break
-		}
-	}
-	if partial {
-		warnings = append(warnings, relative+" was only scanned for the first 1 MiB")
-	}
-	return warnings, nil
+	return files, nil
 }
 
 func writePortableZip(root string, files []FileEntry, destination string, limit int64) (int64, string, string, error) {
@@ -238,7 +154,7 @@ func writePortableZip(root string, files []FileEntry, destination string, limit 
 	}
 	writer := zip.NewWriter(output)
 	failedWrite := false
-	// 使用安装器相同的路径、权限和内容序列计算 digest，避免缓存过滤后摘要仍指向原目录。
+	// 使用安装器相同的路径、权限和内容序列计算 digest。
 	contentHash := sha256.New()
 	for _, file := range files {
 		info, err := fsRoot.Lstat(file.Path)

@@ -57,7 +57,7 @@ func uploadWith(ctx context.Context, client nexusclient.Client, requestURI strin
 		return failed("UPLOAD_REDIRECT_REJECTED", "validation", "package upload redirect was not followed")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return failed("UPLOAD_FAILED", "validation", "package upload was not accepted")
+		return failed("UPLOAD_REJECTED", "validation", "package upload was rejected by Cloud")
 	}
 	return nil
 }

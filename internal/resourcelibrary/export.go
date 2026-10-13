@@ -137,7 +137,13 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 			return err
 		}
 		if reason := rejectedPrivatePath(relative); reason != "" {
-			return failedf("PACKAGE_PRIVATE_DATA", "validation", "export refused %s: %s", reason, relative)
+			// 私密文件不能离开用户设备，但也不应该阻断整个 Skill/Plugin 备份。
+			// 跳过源文件，不改动本地安装；让用户知道恢复时需重新配置凭证。
+			warnings = append(warnings, relative+" was excluded from backup ("+reason+"); reconfigure on restore")
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if info.IsDir() {
 			return nil

@@ -2,8 +2,10 @@ package resourcelibrary
 
 import (
 	"archive/zip"
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,7 +42,7 @@ func TestExportDirectory_拒绝私人文件并保留可移植清单(t *testing.T
 	}
 }
 
-func TestExportDirectory_拒绝符号链接特殊文件和白名单外路径(t *testing.T) {
+func TestExportDirectory_拒绝符号链接但允许自定义目录(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export demo.\n---\n\n# Demo\n")
 	if err := os.Symlink(filepath.Join(root, "SKILL.md"), filepath.Join(root, "references")); err != nil {
@@ -52,8 +54,89 @@ func TestExportDirectory_拒绝符号链接特殊文件和白名单外路径(t *
 	os.Remove(filepath.Join(root, "references"))
 
 	writeFile(t, filepath.Join(root, "bin", "tool"), "#!/bin/sh\n")
-	if _, err := ExportDirectory(root, KindSkill, filepath.Join(t.TempDir(), "bin.zip")); err == nil {
-		t.Fatal("export accepted a path outside the allowlist")
+	writeFile(t, filepath.Join(root, "test_run.py"), "print('ok')\n")
+	writeFile(t, filepath.Join(root, "package.json"), "{}\n")
+	writeFile(t, filepath.Join(root, "docs", "使用说明.md"), "# 正常文档\n")
+	if err := os.Chmod(filepath.Join(root, "bin", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "skill.zip")
+	exported, err := ExportDirectory(root, KindSkill, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InspectArchive(archive, KindSkill); err != nil {
+		t.Fatal(err)
+	}
+	if !hasFile(exported.Files, "bin/tool") || !hasFile(exported.Files, "test_run.py") ||
+		!hasFile(exported.Files, "package.json") || !hasFile(exported.Files, "docs/使用说明.md") {
+		t.Fatalf("expected installed package files in backup, got %#v", exported.Files)
+	}
+	zipReader, err := zip.OpenReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range zipReader.File {
+		if file.Name == "bin/tool" && file.Mode().Perm()&0o111 == 0 {
+			t.Errorf("export lost executable bit: %s %v", file.Name, file.Mode())
+		}
+	}
+	if err := zipReader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
+	if err != nil || !preview.Valid {
+		t.Fatalf("native validator rejected exported Skill: preview=%#v err=%v", preview, err)
+	}
+}
+
+func TestExportDirectory_忽略本地缓存但保留普通元数据并保持摘要一致(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Backup.\n---\n\n# Demo\n\nBody.\n")
+	writeFile(t, filepath.Join(root, "run.py"), "print('hello')\n")
+	writeFile(t, filepath.Join(root, "_meta.json"), "{}\n")
+	for _, relative := range []string{
+		".clawhub/origin.json", ".git/config", "node_modules/lib/package.json",
+		"__pycache__/run.pyc", "scripts/__pycache__/cache.pyc", ".env.example",
+	} {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(relative)), "generated\n")
+	}
+
+	archive := filepath.Join(t.TempDir(), "skill.zip")
+	exported, err := ExportDirectory(root, KindSkill, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Files) != 3 || !hasFile(exported.Files, "_meta.json") || len(exported.Warnings) == 0 {
+		t.Fatalf("unexpected filtered files: %#v", exported.Files)
+	}
+	for _, name := range zipNames(t, archive) {
+		if strings.Contains(name, "__pycache__") || strings.Contains(name, "node_modules") ||
+			strings.Contains(name, ".clawhub") || strings.Contains(name, ".git/") || name == ".env.example" {
+			t.Fatalf("backup included local-only data: %s", name)
+		}
+	}
+	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
+	if err != nil || !preview.Valid {
+		t.Fatalf("snapshot digest differs from native installer: preview=%#v err=%v", preview, err)
+	}
+}
+
+func TestExportDirectory_敏感文件仍然禁止但普通源码可备份(t *testing.T) {
+	for _, secret := range []string{
+		".env", ".env.production", "credentials/token.json", "secret.json", "private_key.yaml",
+		".ssh/config", "state.sqlite", "auth-session.json", "token.json", "credentials.csv",
+	} {
+		t.Run(secret, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export.\n---\n\n# Demo\n")
+			writeFile(t, filepath.Join(root, "session.ts"), "export const start = true;\n")
+			writeFile(t, filepath.Join(root, filepath.FromSlash(secret)), "private content")
+			_, err := ExportDirectory(root, KindSkill, filepath.Join(t.TempDir(), "skill.zip"))
+			if !errorCode(err, "PACKAGE_PRIVATE_DATA") {
+				t.Fatalf("sensitive path %s was not rejected: %v", secret, err)
+			}
+		})
 	}
 }
 
@@ -75,6 +158,31 @@ func TestExportDirectory_插件只导出可移植快照(t *testing.T) {
 	writeFile(t, filepath.Join(root, "notes.pem"), "-----BEGIN PRIVATE KEY-----\n")
 	if _, err := ExportDirectory(root, KindPlugin, filepath.Join(t.TempDir(), "plugin.zip")); err == nil {
 		t.Fatal("export accepted a private key file")
+	}
+}
+
+func TestExportDirectory_Plugin保留原生安装器支持的文件(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "plugin.json"), `{"name":"demo-plugin","version":"1.0.0","description":"Backup"}`)
+	writeFile(t, filepath.Join(root, "package.json"), `{"name":"demo-plugin"}`)
+	writeFile(t, filepath.Join(root, "skills", "demo-skill", "SKILL.md"), "---\nname: demo-skill\ndescription: Backup.\n---\n\n# Demo\n\nBody.\n")
+	writeFile(t, filepath.Join(root, "skills", "demo-skill", "test_run.py"), "print('ok')\n")
+	writeFile(t, filepath.Join(root, "assets", "说明.md"), "# 文档\n")
+	archive := filepath.Join(t.TempDir(), "plugin.zip")
+	exported, err := ExportDirectory(root, KindPlugin, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := InspectArchive(archive, KindPlugin); err != nil {
+		t.Fatal(err)
+	}
+	if !hasFile(exported.Files, "package.json") || !hasFile(exported.Files, "skills/demo-skill/test_run.py") {
+		t.Fatalf("plugin files lost: %#v", exported.Files)
+	}
+	manager := newPluginManager(t, filepath.Join(t.TempDir(), "agentdock-home"))
+	review := manager.ValidateSource(context.Background(), archive)
+	if !review.Valid || review.PackageDigest != exported.ContentDigest {
+		t.Fatalf("native Plugin validator disagrees with backup digest: %#v, exported=%s", review, exported.ContentDigest)
 	}
 }
 

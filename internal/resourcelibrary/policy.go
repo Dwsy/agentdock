@@ -6,9 +6,6 @@ import (
 	"os"
 	"path"
 	"strings"
-	"unicode"
-
-	"github.com/uvwt/agentdock/internal/skillspec"
 )
 
 const (
@@ -55,143 +52,57 @@ func rejectedPrivatePath(relative string) string {
 		switch extension {
 		case ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks":
 			return "key material"
+		case ".sqlite", ".db", ".bak", ".session":
+			return "private runtime data"
 		}
 		if segment == ".env" || strings.HasPrefix(segment, ".env.") || extension == ".env" {
 			return "environment file"
 		}
-		switch stem {
+		// 以普通源码命名的 session.ts、key.go 不属于凭证文件。
+		// 只拒绝明确的私有目录/文件名，以及常见配置格式中的凭证文件。
+		switch segment {
 		case "cookie", "cookies", "session", "sessions", "secret", "secrets",
 			"credential", "credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
-			"key", "privatekey", "private_key":
+			"key", "privatekey", "private_key", "skill-data", ".skill-data",
+			".agentdock", ".ssh", ".aws", ".kube":
 			return "private runtime data"
 		}
-		if strings.HasSuffix(stem, "-key") || strings.HasSuffix(stem, "_key") ||
-			strings.HasSuffix(stem, "-secret") || strings.HasSuffix(stem, "_secret") ||
-			strings.HasSuffix(stem, "-cookie") || strings.HasSuffix(stem, "_cookie") ||
-			strings.HasSuffix(stem, "-session") || strings.HasSuffix(stem, "_session") {
-			return "private runtime data"
-		}
-		switch segment {
-		case "skill-data", ".skill-data", "__pycache__", "node_modules":
-			return "private runtime data"
+		switch extension {
+		case ".json", ".yaml", ".yml", ".toml", ".ini", ".txt", ".csv", ".xml", ".conf", ".cfg", ".properties":
+			switch stem {
+			case "cookie", "cookies", "session", "sessions", "secret", "secrets",
+				"credential", "credentials", "privatekey", "private_key", "key",
+				"token", "tokens", "access_token", "api_key", "password", "passwords":
+				return "private runtime data"
+			}
+			if strings.HasSuffix(stem, "-key") || strings.HasSuffix(stem, "_key") ||
+				strings.HasSuffix(stem, "-secret") || strings.HasSuffix(stem, "_secret") ||
+				strings.HasSuffix(stem, "-cookie") || strings.HasSuffix(stem, "_cookie") ||
+				strings.HasSuffix(stem, "-session") || strings.HasSuffix(stem, "_session") {
+				return "private runtime data"
+			}
 		}
 	}
 	return ""
 }
 
-func allowedSkillFile(relative string) bool {
-	switch relative {
-	case "SKILL.md", "run.py", "README.md", "LICENSE", "LICENSE.md", "NOTICE", "NOTICE.md":
-		return true
-	}
-	directory, ok := allowedSkillDirectory(path.Dir(relative))
-	if !ok {
-		return false
-	}
-	base := path.Base(relative)
-	if !safePathSegment(base) {
-		return false
-	}
-	extension := strings.ToLower(path.Ext(base))
-	if extension == "" {
-		// 无扩展名只允许出现在 scripts 下，避免把任意二进制放进可移植快照。
-		return directory == "scripts"
-	}
-	return allowedSourceExtension(extension)
-}
-
-func allowedSkillDirectory(directory string) (string, bool) {
-	if directory == "." {
-		return "", false
-	}
-	parts := strings.Split(directory, "/")
-	switch parts[0] {
-	case "references", "scripts", "tests", "assets", "templates", "docs":
-	default:
-		return "", false
-	}
-	for _, part := range parts {
-		if !safePathSegment(part) {
-			return "", false
-		}
-	}
-	return parts[0], true
-}
-
-func allowedPluginFile(relative string) bool {
-	switch relative {
-	case "plugin.json", "mcp.json", "README.md", "LICENSE", "LICENSE.md", "NOTICE", "NOTICE.md":
-		return true
-	}
-	parts := strings.Split(relative, "/")
-	if len(parts) < 3 || parts[0] != "skills" {
-		return false
-	}
-	if err := skillspec.ValidateName(parts[1]); err != nil {
-		return false
-	}
-	if !safePathSegment(parts[1]) {
-		return false
-	}
-	inner := strings.Join(parts[2:], "/")
-	return allowedSkillFile(inner)
-}
-
-func allowedDirectory(kind, relative string) bool {
-	relative = path.Clean(relative)
-	if kind == KindPlugin {
-		parts := strings.Split(relative, "/")
-		if parts[0] != "skills" || !safePathSegment(parts[0]) {
-			return false
-		}
-		if len(parts) == 1 {
+// ignoredExportPath 是与源码分离的缓存、安装来源元数据和环境示例文件。
+// 它们不属于可恢复的包内容，不应因本机产生的缓存而阻断整份备份。
+// 不忽略用户脚本、任意目录或普通点文件；敏感数据由 rejectedPrivatePath 明确拒绝。
+func ignoredExportPath(relative string) bool {
+	for _, segment := range strings.Split(strings.ToLower(relative), "/") {
+		switch segment {
+		case ".git", ".hg", ".svn", ".clawhub", "__pycache__", "node_modules",
+			".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv",
+			".env.example", ".env.sample", ".env.template":
 			return true
 		}
-		if err := skillspec.ValidateName(parts[1]); err != nil || !safePathSegment(parts[1]) {
-			return false
-		}
-		if len(parts) == 2 {
-			return true
-		}
-		_, ok := allowedSkillDirectory(strings.Join(parts[2:], "/"))
-		return ok
 	}
-	_, ok := allowedSkillDirectory(relative)
-	return ok
-}
-
-func allowedFile(kind, relative string) bool {
-	if kind == KindPlugin {
-		return allowedPluginFile(relative)
-	}
-	return allowedSkillFile(relative)
-}
-
-func safePathSegment(segment string) bool {
-	if segment == "" || segment == "." || segment == ".." || strings.HasPrefix(segment, ".") {
-		return false
-	}
-	for _, char := range segment {
-		if char > unicode.MaxASCII || char < 0x20 || char == '\\' || char == ':' {
-			return false
-		}
-	}
-	return true
-}
-
-func allowedSourceExtension(extension string) bool {
-	switch extension {
-	case ".md", ".txt", ".py", ".sh", ".bash", ".json", ".yml", ".yaml", ".toml",
-		".js", ".ts", ".html", ".css", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp",
-		".csv", ".xml", ".tpl", ".jinja", ".go", ".rs", ".rb", ".php", ".ps1":
-		return true
-	default:
-		return false
-	}
+	return false
 }
 
 // InspectArchive 在把候选 ZIP 交给原生安装器之前拒绝明显危险的包。
-// 扩展名白名单只用于导出；入站包仍由 Skill/Plugin 安装器决定能不能安装，
+// 不对入站包施加源码扩展名白名单；Skill/Plugin 能否安装仍由原生安装器决定，
 // 这里负责路径穿越、符号链接、特殊文件、私钥文件名、文件数和解压大小。
 func InspectArchive(archivePath, kind string) error {
 	reader, err := zip.OpenReader(archivePath)

@@ -3,16 +3,20 @@ package resourcelibrary
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	skills "github.com/uvwt/agentdock/internal/skill"
 )
 
-// Export 是一份只含可移植源码快照的 ZIP 摘要。本地绝对路径不会出现在结果里。
+// Export 是受管资源的安全备份 ZIP 摘要。本地绝对路径不会出现在结果里。
 type Export struct {
 	Files         []FileEntry
 	Warnings      []string
@@ -41,7 +45,7 @@ var devicePathMarkers = []string{
 }
 
 // ExportDirectory 把一个已安装的受管目录打成 ZIP。
-// 白名单按递归路径生效：不在可移植快照里的文件会让整个导出失败，而不是静默丢弃。
+// 安装器已经接纳的源码不再经第二套扩展名或目录白名单筛选，只排除缓存并拒绝私有数据。
 func ExportDirectory(root, kind, destination string) (Export, error) {
 	if kind != KindSkill && kind != KindPlugin {
 		return Export{}, failed("PACKAGE_KIND_INVALID", "validation", "package kind must be skill or plugin")
@@ -65,11 +69,8 @@ func ExportDirectory(root, kind, destination string) (Export, error) {
 		return Export{}, failed("PACKAGE_INVALID", "validation", "managed Plugin export requires plugin.json")
 	}
 
-	contentDigest, err := skills.DigestPackageContent(root)
-	if err != nil {
-		return Export{}, failed("PACKAGE_INVALID", "validation", "managed package content digest failed")
-	}
-	size, archiveDigest, err := writePortableZip(root, files, destination, archiveLimit(kind))
+	// 内容摘要必须对应实际备份的文件；原目录可能包含被忽略的缓存与来源元数据。
+	size, archiveDigest, contentDigest, err := writePortableZip(root, files, destination, archiveLimit(kind))
 	if err != nil {
 		return Export{}, err
 	}
@@ -116,6 +117,14 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 			}
 			return nil
 		}
+		if ignoredExportPath(relative) {
+			// 不默默丢掉可能需要重新安装的依赖，向 Cloud 明确报告被排除的路径。
+			warnings = append(warnings, relative+" was excluded from backup (local metadata or generated dependencies)")
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		// os.Root 逐段拒绝符号链接替换。WalkDir 看到的类型不够，因为中间目录可能在遍历后被换掉。
 		info, err := fsRoot.Lstat(relative)
 		if err != nil {
@@ -124,13 +133,13 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return failedf("PACKAGE_INVALID", "validation", "symlink is not allowed: %s", relative)
 		}
+		if err := validateArchiveName(relative); err != nil {
+			return err
+		}
 		if reason := rejectedPrivatePath(relative); reason != "" {
 			return failedf("PACKAGE_PRIVATE_DATA", "validation", "export refused %s: %s", reason, relative)
 		}
 		if info.IsDir() {
-			if !allowedDirectory(kind, relative) {
-				return failedf("PACKAGE_NOT_PORTABLE", "validation", "path is outside the portable allowlist: %s", relative)
-			}
 			return nil
 		}
 		if !info.Mode().IsRegular() {
@@ -139,9 +148,6 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 		// Skill 只有根目录 SKILL.md 是 Manifest；嵌套同名文件会让 Cloud/安装器产生歧义。
 		if kind == KindSkill && relative != "SKILL.md" && strings.HasSuffix(relative, "/SKILL.md") {
 			return failedf("PACKAGE_INVALID", "validation", "managed Skill export contains a nested SKILL.md: %s", relative)
-		}
-		if !allowedFile(kind, relative) {
-			return failedf("PACKAGE_NOT_PORTABLE", "validation", "path is outside the portable allowlist: %s", relative)
 		}
 		if info.Size() < 0 || total > extractLimit(kind)-info.Size() {
 			return failedf("PACKAGE_INVALID", "validation", "package exceeds %d bytes", extractLimit(kind))
@@ -164,6 +170,7 @@ func collectPortableFiles(root, kind string) ([]FileEntry, []string, error) {
 	if len(files) == 0 {
 		return nil, nil, failed("PACKAGE_INVALID", "validation", "managed package has no portable files")
 	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
 	return files, warnings, nil
 }
 
@@ -212,28 +219,35 @@ func scanHardcodedSecrets(root *os.Root, relative string) ([]string, error) {
 	return warnings, nil
 }
 
-func writePortableZip(root string, files []FileEntry, destination string, limit int64) (int64, string, error) {
+func writePortableZip(root string, files []FileEntry, destination string, limit int64) (int64, string, string, error) {
 	fsRoot, err := os.OpenRoot(root)
 	if err != nil {
-		return 0, "", failed("PACKAGE_INVALID", "validation", "managed package directory cannot be opened")
+		return 0, "", "", failed("PACKAGE_INVALID", "validation", "managed package directory cannot be opened")
 	}
 	defer fsRoot.Close()
 
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
-		return 0, "", failed("PACKAGE_INVALID", "validation", "export archive cannot be created")
+		return 0, "", "", failed("PACKAGE_INVALID", "validation", "export archive cannot be created")
 	}
 	writer := zip.NewWriter(output)
 	failedWrite := false
+	// 使用安装器相同的路径、权限和内容序列计算 digest，避免缓存过滤后摘要仍指向原目录。
+	contentHash := sha256.New()
 	for _, file := range files {
 		info, err := fsRoot.Lstat(file.Path)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() != file.Size {
 			failedWrite = true
 			break
 		}
 		header := &zip.FileHeader{Name: file.Path, Method: zip.Deflate}
-		// 0600 与安装器的内容摘要权限掩码一致，避免导出后再安装产生虚假 digest 差异。
-		header.SetMode(0o600)
+		// 与原生 ZIP 安装器的权限归一化一致，保留脚本可执行位。
+		mode := info.Mode().Perm() & 0o755
+		if mode == 0 {
+			mode = 0o600
+		}
+		header.SetMode(mode)
+		fmt.Fprintf(contentHash, "%s\x00%o\x00%d\x00", file.Path, mode, file.Size)
 		entry, err := writer.CreateHeader(header)
 		if err != nil {
 			failedWrite = true
@@ -244,32 +258,33 @@ func writePortableZip(root string, files []FileEntry, destination string, limit 
 			failedWrite = true
 			break
 		}
-		_, copyErr := io.Copy(entry, io.LimitReader(source, extractLimit(KindPlugin)+1))
+		written, copyErr := io.Copy(io.MultiWriter(entry, contentHash), io.LimitReader(source, file.Size+1))
 		closeErr := source.Close()
-		if copyErr != nil || closeErr != nil {
+		if copyErr != nil || closeErr != nil || written != file.Size {
 			failedWrite = true
 			break
 		}
+		_, _ = contentHash.Write([]byte{0})
 	}
 	closeZipErr := writer.Close()
 	closeFileErr := output.Close()
 	if failedWrite || closeZipErr != nil || closeFileErr != nil {
 		_ = os.Remove(destination)
-		return 0, "", failed("PACKAGE_INVALID", "validation", "export archive cannot be written")
+		return 0, "", "", failed("PACKAGE_INVALID", "validation", "export archive cannot be written")
 	}
 	info, err := os.Lstat(destination)
 	if err != nil {
 		_ = os.Remove(destination)
-		return 0, "", failed("PACKAGE_INVALID", "validation", "export archive cannot be inspected")
+		return 0, "", "", failed("PACKAGE_INVALID", "validation", "export archive cannot be inspected")
 	}
 	if info.Size() > limit || !info.Mode().IsRegular() {
 		_ = os.Remove(destination)
-		return 0, "", failedf("PACKAGE_INVALID", "validation", "export archive exceeds %d bytes", limit)
+		return 0, "", "", failedf("PACKAGE_INVALID", "validation", "export archive exceeds %d bytes", limit)
 	}
 	digest, err := skills.DigestFile(destination)
 	if err != nil {
 		_ = os.Remove(destination)
-		return 0, "", failed("PACKAGE_INVALID", "validation", "export archive digest failed")
+		return 0, "", "", failed("PACKAGE_INVALID", "validation", "export archive digest failed")
 	}
-	return info.Size(), digest, nil
+	return info.Size(), digest, "sha256:" + hex.EncodeToString(contentHash.Sum(nil)), nil
 }

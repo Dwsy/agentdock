@@ -59,10 +59,11 @@ func rejectedPrivatePath(relative string) string {
 			return "environment file"
 		}
 		// 以普通源码命名的 session.ts、key.go 不属于凭证文件。
-		// 只拒绝明确的私有目录/文件名，以及常见配置格式中的凭证文件。
+		// credentials/、secrets/ 可能包含正常资源文件，目录名不作为整目录拒绝的依据；
+		// 其中明确的密钥、Token、凭证文件名仍按下方规则过滤。
 		switch segment {
-		case "cookie", "cookies", "session", "sessions", "secret", "secrets",
-			"credential", "credentials", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+		case "cookie", "cookies", "session", "sessions", "secret",
+			"credential", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 			"key", "privatekey", "private_key", "skill-data", ".skill-data",
 			".agentdock", ".ssh", ".aws", ".kube":
 			return "private runtime data"

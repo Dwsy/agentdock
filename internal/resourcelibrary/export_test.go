@@ -135,6 +135,33 @@ func TestExportDirectory_忽略本地缓存但保留普通元数据并保持摘�
 	}
 }
 
+func TestExportDirectory_敏感命名目录仍可保存正常资源文件(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: demo\n---\n\n# Demo\n")
+	writeFile(t, filepath.Join(root, "credentials", "README.md"), "Document non-secret configuration.\n")
+	writeFile(t, filepath.Join(root, "secrets", "examples", "mock.json"), "{}\n")
+	writeFile(t, filepath.Join(root, "credentials", "token.json"), "DO_NOT_BACK_UP")
+	writeFile(t, filepath.Join(root, "secrets", "private.key"), "DO_NOT_BACK_UP")
+	archive := filepath.Join(t.TempDir(), "backup.zip")
+	exported, err := ExportDirectory(root, KindSkill, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFile(exported.Files, "credentials/README.md") || !hasFile(exported.Files, "secrets/examples/mock.json") {
+		t.Fatalf("non-secret files were omitted: %#v", exported.Files)
+	}
+	if hasFile(exported.Files, "credentials/token.json") || hasFile(exported.Files, "secrets/private.key") {
+		t.Fatalf("private files were included: %#v", exported.Files)
+	}
+	if err := InspectArchive(archive, KindSkill); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
+	if err != nil || !preview.Valid {
+		t.Fatalf("filtered Skill cannot be restored: %#v %v", preview, err)
+	}
+}
+
 func TestExportDirectory_不同私有路径自动排除且不影响普通源码(t *testing.T) {
 	for _, secret := range []string{
 		".env", ".env.production", "credentials/token.json", "secret.json", "private_key.yaml",

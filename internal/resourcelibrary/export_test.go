@@ -108,9 +108,10 @@ func TestExportDirectory_忽略本地缓存但保留普通元数据并保持摘�
 	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Backup.\n---\n\n# Demo\n\nBody.\n")
 	writeFile(t, filepath.Join(root, "run.py"), "print('hello')\n")
 	writeFile(t, filepath.Join(root, "_meta.json"), "{}\n")
+	writeFile(t, filepath.Join(root, ".env.example"), "API_KEY=your-api-key\n")
 	for _, relative := range []string{
 		".clawhub/origin.json", ".git/config", "node_modules/lib/package.json",
-		"__pycache__/run.pyc", "scripts/__pycache__/cache.pyc", ".env.example",
+		"__pycache__/run.pyc", "scripts/__pycache__/cache.pyc",
 	} {
 		writeFile(t, filepath.Join(root, filepath.FromSlash(relative)), "generated\n")
 	}
@@ -120,12 +121,12 @@ func TestExportDirectory_忽略本地缓存但保留普通元数据并保持摘�
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exported.Files) != 3 || !hasFile(exported.Files, "_meta.json") || len(exported.Warnings) == 0 {
+	if len(exported.Files) != 4 || !hasFile(exported.Files, "_meta.json") || !hasFile(exported.Files, ".env.example") || len(exported.Warnings) == 0 {
 		t.Fatalf("unexpected filtered files: %#v", exported.Files)
 	}
 	for _, name := range zipNames(t, archive) {
 		if strings.Contains(name, "__pycache__") || strings.Contains(name, "node_modules") ||
-			strings.Contains(name, ".clawhub") || strings.Contains(name, ".git/") || name == ".env.example" {
+			strings.Contains(name, ".clawhub") || strings.Contains(name, ".git/") {
 			t.Fatalf("backup included local-only data: %s", name)
 		}
 	}

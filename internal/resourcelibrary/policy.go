@@ -55,7 +55,8 @@ func rejectedPrivatePath(relative string) string {
 		case ".sqlite", ".db", ".bak", ".session":
 			return "private runtime data"
 		}
-		if segment == ".env" || strings.HasPrefix(segment, ".env.") || extension == ".env" {
+		if segment == ".env" || (strings.HasPrefix(segment, ".env.") &&
+			segment != ".env.example" && segment != ".env.sample" && segment != ".env.template") || extension == ".env" {
 			return "environment file"
 		}
 		// 以普通源码命名的 session.ts、key.go 不属于凭证文件。
@@ -94,8 +95,7 @@ func ignoredExportPath(relative string) bool {
 	for _, segment := range strings.Split(strings.ToLower(relative), "/") {
 		switch segment {
 		case ".git", ".hg", ".svn", ".clawhub", "__pycache__", "node_modules",
-			".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv",
-			".env.example", ".env.sample", ".env.template":
+			".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv":
 			return true
 		}
 	}

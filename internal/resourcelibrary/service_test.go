@@ -35,6 +35,9 @@ func TestService_导出受管Skill且响应不含本地路径(t *testing.T) {
 	if result["stream_upload_available"] != true || result["transfer"] != "local_grant_only" {
 		t.Fatalf("export transfer = %#v", result)
 	}
+	if _, exists := result["warnings"]; exists {
+		t.Fatalf("export response retained obsolete warnings field: %#v", result)
+	}
 	if strings.Contains(result["archive_digest"].(string), "/") {
 		t.Fatalf("digest leaked a path: %#v", result["archive_digest"])
 	}

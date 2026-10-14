@@ -2,9 +2,9 @@
 
 状态：**开发中，尚未开放远程安装**。NexusDock Cloud 与 AgentDock 都以 `uvwt/agentdock-protocol` 的稳定版本为边界；AgentDock 永远不接受 Cloud Tenant/订阅含义。
 
-## 可移植 Skill / Plugin 与安全边界
+## Skill / Plugin 备份与安全边界
 
-- Skill 仍是纯 `SKILL.md` 资源包，沿用现有本地/URL安装、摘要、文件数和 128 MiB 字节限制。Cloud 修订号不写入 Skill frontmatter。
+- Skill 以安装根目录的 `SKILL.md` 作为当前包的 Manifest；子目录中的同名 `SKILL.md` 只是普通资源文件，不额外注册 Skill。沿用现有本地/URL 安装、摘要、文件数和 128 MiB 字节限制。Cloud 修订号不写入 Skill frontmatter。
 - Plugin 仍是支持 Portable/OpenAI/Claude 的包，保留 `plugin_manage validate` / `install` / `update` 和内容绑定的 `review_token`；压缩包 64 MiB、提取后 256 MiB。Cloud 修订号不覆盖插件 manifest 原版号；同名非-local 版本不同内容仍拒绝。
 - **设备备份保留受管 Skill/Plugin 的完整常规文件**，包括用户提供的配置、依赖、缓存、凭据等内容；不按文件名、目录名、扩展名或内容自动剔除，不进行敏感内容扫描，也不生成此类提示。只沿用原生安装器一致的 ZIP 传输元数据忽略规则，保留路径穿越、符号链接、文件类型和容量安全门禁。Cloud 当前可读取 ZIP，不提供端到端加密。
 - 本地检验需要负责 ZIP 路径穿越、符号链接、文件类型、文件数量、解包大小、插件命令/MCP 配置风险；Cloud 只能展示报告和摘要，不能代替设备安装器。

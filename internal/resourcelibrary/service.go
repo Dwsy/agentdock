@@ -109,7 +109,6 @@ type stagedPackage struct {
 	ReviewToken   string
 	Expires       time.Time
 	Files         []FileEntry
-	Warnings      []string
 	Size          int64
 }
 
@@ -232,7 +231,7 @@ func (s *Service) exportPrepare(request controlRequest) (map[string]any, error) 
 	grant, err := s.remember(stagedPackage{
 		Purpose: purposeExport, Kind: kind, Name: name, Operation: "export",
 		ArchivePath: destination, ArchiveDigest: exported.ArchiveDigest, PackageDigest: exported.ContentDigest,
-		Expires: s.deps.Now().Add(ChallengeTTL), Files: exported.Files, Warnings: exported.Warnings, Size: exported.Size,
+		Expires: s.deps.Now().Add(ChallengeTTL), Files: exported.Files, Size: exported.Size,
 	})
 	if err != nil {
 		_ = os.Remove(destination)
@@ -241,7 +240,7 @@ func (s *Service) exportPrepare(request controlRequest) (map[string]any, error) 
 	return map[string]any{
 		"ok": true, "action": ActionExportPrepare, "kind": kind, "name": name,
 		"archive_digest": exported.ArchiveDigest, "content_digest": exported.ContentDigest,
-		"size": exported.Size, "files": exported.Files, "warnings": exported.Warnings,
+		"size": exported.Size, "files": exported.Files,
 		"download_grant": grant, "download_authorized": true, "expires_at": s.pendingExpiry(grant),
 		"transfer": "local_grant_only", "stream_upload_available": true,
 	}, nil

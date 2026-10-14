@@ -3,55 +3,70 @@ package resourcelibrary
 import (
 	"archive/zip"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
 	"testing"
 )
 
-func TestExportDirectory_自动排除隐私文件而不修改本地Skill(t *testing.T) {
+func TestExportDirectory_完整保留配置文件(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export demo.\n---\n\n# Demo\n\npassword: \"supersecretvalue\"\n")
-	writeFile(t, filepath.Join(root, "references", "guide.md"), "Use a relative path.\n")
-	writeFile(t, filepath.Join(root, ".env"), "TOKEN=real\n")
-	writeFile(t, filepath.Join(root, "credentials", "token.json"), `{"token":"real"}`)
-
-	archive := filepath.Join(t.TempDir(), "skill.zip")
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Demo.\n---\n\n# Demo\n")
+	files := map[string]string{
+		".env": "API_TOKEN=local\n", "credentials/token.json": "{\"token\":\"sample\"}",
+		"secrets/private.key": "private-key-fixture",
+		"config.sqlite":       "fixture-data", "README.md": "Normal document",
+	}
+	for name, content := range files {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(name)), content)
+	}
+	archive := filepath.Join(t.TempDir(), "backup.zip")
 	exported, err := ExportDirectory(root, KindSkill, archive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if exported.Size == 0 || exported.ArchiveDigest == "" || exported.ContentDigest == "" {
-		t.Fatalf("export = %#v", exported)
+	if len(exported.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", exported.Warnings)
 	}
-	if !hasFile(exported.Files, "SKILL.md") || !hasFile(exported.Files, "references/guide.md") {
-		t.Fatalf("files = %#v", exported.Files)
-	}
-	if hasFile(exported.Files, ".env") || hasFile(exported.Files, "credentials/token.json") {
-		t.Fatalf("private data appeared in export manifest: %#v", exported.Files)
-	}
-	if len(exported.Warnings) == 0 {
-		t.Fatal("export must explain that private data was omitted")
-	}
-	warnings := strings.Join(exported.Warnings, "\n")
-	if !strings.Contains(warnings, ".env") || !strings.Contains(warnings, "credentials") ||
-		strings.Contains(warnings, "TOKEN=real") || strings.Contains(warnings, `"token":"real"`) {
-		t.Fatalf("warnings should name excluded paths, never expose values: %s", warnings)
-	}
-	for _, name := range zipNames(t, archive) {
-		if name == ".env" || strings.HasPrefix(name, "credentials/") {
-			t.Fatalf("exported ZIP contains private data: %s", name)
-		}
-	}
-	if actual, err := os.ReadFile(filepath.Join(root, ".env")); err != nil || string(actual) != "TOKEN=real\n" {
-		t.Fatalf("local .env was modified: %q %v", actual, err)
+	if len(exported.Files) != 1+len(files) {
+		t.Fatalf("lost files: %#v", exported.Files)
 	}
 	if err := InspectArchive(archive, KindSkill); err != nil {
-		t.Fatalf("exported ZIP must pass device safety inspection: %v", err)
+		t.Fatal(err)
 	}
 	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
 	if err != nil || !preview.Valid {
-		t.Fatalf("exported ZIP cannot be restored: %#v %v", preview, err)
+		t.Fatalf("native Skill validator rejected complete backup: %#v %v", preview, err)
+	}
+	zipReader, err := zip.OpenReader(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zipReader.Close()
+	for name, content := range files {
+		if !hasFile(exported.Files, name) {
+			t.Fatalf("missing file %s", name)
+		}
+		found := false
+		for _, f := range zipReader.File {
+			if f.Name != name {
+				continue
+			}
+			found = true
+			rc, err := f.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil || string(data) != content {
+				t.Fatalf("%s content mismatch: %v", name, err)
+			}
+		}
+		if !found {
+			t.Fatalf("zip lacks %s", name)
+		}
 	}
 }
 
@@ -90,7 +105,7 @@ func TestExportDirectory_拒绝符号链接但允许自定义目录(t *testing.T
 		t.Fatal(err)
 	}
 	for _, file := range zipReader.File {
-		if file.Name == "bin/tool" && file.Mode().Perm()&0o111 == 0 {
+		if runtime.GOOS != "windows" && file.Name == "bin/tool" && file.Mode().Perm()&0o111 == 0 {
 			t.Errorf("export lost executable bit: %s %v", file.Name, file.Mode())
 		}
 	}
@@ -103,99 +118,72 @@ func TestExportDirectory_拒绝符号链接但允许自定义目录(t *testing.T
 	}
 }
 
-func TestExportDirectory_忽略本地缓存但保留普通元数据并保持摘要一致(t *testing.T) {
+func TestExportDirectory_源码和依赖目录都保留(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Backup.\n---\n\n# Demo\n\nBody.\n")
-	writeFile(t, filepath.Join(root, "run.py"), "print('hello')\n")
-	writeFile(t, filepath.Join(root, "_meta.json"), "{}\n")
-	writeFile(t, filepath.Join(root, ".env.example"), "API_KEY=your-api-key\n")
-	for _, relative := range []string{
-		".clawhub/origin.json", ".git/config", "node_modules/lib/package.json",
-		"__pycache__/run.pyc", "scripts/__pycache__/cache.pyc",
-	} {
-		writeFile(t, filepath.Join(root, filepath.FromSlash(relative)), "generated\n")
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Demo.\n---\n\n# Demo\n")
+	files := []string{
+		"run.py", ".env.example", "_meta.json", ".clawhub/origin.json",
+		".git/config", "node_modules/lib/package.json", "__pycache__/run.pyc",
+		"scripts/__pycache__/cache.pyc",
 	}
-
-	archive := filepath.Join(t.TempDir(), "skill.zip")
-	exported, err := ExportDirectory(root, KindSkill, archive)
-	if err != nil {
-		t.Fatal(err)
+	for _, name := range files {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(name)), "content\n")
 	}
-	if len(exported.Files) != 4 || !hasFile(exported.Files, "_meta.json") || !hasFile(exported.Files, ".env.example") || len(exported.Warnings) == 0 {
-		t.Fatalf("unexpected filtered files: %#v", exported.Files)
-	}
-	for _, name := range zipNames(t, archive) {
-		if strings.Contains(name, "__pycache__") || strings.Contains(name, "node_modules") ||
-			strings.Contains(name, ".clawhub") || strings.Contains(name, ".git/") {
-			t.Fatalf("backup included local-only data: %s", name)
-		}
-	}
-	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
-	if err != nil || !preview.Valid {
-		t.Fatalf("snapshot digest differs from native installer: preview=%#v err=%v", preview, err)
-	}
-}
-
-func TestExportDirectory_敏感命名目录仍可保存正常资源文件(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: demo\n---\n\n# Demo\n")
-	writeFile(t, filepath.Join(root, "credentials", "README.md"), "Document non-secret configuration.\n")
-	writeFile(t, filepath.Join(root, "secrets", "examples", "mock.json"), "{}\n")
-	writeFile(t, filepath.Join(root, "credentials", "token.json"), "DO_NOT_BACK_UP")
-	writeFile(t, filepath.Join(root, "secrets", "private.key"), "DO_NOT_BACK_UP")
 	archive := filepath.Join(t.TempDir(), "backup.zip")
 	exported, err := ExportDirectory(root, KindSkill, archive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasFile(exported.Files, "credentials/README.md") || !hasFile(exported.Files, "secrets/examples/mock.json") {
-		t.Fatalf("non-secret files were omitted: %#v", exported.Files)
+	if len(exported.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", exported.Warnings)
 	}
-	if hasFile(exported.Files, "credentials/token.json") || hasFile(exported.Files, "secrets/private.key") {
-		t.Fatalf("private files were included: %#v", exported.Files)
+	if len(exported.Files) != len(files)+1 {
+		t.Fatalf("unexpected files: %#v", exported.Files)
+	}
+	for _, name := range files {
+		if !hasFile(exported.Files, name) {
+			t.Fatalf("file omitted: %s", name)
+		}
 	}
 	if err := InspectArchive(archive, KindSkill); err != nil {
 		t.Fatal(err)
 	}
-	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
-	if err != nil || !preview.Valid {
-		t.Fatalf("filtered Skill cannot be restored: %#v %v", preview, err)
+}
+
+func TestExportDirectory_目录名称不影响备份(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Demo.\n---\n\n# Demo\n")
+	names := []string{"credentials/README.md", "credentials/token.json", "secrets/private.key", "secrets/examples/mock.json"}
+	for _, name := range names {
+		writeFile(t, filepath.Join(root, filepath.FromSlash(name)), "fixture")
+	}
+	archive := filepath.Join(t.TempDir(), "backup.zip")
+	exported, err := ExportDirectory(root, KindSkill, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		if !hasFile(exported.Files, name) {
+			t.Fatalf("file omitted: %s", name)
+		}
+	}
+	if err := InspectArchive(archive, KindSkill); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestExportDirectory_不同私有路径自动排除且不影响普通源码(t *testing.T) {
-	for _, secret := range []string{
-		".env", ".env.production", "credentials/token.json", "secret.json", "private_key.yaml",
-		".ssh/config", "state.sqlite", "auth-session.json", "token.json", "credentials.csv",
-		"secrets/key.pem", "data/cookies.json", "data/.env", "data/skill-data/state.json",
-	} {
-		t.Run(secret, func(t *testing.T) {
+func TestExportDirectory_敏感文件名不触发额外校验(t *testing.T) {
+	for _, name := range []string{".env", "credentials/token.json", "secret.json", "private_key.yaml", "state.sqlite", "sessions/state.json"} {
+		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export.\n---\n\n# Demo\n")
-			writeFile(t, filepath.Join(root, "session.ts"), "export const start = true;\n")
-			source := filepath.Join(root, filepath.FromSlash(secret))
-			writeFile(t, source, "private content")
-			archive := filepath.Join(t.TempDir(), "skill.zip")
-			exported, err := ExportDirectory(root, KindSkill, archive)
+			writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Demo.\n---\n\n# Demo\n")
+			writeFile(t, filepath.Join(root, filepath.FromSlash(name)), "fixture")
+			exported, err := ExportDirectory(root, KindSkill, filepath.Join(t.TempDir(), "backup.zip"))
 			if err != nil {
-				t.Fatalf("backup should skip private data: %v", err)
-			}
-			if hasFile(exported.Files, secret) || !hasFile(exported.Files, "session.ts") {
-				t.Fatalf("wrong export manifest: %#v", exported.Files)
-			}
-			for _, name := range zipNames(t, archive) {
-				if name == secret {
-					t.Fatalf("private data was uploaded: %s", name)
-				}
-			}
-			if len(exported.Warnings) == 0 {
-				t.Fatal("omitted private files need a visible warning")
-			}
-			if actual, err := os.ReadFile(source); err != nil || string(actual) != "private content" {
-				t.Fatalf("original file was modified: %q %v", actual, err)
-			}
-			if err := InspectArchive(archive, KindSkill); err != nil {
 				t.Fatal(err)
+			}
+			if !hasFile(exported.Files, name) || len(exported.Warnings) != 0 {
+				t.Fatalf("unexpected filtering: %#v", exported)
 			}
 		})
 	}
@@ -212,30 +200,27 @@ func TestExportDirectory_Skill只允许根目录Manifest(t *testing.T) {
 	}
 }
 
-func TestExportDirectory_Plugin也自动排除隐私文件(t *testing.T) {
+func TestExportDirectory_Plugin完整保留配置(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "plugin.json"), `{"name":"demo-plugin","version":"1.0.0","description":"Demo"}`)
-	writeFile(t, filepath.Join(root, "skills", "demo-skill", "SKILL.md"), "---\nname: demo-skill\ndescription: Plugin skill.\n---\n\n# Demo\n\nBody.\n")
-	writeFile(t, filepath.Join(root, "notes.pem"), "-----BEGIN PRIVATE KEY-----\n")
-	writeFile(t, filepath.Join(root, "skills", "demo-skill", ".env"), "API_KEY=secret\n")
+	writeFile(t, filepath.Join(root, "plugin.json"), "{\"name\":\"demo-plugin\",\"version\":\"1.0.0\"}")
+	writeFile(t, filepath.Join(root, "skills", "demo-skill", "SKILL.md"), "---\nname: demo-skill\ndescription: Plugin skill.\n---\n\n# Demo\n")
+	writeFile(t, filepath.Join(root, ".env"), "API_KEY=fixture")
+	writeFile(t, filepath.Join(root, "notes.pem"), "fixture-key")
 	archive := filepath.Join(t.TempDir(), "plugin.zip")
 	exported, err := ExportDirectory(root, KindPlugin, archive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hasFile(exported.Files, "notes.pem") || hasFile(exported.Files, "skills/demo-skill/.env") {
-		t.Fatalf("private Plugin files were included: %#v", exported.Files)
-	}
-	if len(exported.Warnings) < 2 {
-		t.Fatalf("expected omitted-file warnings, got: %#v", exported.Warnings)
+	if !hasFile(exported.Files, ".env") || !hasFile(exported.Files, "notes.pem") || len(exported.Warnings) != 0 {
+		t.Fatalf("plugin filtering: %#v", exported)
 	}
 	if err := InspectArchive(archive, KindPlugin); err != nil {
 		t.Fatal(err)
 	}
-	manager := newPluginManager(t, filepath.Join(t.TempDir(), "agentdock-home"))
+	manager := newPluginManager(t, filepath.Join(t.TempDir(), "home"))
 	review := manager.ValidateSource(context.Background(), archive)
 	if !review.Valid || review.PackageDigest != exported.ContentDigest {
-		t.Fatalf("filtered Plugin must still pass native validation: %#v, exported=%s", review, exported.ContentDigest)
+		t.Fatalf("native Plugin validator rejected complete backup: %#v (digest %s)", review, exported.ContentDigest)
 	}
 }
 
@@ -264,28 +249,23 @@ func TestExportDirectory_Plugin保留原生安装器支持的文件(t *testing.T
 	}
 }
 
-func TestInspectArchive_拒绝路径穿越符号链接和秘密文件(t *testing.T) {
-	traversal := filepath.Join(t.TempDir(), "traversal.zip")
-	writeRawZip(t, traversal, map[string]string{"../evil.txt": "owned"})
-	if err := InspectArchive(traversal, KindSkill); err == nil {
-		t.Fatal("inspect accepted a traversal entry")
+func TestInspectArchive_拒绝危险结构但不拒绝配置文件(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "traversal.zip")
+	writeRawZip(t, bad, map[string]string{"../evil.txt": "fixture"})
+	if err := InspectArchive(bad, KindSkill); err == nil {
+		t.Fatal("accepted traversal")
 	}
-
-	secret := filepath.Join(t.TempDir(), "secret.zip")
-	writeRawZip(t, secret, map[string]string{".env": "TOKEN=real", "SKILL.md": "---\nname: demo-skill\n"})
-	if err := InspectArchive(secret, KindSkill); err == nil {
-		t.Fatal("inspect accepted .env")
-	}
-
 	link := filepath.Join(t.TempDir(), "link.zip")
-	writeSymlinkZip(t, link, "SKILL.md", "outside")
+	writeSymlinkZip(t, link, "link", "outside")
 	if err := InspectArchive(link, KindSkill); err == nil {
-		t.Fatal("inspect accepted a symlink")
+		t.Fatal("accepted symlink")
 	}
-
-	valid := filepath.Join(t.TempDir(), "valid.zip")
-	writeRawZip(t, valid, map[string]string{"SKILL.md": "---\nname: demo-skill\ndescription: Demo.\n---\n\n# Demo\n"})
-	if err := InspectArchive(valid, KindSkill); err != nil {
+	good := filepath.Join(t.TempDir(), "good.zip")
+	writeRawZip(t, good, map[string]string{
+		"SKILL.md": "---\nname: demo-skill\ndescription: Demo.\n---\n\n# Demo\n",
+		".env":     "fixture", "credentials/token.json": "fixture", "secrets/private.key": "fixture",
+	})
+	if err := InspectArchive(good, KindSkill); err != nil {
 		t.Fatal(err)
 	}
 }

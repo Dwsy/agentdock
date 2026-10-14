@@ -6,7 +6,7 @@
 
 - Skill 仍是纯 `SKILL.md` 资源包，沿用现有本地/URL安装、摘要、文件数和 128 MiB 字节限制。Cloud 修订号不写入 Skill frontmatter。
 - Plugin 仍是支持 Portable/OpenAI/Claude 的包，保留 `plugin_manage validate` / `install` / `update` 和内容绑定的 `review_token`；压缩包 64 MiB、提取后 256 MiB。Cloud 修订号不覆盖插件 manifest 原版号；同名非-local 版本不同内容仍拒绝。
-- **受管 Skill/Plugin 默认按实际安装的资源文件导出**，不再用额外的目录/扩展名白名单拒绝正常源码。设备打包时自动排除 Env 真实值、私钥/凭证、session、Cookie、skill-data 和其他私有运行数据，不修改用户本地文件；保留 `.env.example` 等无真实凭据的配置模板；忽略 Git/ClawHub 来源元数据、Python/Node 缓存与本地依赖目录。通过文件名/路径判断的排除项会明确产生告警，恢复时可能需要重新安装依赖或配置环境；Cloud 和设备入站仍拒绝带有这些私密文件的恶意 ZIP。允许文件内疑似硬编码凭证仅提示风险，不能保证自动识别所有秘密。Plugin 附属 Skill 随完整 Plugin 导出。
+- **设备备份保留受管 Skill/Plugin 的完整常规文件**，包括用户提供的配置、依赖、缓存、凭据等内容；不按文件名、目录名、扩展名或内容自动剔除，不进行敏感内容扫描，也不生成此类提示。只沿用原生安装器一致的 ZIP 传输元数据忽略规则，保留路径穿越、符号链接、文件类型和容量安全门禁。Cloud 当前可读取 ZIP，不提供端到端加密。
 - 本地检验需要负责 ZIP 路径穿越、符号链接、文件类型、文件数量、解包大小、插件命令/MCP 配置风险；Cloud 只能展示报告和摘要，不能代替设备安装器。
 - 远程操作必须通过用户在 Cloud 明确确认的、绑定 node_id/操作/包摘要/短有效期的一次性挑战。**现有 `review_token` 是确定性内容标识，不是设备授权或用户确认**；安装前必须复用现有 `InstallReviewedSource` / `UpdateReviewedSource`，验证失败禁止安装。
 - 不把大文件塞进 WebSocket `runtime.request`，只用其传控制与结果；压缩包走限额、鉴权的专用流式传输，支持离线失败、不后台补装；兼容未声明相应能力的旧 AgentDock，旧客户端 Runtime 仍只读。
@@ -19,7 +19,7 @@
 已落地的是设备本地控制面，不是 Cloud 备份或远程安装发布：
 
 - `POST /internal/runtime/resource-library` 只接收不超过 64 KiB 的控制 JSON。未实现 `ResourceLibraryRuntime` 的旧 Runtime 返回 `RESOURCE_LIBRARY_UNSUPPORTED`。
-- `export_prepare` 只导出已安装的受管 Skill/Plugin，遵循原生安装器的包结构并拒绝符号链接、特殊文件；私有运行时文件与缓存在打包前自动排除并返回告警；普通源码目录、文件名、扩展名不受额外限制；内容摘要按实际 ZIP 文件集计算，供后续原生安装器校验。`download_grant` 仍是短时本地句柄，响应不带 ZIP。
+- `export_prepare` 只导出已安装的受管 Skill/Plugin，遵循原生安装器的包结构并拒绝符号链接、特殊文件；资源文件按实际目录打包；普通源码目录、文件名、扩展名不受额外限制；内容摘要按实际 ZIP 文件集计算，供后续原生安装器校验。`download_grant` 仍是短时本地句柄，响应不带 ZIP。
 - `export_upload` 只接受 `{action,upload_url,download_grant}`。它复用该 grant，再次核对 grant 未过期、ZIP 大小和归档摘要未变，然后用已配对 Device Token 以 `PUT`、`Content-Type: application/zip`、`Content-Length` 为实际大小，把文件流式送到 `https://{paired-endpoint}/v1/nodes/library/transfer/{ticket}`。请求结束（成功、失败或超时）后销毁 grant 和 ZIP，同一 grant 不能第二次上传。响应只返回 `size`、`archive_digest` 和 `content_digest`。
 - `install_prepare` 只用已配对 Nexus 的 Device Token，通过现有出站 HTTPS 客户端下载候选 ZIP。其他 Origin、本机和私网地址拒绝。`package_digest` 是可选的预期内容摘要：Cloud 不能重算 Skill/Plugin 原生 digest。原生 validate 成功后，设备把实际 `package_digest` 绑定到一次性挑战；调用方提供了就必须匹配。审核报告和 Plugin `review_token` 仍由原生安装器产生。
 - `install_commit` 仍必须精确匹配确认时的 node、操作、归档摘要、实际 `package_digest`、Plugin `review_token` 和一次性挑战，然后再调用现有 Skill 安装或 Plugin `InstallReviewedSource` / `UpdateReviewedSource`。字段不匹配不消耗挑战。

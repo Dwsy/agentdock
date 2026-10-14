@@ -26,7 +26,7 @@ Open ChatGPT in your browser and manage multiple computers and servers from one 
   <img
     src="./docs/assets/agentdock-multi-device.png"
     alt="AgentDock: operate multiple devices from one AI conversation"
-    width="640"
+    width="800"
   />
 </p>
 

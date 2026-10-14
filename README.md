@@ -82,17 +82,17 @@ See [Install AgentDock](https://uvwt.github.io/agentdock-docs/docs/getting-start
 | macOS | [macOS installation](https://uvwt.github.io/agentdock-docs/docs/getting-started/macos) |
 | Windows | [Graphical Windows installer](https://uvwt.github.io/agentdock-docs/docs/getting-started/windows) |
 
-### Choose a connection option
+### Connect your device
 
-- **Local only:** the client and AgentDock run on the same computer.
-- **Temporary public address:** ChatGPT, a phone, or another remote device needs access and no domain is ready. The address may change after the Tunnel restarts.
-- **Fixed domain:** a stable address for long-term use. Requires a Cloudflare-managed domain and Tunnel Token.
+On macOS and Windows, open **Connections** in the control panel to pair your device with the official remote service. Get a pairing code from the [NexusDock devices page](https://mcp.nexusdock.co/workspace/devices), enter it, and click **Connect**. You can also choose a self-hosted service.
 
-After installation, get the MCP URL and Bearer Token or OAuth sign-in details from the control panel or terminal, then add them to the MCP, Tools, or Connectors settings in your client. Public access must keep authentication enabled. Do not include credentials in screenshots, issues, or public conversations.
+For local MCP or direct public access, open **Settings → Advanced connection**, or use **Advanced connection settings** on the Connections page. This is where you find the local MCP address, access credentials, and Cloudflare settings for a temporary public address or fixed domain. For Linux and Docker, follow the installation documentation to configure the connection.
 
-## Connect an AI client
+## Direct MCP connection
 
-AgentDock exposes tools over MCP Streamable HTTP. The exact client syntax varies, but a typical configuration looks like this:
+When connecting directly, add the MCP address and Bearer Token or OAuth sign-in details to your client's MCP, Tools, or Connectors settings. Public access must keep authentication enabled. Do not include credentials in screenshots, issues, or public conversations.
+
+AgentDock uses MCP Streamable HTTP. The exact client syntax varies; a typical local configuration looks like this:
 
 ```json
 {

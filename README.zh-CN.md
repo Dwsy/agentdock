@@ -85,17 +85,17 @@ AgentDock 不提供聊天界面，也不负责模型推理。它专注于解决�
 | Windows | [Windows 图形安装程序](https://uvwt.github.io/agentdock-docs/zh-CN/docs/getting-started/windows) |
 
 
-### 连接方式如何选择
+### 连接设备
 
-- **仅本机**：客户端和 AgentDock 在同一台电脑上。
-- **临时公网地址**：没有域名，但需要从 ChatGPT、手机或其他设备连接。地址可能在 Tunnel 重启后变化。
-- **固定域名**：长期使用稳定公网地址，需要已接入 Cloudflare 的域名和 Tunnel Token。
+macOS 和 Windows 用户可在控制面板的**连接**页配对到官方远程服务：前往 [NexusDock 设备页](https://mcp.nexusdock.co/workspace/devices)获取配对码，输入后点击**连接**。也可以选择自托管服务。
 
-安装完成后，从控制面板或终端取得 MCP 地址，以及 Bearer Token 或 OAuth 登录信息，再填入客户端的 MCP、Tools 或 Connectors 设置。公网访问必须保留认证，不要把凭据放进截图、Issue 或公开聊天。
+需要本地 MCP 或公网直连时，进入**设置 → 高级连接**，也可从连接页的**高级连接设置**入口进入。在这里查看本地 MCP 地址和访问凭据，并配置 Cloudflare 临时公网地址或固定域名。Linux 和 Docker 用户按安装文档配置连接。
 
-## 接入 AI 客户端
+## MCP 直连
 
-AgentDock 通过 MCP Streamable HTTP 提供工具能力。下面是一个通用配置示例，具体字段格式取决于所使用的 AI 客户端：
+选择直连时，将 MCP 地址及 Bearer Token 或 OAuth 登录信息填入客户端的 MCP、Tools 或 Connectors 设置。公网访问必须保留认证，不要把凭据放进截图、Issue 或公开聊天。
+
+AgentDock 使用 MCP Streamable HTTP。下面是本地连接的通用配置示例，具体字段格式取决于所使用的 AI 客户端：
 
 ```json
 {

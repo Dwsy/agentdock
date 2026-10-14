@@ -124,7 +124,7 @@ AgentDock 使用 MCP Streamable HTTP。下面是本地连接的通用配置示�
 
 ## 感谢赞助商
 
-| <div align="center"><strong>🏆 赞助商 🏆</strong></div> | <div align="center"><strong>介绍</strong></div> |
+| <div align="center"><strong>🏆&nbsp;赞助商&nbsp;🏆</strong></div> | <div align="center"><strong>介绍</strong></div> |
 | :------------- | :------ |
 | <a href="https://www.swiftproxy.net/?ref=agentdock"><img src="./docs/assets/sponsors/swiftproxy-logo.png" width="180" alt="Swiftproxy"></a> | <br>[**Swiftproxy**](https://www.swiftproxy.net/?ref=agentdock)<br>提供高质量动态和静态住宅代理，拥有 9000 万+住宅 IP，覆盖全球 220+ 个地区，支持 HTTP(S)、SOCKS5、IP 轮换与粘性会话，为 AI Agent、浏览器自动化和网页数据采集提供灵活的代理支持。动态住宅代理低至 $0.7/GB，使用优惠码 <code>PROXY90</code> 享受九折优惠。 |
 

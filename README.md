@@ -120,7 +120,7 @@ See the [documentation](https://docs.nexusdock.co/agentdock/) for configuration 
 
 ## Thanks to our sponsors
 
-| <div align="center"><strong>🏆 Sponsors 🏆</strong></div> | <div align="center"><strong>Description</strong></div> |
+| <div align="center"><strong>🏆&nbsp;Sponsors&nbsp;🏆</strong></div> | <div align="center"><strong>Description</strong></div> |
 | :------------- | :------ |
 | <a href="https://www.swiftproxy.net/?ref=agentdock"><img src="./docs/assets/sponsors/swiftproxy-logo.png" width="180" alt="Swiftproxy"></a> | <br>[**Swiftproxy**](https://www.swiftproxy.net/?ref=agentdock)<br>Offers rotating and static residential proxies with 90M+ IPs across 220+ locations. Supporting HTTP(S), SOCKS5, and sticky sessions, it provides flexible proxy solutions for AI agents, browser automation, and web data collection. Plans start at $0.7/GB. Use code <code>PROXY90</code> for 10% off. |
 

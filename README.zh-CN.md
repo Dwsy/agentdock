@@ -26,7 +26,7 @@
   <img
     src="./docs/assets/agentdock-multi-device.png"
     alt="AgentDock：通过一个 AI 对话统一操控多台设备"
-    width="800"
+    width="640"
   />
 </p>
 

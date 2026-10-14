@@ -26,7 +26,7 @@ Open ChatGPT in your browser and manage multiple computers and servers from one 
   <img
     src="./docs/assets/agentdock-multi-device.png"
     alt="AgentDock: operate multiple devices from one AI conversation"
-    width="100%"
+    width="800"
   />
 </p>
 
@@ -132,7 +132,7 @@ Want to support the project or showcase your brand? [Contact the maintainer](mai
 
 | WeChat | Alipay | Buy Me a Coffee |
 | :---: | :---: | :---: |
-| <a href="./docs/assets/donation/wechat-qr.png"><img src="./docs/assets/donation/wechat-qr.png" alt="WeChat" width="200" height="200"></a> | <a href="./docs/assets/donation/alipay-qr.png"><img src="./docs/assets/donation/alipay-qr.png" alt="Alipay" width="200" height="200"></a> | <a href="https://buymeacoffee.com/uvwt"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="250"></a> |
+| <a href="./docs/assets/donation/wechat-qr.png"><img src="./docs/assets/donation/wechat-qr.png" alt="WeChat" width="140" height="140"></a> | <a href="./docs/assets/donation/alipay-qr.png"><img src="./docs/assets/donation/alipay-qr.png" alt="Alipay" width="140" height="140"></a> | <a href="https://buymeacoffee.com/uvwt"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="180"></a> |
 
 ## Star History
 

@@ -109,64 +109,14 @@ AgentDock exposes tools over MCP Streamable HTTP. The exact client syntax varies
 
 ## Core capabilities
 
-### Files and commands
+- **Files and commands:** Read and write files, search code, and run commands on your devices.
+- **Multi-device management:** Connect local computers, servers, and containers to complete work across devices. Pair with NexusDock for a shared entrypoint and project memory.
+- **Browser and desktop automation:** Operate web pages, reuse login sessions, take screenshots, and control macOS desktop applications.
+- **Extensions:** Add tools through Skills and MCP servers. Find official and community Skills in [agentdock-skills](https://github.com/uvwt/agentdock-skills).
+- **Coding assistants:** Connect Codex, Claude, and other supported coding assistants to develop projects on your devices.
+- **Task recovery:** Save progress and checkpoints so long-running work can continue after an interruption.
 
-- Read and search UTF-8 text, traverse directories, and apply structured edits
-- Atomic file writes, path boundaries, and private-directory protection
-- Command execution with timeout and output limits
-- Separate stdout, stderr, and exit status
-- Long-running command sessions, PTY, observation, input, and termination
-- Output truncation and sensitive-value redaction
-- macOS, Linux, Windows, and WSL support
-
-### Skills and dynamic MCP
-
-Official and community Skill sources live in [uvwt/agentdock-skills](https://github.com/uvwt/agentdock-skills). This repository only keeps core Skills that must ship with the AgentDock runtime, including bootstrap/security Skills and the built-in `agentdock-user-guide` official user guide.
-
-- Install, update, and remove current managed Skill content with digest-based no-op and atomic replacement
-- Keep managed, shared, and workspace Skill sources distinct through host-issued `skill_ref` provenance
-- Isolate managed Skill environment variables and persistent data from package content
-- Register, enable, disable, refresh, and remove dynamic MCP servers
-- Streamable HTTP and stdio transports
-- Search tools, inspect schemas, and perform controlled calls
-- Configuration isolation between MCP servers
-
-### Native ACP
-
-AgentDock can optionally act as a native ACP client and host a local coding-agent adapter.
-
-- Desktop control panels provide presets for Codex, Claude, and Grok; host configuration controls whether ACP is enabled and which adapter is selected.
-- Use `acp_session` to create and manage sessions, `acp_prompt` to run and observe prompts, and `acp_interaction` to answer agent permission requests.
-- Optional ACP operations are available only when the connected adapter advertises the corresponding capability.
-- ACP working directories follow the host process or container security boundary rather than an AgentDock filesystem allowlist.
-
-### Browser and desktop automation
-
-- Start, close, and clean up browser sessions
-- Navigate, click, type, select, and wait
-- Inspect page text, interactive elements, errors, and network responses
-- Persist login state, use dedicated browser profiles, and capture screenshots
-- Use system Chrome and macOS desktop automation
-
-### Recoverable tasks
-
-- Persist task state
-- Define explicit goals, steps, and completion conditions
-- Record staged checkpoints
-- Track blockers and resume after interruption
-- Perform final review and evidence-based completion checks
-- Reuse workflow templates
-
-### Recall and NexusDock integration
-
-AgentDock can optionally pair with NexusDock as a multi-device aggregation entrypoint:
-
-- Long-term project memory
-- Runbooks and experience records
-- Workflow templates
-- Private notes
-- Multi-device state coordination
-- Temporary signed Artifact downloads proxied by NexusDock while the source node is online
+See the [documentation](https://docs.nexusdock.co/agentdock/) for configuration and usage details.
 
 ## Runtime directories
 

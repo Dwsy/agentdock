@@ -113,63 +113,14 @@ AgentDock 通过 MCP Streamable HTTP 提供工具能力。下面是一个通用�
 
 ## 核心能力
 
-### 文件与命令
+- **文件与命令**：在设备上读写文件、搜索代码、执行命令。
+- **多设备管理**：连接本机、服务器和容器，跨设备完成任务；可搭配 NexusDock 统一接入并保存项目记忆。
+- **浏览器与桌面**：操作网页、复用登录状态、截图，以及控制 macOS 桌面应用。
+- **能力扩展**：通过 Skills 和 MCP 接入更多工具，官方与社区 Skills 见 [agentdock-skills](https://github.com/uvwt/agentdock-skills)。
+- **编程助手**：连接 Codex、Claude 等受支持的编程助手，在设备上开发项目。
+- **任务恢复**：保存进度和检查点，让长时间任务在中断后继续执行。
 
-- UTF-8 文本读取、搜索、目录遍历和结构化修改
-- 原子文件写入、路径边界和私密目录保护
-- 有超时和输出边界的命令执行
-- 标准输出、标准错误和退出码分离
-- 长时间命令会话、PTY、会话观察、输入和停止
-- 输出截断和敏感信息脱敏
-- macOS、Linux、Windows 与 WSL 支持
-
-### Skill 与动态 MCP
-
-官方与社区 Skill 源码统一维护在 [uvwt/agentdock-skills](https://github.com/uvwt/agentdock-skills)。本仓库只保留必须随 AgentDock 运行时发布的核心 Skill，包括自举/安全相关 Skill，以及内置的 `agentdock-user-guide` 官方用户指南。
-
-- 以 content digest 驱动 managed Skill 当前内容的安装、更新、移除、重复安装 no-op 与原子替换
-- 通过宿主签发的 `skill_ref` 区分 managed、shared、workspace 等同名来源
-- managed Skill 的环境变量和持久数据与包内容隔离
-- 动态 MCP Server 注册、启停、刷新和移除
-- Streamable HTTP 与 stdio 传输
-- 工具搜索、Schema 检查和受控调用
-- MCP Server 之间的配置隔离
-
-### 原生 ACP 
-
-AgentDock 可以选择作为 ACP Client 原生托管本地 Coding Agent adapter。
-
-- 桌面控制面板提供 Codex、Claude 和 Grok 预设；是否启用 ACP 以及选择哪个 adapter 由宿主配置决定。
-- 使用 `acp_session` 创建和管理会话，使用 `acp_prompt` 发起并观察 prompt，使用 `acp_interaction` 响应 Agent 的权限请求。
-- 可选 ACP 操作只会在已连接 adapter 声明相应能力时开放。
-- ACP 工作目录遵循宿主进程或容器的安全边界，而不是 AgentDock 文件系统 allowlist。
-
-### 浏览器与桌面自动化
-
-- 浏览器会话启动、关闭和清理
-- 页面跳转、点击、输入、选择和等待
-- 页面文本、可交互元素、错误和网络响应检查
-- 登录状态、持久化浏览器 Profile 和截图
-- macOS 系统 Chrome 与桌面自动化支持
-
-### 可恢复任务
-
-- 持久化任务状态
-- 明确的目标、步骤和完成条件
-- 分阶段检查点
-- 阻塞原因记录和中断恢复
-- 最终审查与完成验证
-- 可复用工作流模板
-
-### Recall 与 NexusDock 集成
-
-AgentDock 可以选择与 NexusDock 配对，将它作为多设备汇总入口：
-
-- 长期项目记忆
-- 运行手册和经验记录
-- 工作流模板
-- 私密笔记
-- 多设备状态协同
+配置与使用详情见[在线文档](https://docs.nexusdock.co/agentdock/)。
 
 ## 运行目录
 

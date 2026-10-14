@@ -142,7 +142,7 @@ func TestInstallInvalidCandidateLeavesCurrentContentUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	invalid := writeSkillSource(t, "demo-skill", "Invalid", map[string]string{".env": "SECRET=value\n"})
+	invalid := writeSkillSource(t, "demo-skill", "Invalid", map[string]string{"agentdock.yaml": "legacy\n"})
 	if _, err := manager.Install(context.Background(), InstallRequest{Source: invalid}); err == nil {
 		t.Fatal("invalid update succeeded")
 	}
@@ -159,11 +159,10 @@ func TestInstallInvalidCandidateLeavesCurrentContentUnchanged(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsLegacyManifestAndPrivateEnv(t *testing.T) {
+func TestValidateRejectsReservedManifests(t *testing.T) {
 	manager := newManagerForTest(t)
 	for name, extra := range map[string]map[string]string{
 		"legacy manifest": {"agentdock.yaml": "legacy\n"},
-		"private env":     {".env": "SECRET=value\n"},
 		"legacy receipt":  {".agentdock-install.json": "{}\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -176,6 +175,19 @@ func TestValidateRejectsLegacyManifestAndPrivateEnv(t *testing.T) {
 				t.Fatalf("invalid package passed validation: %#v", result)
 			}
 		})
+	}
+}
+
+func TestInstallPreservesEnvironmentFile(t *testing.T) {
+	manager := newManagerForTest(t)
+	source := writeSkillSource(t, "demo-skill", "Demo", map[string]string{".env": "SECRET=fixture-value\n"})
+	result, err := manager.Install(context.Background(), InstallRequest{Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := os.ReadFile(filepath.Join(result.Path, ".env"))
+	if err != nil || string(actual) != "SECRET=fixture-value\n" {
+		t.Fatalf("installed environment file does not match: %q %v", actual, err)
 	}
 }
 

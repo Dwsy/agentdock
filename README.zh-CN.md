@@ -32,13 +32,9 @@
 
 ## AgentDock 是什么
 
-AgentDock 是一个面向 AI Agent 的独立工具运行层。
+AgentDock 是连接 AI 助手与真实设备的桥梁，让 AI 在你的电脑和服务器上执行任务。
 
 它为本地电脑、远程服务器与容器环境提供统一、安全、可控的文件、命令、Git、Skill、MCP、浏览器自动化和任务执行能力。配置多台 AgentDock，还能跨设备协同，把原本要在多机之间来回切换的工作，收敛到一次对话里完成。
-
-AgentDock 不提供聊天界面，也不负责模型推理。它专注于解决一件事：
-
-> 让 AI Agent 在明确的权限边界内操作真实环境，并返回结构化、可追踪、可验证的执行结果。
 
 ```text
               ChatGPT / Claude / Codex
@@ -60,12 +56,9 @@ AgentDock 不提供聊天界面，也不负责模型推理。它专注于解决�
 - 用网页版 ChatGPT 直接管理多台电脑与服务器，无需分别 SSH 登录来回操作
 - 在真实设备上写代码、改项目、跑测试并操作 Git，执行发生在本机或服务器，不依赖专用编程 Agent 额度
 - 让 AI 管理 VPS、Docker 服务、反向代理和部署配置
-- 让 AI 检查日志、进程、端口和真实运行状态
 - 让 AI 操作登录后的网页与 macOS 桌面应用
-- 配置多台 AgentDock，在一次对话中完成跨设备协同任务
 - 通过 Skill 和动态 MCP 扩展外部能力
 - 保存长时间任务的执行状态，并在中断后继续
-- 用同一套工具模型连接 macOS、Linux、Windows 与容器环境
 - 等等
 
 
@@ -152,10 +145,7 @@ AgentDock 使用 MCP Streamable HTTP。下面是本地连接的通用配置示�
 ## 相关链接
 
 - [Documentation](https://docs.nexusdock.co/agentdock/)
-- [Documentation source](https://github.com/uvwt/agentdock-docs)
 - [GitHub Releases](https://github.com/uvwt/agentdock/releases)
-- [GitHub Container Registry](https://github.com/uvwt/agentdock/pkgs/container/agentdock)
-- [Docker Hub](https://hub.docker.com/r/agentdockio/agentdock)
 - [Linux Do](https://linux.do/)
 
 ## License

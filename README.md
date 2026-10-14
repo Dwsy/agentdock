@@ -32,13 +32,9 @@ Open ChatGPT in your browser and manage multiple computers and servers from one 
 
 ## What is AgentDock?
 
-AgentDock is an independent tool runtime for AI agents.
+AgentDock connects AI assistants to your computers and servers so they can carry out tasks on your devices.
 
 It provides unified, secure, and controlled file, command, Git, Skill, MCP, browser automation, and task execution across local computers, remote servers, and containers. Connect multiple AgentDock instances to coordinate work across devices and finish multi-machine workflows in a single conversation.
-
-AgentDock does not provide a chat interface or perform model inference. It focuses on one responsibility:
-
-> Let AI agents operate real environments within explicit permission boundaries and return structured, traceable, and verifiable results.
 
 ```text
               ChatGPT / Claude / Codex
@@ -60,12 +56,9 @@ AgentDock does not provide a chat interface or perform model inference. It focus
 - Manage multiple computers and servers directly from ChatGPT without repeatedly switching SSH sessions
 - Write code, modify projects, run tests, and operate Git in the real local or remote environment without depending on a dedicated coding-agent quota
 - Manage VPS hosts, Docker services, reverse proxies, and deployment configuration
-- Inspect logs, processes, ports, and actual runtime state
 - Operate authenticated web pages and macOS desktop applications
-- Connect multiple AgentDock instances and coordinate cross-device work in one conversation
 - Extend capabilities through Skills and dynamic MCP servers
 - Persist long-running task state and continue after an interruption
-- Use the same tool model across macOS, Linux, Windows, and containers
 - And more
 
 ## Quick start
@@ -148,10 +141,7 @@ Want to support the project or showcase your brand? [Contact the maintainer](mai
 ## Related links
 
 - [Documentation](https://docs.nexusdock.co/agentdock/)
-- [Documentation source](https://github.com/uvwt/agentdock-docs)
 - [GitHub Releases](https://github.com/uvwt/agentdock/releases)
-- [GitHub Container Registry](https://github.com/uvwt/agentdock/pkgs/container/agentdock)
-- [Docker Hub](https://hub.docker.com/r/agentdockio/agentdock)
 - [Linux Do](https://linux.do/)
 
 ## License

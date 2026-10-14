@@ -26,9 +26,6 @@ func TestExportDirectory_完整保留配置文件(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exported.Warnings) != 0 {
-		t.Fatalf("unexpected warnings: %#v", exported.Warnings)
-	}
 	if len(exported.Files) != 1+len(files) {
 		t.Fatalf("lost files: %#v", exported.Files)
 	}
@@ -134,9 +131,6 @@ func TestExportDirectory_源码和依赖目录都保留(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exported.Warnings) != 0 {
-		t.Fatalf("unexpected warnings: %#v", exported.Warnings)
-	}
 	if len(exported.Files) != len(files)+1 {
 		t.Fatalf("unexpected files: %#v", exported.Files)
 	}
@@ -182,21 +176,29 @@ func TestExportDirectory_敏感文件名不触发额外校验(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !hasFile(exported.Files, name) || len(exported.Warnings) != 0 {
-				t.Fatalf("unexpected filtering: %#v", exported)
+			if !hasFile(exported.Files, name) {
+				t.Fatalf("file omitted: %#v", exported)
 			}
 		})
 	}
 }
 
-func TestExportDirectory_Skill只允许根目录Manifest(t *testing.T) {
+func TestExportDirectory_嵌套Skill文档作为普通资源保留(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export demo.\n---\n")
-	writeFile(t, filepath.Join(root, "docs", "SKILL.md"), "---\nname: stale-copy\ndescription: Old manifest.\n---\n")
+	writeFile(t, filepath.Join(root, "SKILL.md"), "---\nname: demo-skill\ndescription: Export demo.\n---\n\n# Demo\n")
+	writeFile(t, filepath.Join(root, "docs", "SKILL.md"), "---\nname: example-only\ndescription: Example document.\n---\n\n# Example\n")
 
-	_, err := ExportDirectory(root, KindSkill, filepath.Join(t.TempDir(), "skill.zip"))
-	if err == nil || !errorCode(err, "PACKAGE_INVALID") {
-		t.Fatalf("nested SKILL.md error = %v", err)
+	archive := filepath.Join(t.TempDir(), "skill.zip")
+	exported, err := ExportDirectory(root, KindSkill, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasFile(exported.Files, "docs/SKILL.md") {
+		t.Fatalf("nested SKILL.md was omitted: %#v", exported.Files)
+	}
+	preview, err := validateSkillArchive(t, archive, exported.ArchiveDigest, "demo-skill", exported.ContentDigest)
+	if err != nil || !preview.Valid {
+		t.Fatalf("native Skill validator rejected nested resource document: %#v %v", preview, err)
 	}
 }
 
@@ -211,8 +213,8 @@ func TestExportDirectory_Plugin完整保留配置(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasFile(exported.Files, ".env") || !hasFile(exported.Files, "notes.pem") || len(exported.Warnings) != 0 {
-		t.Fatalf("plugin filtering: %#v", exported)
+	if !hasFile(exported.Files, ".env") || !hasFile(exported.Files, "notes.pem") {
+		t.Fatalf("plugin files lost: %#v", exported.Files)
 	}
 	if err := InspectArchive(archive, KindPlugin); err != nil {
 		t.Fatal(err)

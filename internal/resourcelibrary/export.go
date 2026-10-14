@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	skills "github.com/uvwt/agentdock/internal/skill"
 )
@@ -17,7 +16,6 @@ import (
 // Export 是受管资源的安全备份 ZIP 摘要。本地绝对路径不会出现在结果里。
 type Export struct {
 	Files         []FileEntry
-	Warnings      []string
 	Size          int64
 	ArchiveDigest string
 	ContentDigest string
@@ -42,7 +40,7 @@ func ExportDirectory(root, kind, destination string) (Export, error) {
 		return Export{}, failed("PACKAGE_INVALID", "validation", "managed package must be a regular directory")
 	}
 
-	files, err := collectPortableFiles(root, kind)
+	files, err := collectBackupFiles(root, kind)
 	if err != nil {
 		return Export{}, err
 	}
@@ -54,7 +52,7 @@ func ExportDirectory(root, kind, destination string) (Export, error) {
 	}
 
 	// 摘要按实际文件集计算，原生安装器仅忽略操作系统 ZIP 传输元数据。
-	size, archiveDigest, contentDigest, err := writePortableZip(root, files, destination, archiveLimit(kind))
+	size, archiveDigest, contentDigest, err := writeBackupZip(root, files, destination, archiveLimit(kind))
 	if err != nil {
 		return Export{}, err
 	}
@@ -73,7 +71,7 @@ func hasFile(files []FileEntry, name string) bool {
 	return false
 }
 
-func collectPortableFiles(root, kind string) ([]FileEntry, error) {
+func collectBackupFiles(root, kind string) ([]FileEntry, error) {
 	fsRoot, err := os.OpenRoot(root)
 	if err != nil {
 		return nil, failed("PACKAGE_INVALID", "validation", "managed package directory cannot be opened")
@@ -117,10 +115,6 @@ func collectPortableFiles(root, kind string) ([]FileEntry, error) {
 		if !info.Mode().IsRegular() {
 			return failedf("PACKAGE_INVALID", "validation", "special file is not allowed: %s", relative)
 		}
-		// Skill 只有根目录 SKILL.md 是 Manifest；嵌套同名文件会让 Cloud/安装器产生歧义。
-		if kind == KindSkill && relative != "SKILL.md" && strings.HasSuffix(relative, "/SKILL.md") {
-			return failedf("PACKAGE_INVALID", "validation", "managed Skill export contains a nested SKILL.md: %s", relative)
-		}
 		if info.Size() < 0 || total > extractLimit(kind)-info.Size() {
 			return failedf("PACKAGE_INVALID", "validation", "package exceeds %d bytes", extractLimit(kind))
 		}
@@ -141,7 +135,7 @@ func collectPortableFiles(root, kind string) ([]FileEntry, error) {
 	return files, nil
 }
 
-func writePortableZip(root string, files []FileEntry, destination string, limit int64) (int64, string, string, error) {
+func writeBackupZip(root string, files []FileEntry, destination string, limit int64) (int64, string, string, error) {
 	fsRoot, err := os.OpenRoot(root)
 	if err != nil {
 		return 0, "", "", failed("PACKAGE_INVALID", "validation", "managed package directory cannot be opened")

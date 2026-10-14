@@ -2,7 +2,7 @@
 
 [English](./README.md) | 简体中文
 
-<img src="./docs/assets/agentdock-logo.png" alt="AgentDock logo" width="128" />
+<img src="./packaging/assets/agentdock.png" alt="AgentDock logo" width="128" />
 
 # AgentDock MCP
 
@@ -178,48 +178,21 @@ AgentDock 可以选择与 NexusDock 配对，将它作为多设备汇总入口�
 | `~/AgentDock` | 相对文件操作的默认工作目录 |
 | `~/.agentdock` | AgentDock 状态、配置、会话和扩展数据 |
 
-## 端口说明
+## 感谢赞助商
 
-Docker、原生安装和本地开发的默认 MCP 地址：
+| <div align="center"><strong>🏆 赞助商 🏆</strong></div> | <div align="center"><strong>介绍</strong></div> |
+| :------------- | :------ |
+| <a href="https://www.swiftproxy.net/?ref=agentdock"><img src="./docs/assets/sponsors/swiftproxy-logo.png" width="180" alt="Swiftproxy"></a> | <br>[**Swiftproxy**](https://www.swiftproxy.net/?ref=agentdock)<br>提供高质量动态和静态住宅代理，拥有 9000 万+住宅 IP，覆盖全球 220+ 个地区，支持 HTTP(S)、SOCKS5、IP 轮换与粘性会话，为 AI Agent、浏览器自动化和网页数据采集提供灵活的代理支持。动态住宅代理低至 $0.7/GB，使用优惠码 <code>PROXY90</code> 享受九折优惠。 |
 
-`http://127.0.0.1:8765/mcp`
-
-端口可以通过配置调整，客户端应以实际部署配置为准。
-
-公网部署必须启用 Bearer Token 或 OAuth 认证并使用 HTTPS，不要将未认证的 MCP 服务暴露到公网。
-
-## 开发与贡献
-
-提交代码前运行完整检查：
-
-```bash
-make check
-```
-
-项目使用 GitHub Actions 持续执行测试、静态检查、构建和发布验证。
-
-用户文档独立维护在 [`uvwt/agentdock-docs`](https://github.com/uvwt/agentdock-docs)。修改用户可见行为、配置参数、安装方式或工具 Schema 时，应同步更新对应文档。
-
-涉及设备配对、跨节点工具路由、Recall 或 Workflow 等集成能力时，可能还需协同修改独立仓库 [`uvwt/nexusdock`](https://github.com/uvwt/nexusdock)。两者共享的协议维护在 [`uvwt/agentdock-protocol`](https://github.com/uvwt/agentdock-protocol)。变更共享接口或数据结构时，应先更新协议定义，再同步两端实现与协议依赖版本，核对兼容性并更新对应文档，在 PR 中关联跨仓库改动。
-
-提交问题或功能建议请使用 [GitHub Issues](https://github.com/uvwt/agentdock/issues)。
+想支持项目或展示品牌？[联系维护者](mailto:t80980@gmail.com)。
 
 ## 支持项目
 
 <p>如果 <b>AgentDock</b> 对您有帮助，请考虑为它点个 <b>Star</b> ⭐，感谢您的支持</p>
-<table>
-<thead>
-<tr>
-<th align="center">微信(WeChat)</th>
-<th align="center">支付宝(Alipay)</th>
-</tr>
-</thead>
-<tbody><tr>
-<td align="center"><img src="./docs/assets/donation/wechat-cropped.JPG" alt="微信赞助二维码" height="200"></td>
-<td align="center"><img src="./docs/assets/donation/alipay.JPG" alt="支付宝赞助二维码" height="200"></td>
-</tr>
-</tbody>
-</table>
+
+| 微信赞赏 | 支付宝 | Buy Me a Coffee |
+| :---: | :---: | :---: |
+| <a href="./docs/assets/donation/wechat-qr.png"><img src="./docs/assets/donation/wechat-qr.png" alt="微信赞赏" width="200" height="200"></a> | <a href="./docs/assets/donation/alipay-qr.png"><img src="./docs/assets/donation/alipay-qr.png" alt="支付宝" width="200" height="200"></a> | <a href="https://buymeacoffee.com/uvwt"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="250"></a> |
 
 ## Star 趋势
 

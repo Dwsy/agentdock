@@ -2,7 +2,7 @@
 
 English | [简体中文](./README.zh-CN.md)
 
-<img src="./docs/assets/agentdock-logo.png" alt="AgentDock logo" width="128" />
+<img src="./packaging/assets/agentdock.png" alt="AgentDock logo" width="128" />
 
 # AgentDock MCP
 
@@ -175,48 +175,21 @@ AgentDock can optionally pair with NexusDock as a multi-device aggregation entry
 | `~/AgentDock` | Default working directory for relative file operations |
 | `~/.agentdock` | AgentDock state, configuration, sessions, and extension data |
 
-## Ports
+## Thanks to our sponsors
 
-Default MCP URL for Docker, native installs, and local development:
+| <div align="center"><strong>🏆 Sponsors 🏆</strong></div> | <div align="center"><strong>Description</strong></div> |
+| :------------- | :------ |
+| <a href="https://www.swiftproxy.net/?ref=agentdock"><img src="./docs/assets/sponsors/swiftproxy-logo.png" width="180" alt="Swiftproxy"></a> | <br>[**Swiftproxy**](https://www.swiftproxy.net/?ref=agentdock)<br>Offers rotating and static residential proxies with 90M+ IPs across 220+ locations. Supporting HTTP(S), SOCKS5, and sticky sessions, it provides flexible proxy solutions for AI agents, browser automation, and web data collection. Plans start at $0.7/GB. Use code <code>PROXY90</code> for 10% off. |
 
-`http://127.0.0.1:8765/mcp`
-
-Ports are configurable. Clients must use the address defined by the actual deployment.
-
-For public deployments, enable Bearer Token or OAuth authentication and use HTTPS. Never expose an unauthenticated MCP service to the public internet.
-
-## Development and contribution
-
-Run the full check before submitting code:
-
-```bash
-make check
-```
-
-GitHub Actions continuously run tests, static checks, builds, and release validation.
-
-User documentation is maintained separately in [`uvwt/agentdock-docs`](https://github.com/uvwt/agentdock-docs). Changes to user-visible behavior, configuration, installation, or tool schemas should update the matching documentation in the same change set.
-
-Changes involving device pairing, cross-node tool routing, Recall, or Workflow integrations may also require coordinated changes in [`uvwt/nexusdock`](https://github.com/uvwt/nexusdock). The shared protocol is maintained in [`uvwt/agentdock-protocol`](https://github.com/uvwt/agentdock-protocol). When changing shared interfaces or data structures, update the protocol definitions first, then align both implementations and their protocol dependency versions, check compatibility, update the corresponding documentation, and link related cross-repository changes in the PR.
-
-Submit bugs and feature requests through [GitHub Issues](https://github.com/uvwt/agentdock/issues).
+Want to support the project or showcase your brand? [Contact the maintainer](mailto:t80980@gmail.com).
 
 ## Support the project
 
 <p>If <b>AgentDock</b> helps you, please consider giving it a <b>Star</b> ⭐. Thank you for your support</p>
-<table>
-<thead>
-<tr>
-<th align="center">WeChat</th>
-<th align="center">Alipay</th>
-</tr>
-</thead>
-<tbody><tr>
-<td align="center"><img src="./docs/assets/donation/wechat-cropped.JPG" alt="WeChat donation QR code" height="200"></td>
-<td align="center"><img src="./docs/assets/donation/alipay.JPG" alt="Alipay donation QR code" height="200"></td>
-</tr>
-</tbody>
-</table>
+
+| WeChat | Alipay | Buy Me a Coffee |
+| :---: | :---: | :---: |
+| <a href="./docs/assets/donation/wechat-qr.png"><img src="./docs/assets/donation/wechat-qr.png" alt="WeChat" width="200" height="200"></a> | <a href="./docs/assets/donation/alipay-qr.png"><img src="./docs/assets/donation/alipay-qr.png" alt="Alipay" width="200" height="200"></a> | <a href="https://buymeacoffee.com/uvwt"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" width="250"></a> |
 
 ## Star History
 

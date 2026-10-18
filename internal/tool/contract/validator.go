@@ -2,25 +2,13 @@ package contract
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strconv"
-	"strings"
 
-	jsonschema "github.com/santhosh-tekuri/jsonschema/v6"
-	"github.com/santhosh-tekuri/jsonschema/v6/kind"
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
-const inputSchemaResource = "urn:agentdock:tool-input-schema"
-
 type InputValidator struct {
-	schema *jsonschema.Schema
-}
-
-type localSchemaLoader struct{}
-
-func (localSchemaLoader) Load(url string) (any, error) {
-	return nil, fmt.Errorf("external schema reference is not allowed: %s", url)
+	resolved *jsonschema.Resolved
 }
 
 func CompileInputSchema(raw map[string]any) (*InputValidator, error) {
@@ -39,26 +27,20 @@ func CompileInputSchema(raw map[string]any) (*InputValidator, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode inputSchema: %w", err)
 	}
-	var schemaJSON any
-	if err := json.Unmarshal(encoded, &schemaJSON); err != nil {
+	var schema jsonschema.Schema
+	if err := json.Unmarshal(encoded, &schema); err != nil {
 		return nil, fmt.Errorf("decode inputSchema: %w", err)
 	}
 
-	compiler := jsonschema.NewCompiler()
-	compiler.DefaultDraft(jsonschema.Draft2020)
-	compiler.UseLoader(localSchemaLoader{})
-	if err := compiler.AddResource(inputSchemaResource, schemaJSON); err != nil {
-		return nil, fmt.Errorf("load inputSchema: %w", err)
-	}
-	compiled, err := compiler.Compile(inputSchemaResource)
+	resolved, err := schema.Resolve(nil)
 	if err != nil {
 		return nil, fmt.Errorf("compile inputSchema: %w", err)
 	}
-	return &InputValidator{schema: compiled}, nil
+	return &InputValidator{resolved: resolved}, nil
 }
 
 func (v *InputValidator) Validate(arguments map[string]any) error {
-	if v == nil || v.schema == nil {
+	if v == nil || v.resolved == nil {
 		return fmt.Errorf("input validator is not initialized")
 	}
 	if arguments == nil {
@@ -75,27 +57,7 @@ func (v *InputValidator) Validate(arguments map[string]any) error {
 	if err := json.Unmarshal(raw, &normalized); err != nil {
 		return fmt.Errorf("decode tool arguments: %w", err)
 	}
-	return v.schema.Validate(normalized)
-}
-
-func CompactValidationError(err error) string {
-	var validationErr *jsonschema.ValidationError
-	if !errors.As(err, &validationErr) {
-		return strings.Join(strings.Fields(err.Error()), " ")
-	}
-	leaf := firstSchemaErrorLeaf(validationErr)
-	path := schemaInstancePath(leaf.InstanceLocation)
-	switch failure := leaf.ErrorKind.(type) {
-	case *kind.Required:
-		if len(failure.Missing) > 0 {
-			return path + "." + failure.Missing[0] + " is required"
-		}
-	case *kind.Type:
-		if len(failure.Want) > 0 {
-			return path + " must be " + strings.Join(failure.Want, " or ")
-		}
-	}
-	return strings.Join(strings.Fields(leaf.Error()), " ")
+	return v.resolved.Validate(normalized)
 }
 
 func schemaRootAllowsObject(rawType any) bool {
@@ -173,27 +135,4 @@ func appendNullType(value any) any {
 	default:
 		return value
 	}
-}
-
-func firstSchemaErrorLeaf(err *jsonschema.ValidationError) *jsonschema.ValidationError {
-	for len(err.Causes) > 0 {
-		err = err.Causes[0]
-	}
-	return err
-}
-
-func schemaInstancePath(parts []string) string {
-	var path strings.Builder
-	path.WriteByte('$')
-	for _, part := range parts {
-		if _, err := strconv.Atoi(part); err == nil {
-			path.WriteByte('[')
-			path.WriteString(part)
-			path.WriteByte(']')
-			continue
-		}
-		path.WriteByte('.')
-		path.WriteString(part)
-	}
-	return path.String()
 }

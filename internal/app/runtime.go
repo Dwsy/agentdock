@@ -319,7 +319,7 @@ func (r *Runtime) validateToolArguments(name string, args map[string]any) error 
 			"INVALID_ARGUMENT",
 			"tool arguments do not match the declared input schema",
 			"validation",
-			map[string]any{"tool": name, "reason": toolcontract.CompactValidationError(err)},
+			map[string]any{"tool": name, "reason": err.Error()},
 		)
 	}
 	return nil

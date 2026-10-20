@@ -33,7 +33,7 @@ func validateToolArguments(tool Tool, arguments map[string]any) error {
 			"MCP_ARGUMENT_INVALID",
 			"MCP tool arguments do not match the discovered input schema",
 			false,
-			map[string]any{"tool": tool.Name, "reason": err.Error()},
+			map[string]any{"tool": tool.Name, "reason": toolcontract.CompactValidationError(err)},
 			err,
 		)
 	}

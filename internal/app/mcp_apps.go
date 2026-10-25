@@ -39,13 +39,8 @@ var toolUIBindings = map[string]UIBinding{
 	"workspace_context": {ResourceURI: protocol.WorkspaceUIResourceURI, Compact: &UITrigger{}},
 	"file_edit":         {ResourceURI: protocol.FileChangeUIResourceURI},
 	"task_create":       {ResourceURI: protocol.TaskProgressUIResourceURI, Compact: &UITrigger{}},
-	"task_manage": {
-		ResourceURI: protocol.TaskProgressUIResourceURI,
-		Action:      "create",
-		Compact:     &UITrigger{Action: "create"},
-	},
-	"acp_session": {ResourceURI: protocol.ACPStatusUIResourceURI, Compact: &UITrigger{}},
-	"acp_prompt":  {ResourceURI: protocol.ACPPromptUIResourceURI, Compact: &UITrigger{}},
+	"acp_session":       {ResourceURI: protocol.ACPStatusUIResourceURI, Compact: &UITrigger{}},
+	"acp_prompt":        {ResourceURI: protocol.ACPPromptUIResourceURI, Compact: &UITrigger{}},
 	"workflow_template_manage": {
 		ResourceURI: protocol.WorkflowUIResourceURI,
 		Action:      "match",

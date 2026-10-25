@@ -10,6 +10,7 @@ import (
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	protocol "github.com/uvwt/agentdock-protocol"
+	"github.com/uvwt/agentdock-protocol/mcpapps"
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/config"
 )
@@ -38,32 +39,6 @@ func assertToolUIResource(t *testing.T, tool *mcpsdk.Tool, uri string, allowedMe
 		if !allowed[key] {
 			t.Fatalf("%s has unexpected tool metadata %q: %#v", tool.Name, key, tool.Meta)
 		}
-	}
-}
-
-func assertAppOnlyTool(t *testing.T, tool *mcpsdk.Tool) {
-	t.Helper()
-	if tool == nil {
-		t.Fatal("app-only tool is nil")
-	}
-	ui, ok := tool.Meta["ui"].(map[string]any)
-	if !ok {
-		t.Fatalf("%s ui metadata = %#v", tool.Name, tool.Meta["ui"])
-	}
-	visibility, ok := ui["visibility"].([]any)
-	if !ok {
-		if typed, typedOK := ui["visibility"].([]string); typedOK {
-			if len(typed) == 1 && typed[0] == "app" {
-				return
-			}
-		}
-		t.Fatalf("%s visibility = %#v", tool.Name, ui["visibility"])
-	}
-	if len(visibility) != 1 || visibility[0] != "app" {
-		t.Fatalf("%s visibility = %#v, want [app]", tool.Name, visibility)
-	}
-	if ui["resourceUri"] != nil {
-		t.Fatalf("%s app-only helper must not bind a resource: %#v", tool.Name, ui)
 	}
 }
 
@@ -207,19 +182,19 @@ func TestMCPAppsCanBeDisabledWithoutRemovingTools(t *testing.T) {
 	}
 }
 
-func TestTaskProgressAppHTMLPollsAppOnlySnapshot(t *testing.T) {
-	html := taskProgressAppHTML()
-	for _, marker := range []string{
-		`rpcRequest("tools/call",{name:"task_snapshot"`,
-		`data.action!=="create"`,
-		`document.hidden`,
-		`String(task.status||"")==="completed"`,
-		`message.method==="ui/resource-teardown"`,
-	} {
-		if !strings.Contains(html, marker) {
-			t.Fatalf("task progress MCP App missing live refresh marker %q", marker)
+func TestTaskProgressAppUsesSharedLiveRenderer(t *testing.T) {
+	server := &Server{cfg: config.Config{MCPAppsMode: config.MCPAppsModeFull}}
+	want := mcpapps.HTML("task_progress", "Task")
+	for _, definition := range server.appResourceDefinitions() {
+		if definition.URI != protocol.TaskProgressUIResourceURI {
+			continue
 		}
+		if definition.HTML != want {
+			t.Fatal("Task Progress resource must use the shared protocol renderer without AgentDock-side HTML patching")
+		}
+		return
 	}
+	t.Fatal("Task Progress resource is not registered")
 }
 
 func TestMCPAppsEnabledModesUseSingleLiveTaskCard(t *testing.T) {
@@ -244,18 +219,15 @@ func TestMCPAppsEnabledModesUseSingleLiveTaskCard(t *testing.T) {
 			} else if ui := tool.Meta["ui"]; ui != nil {
 				t.Fatalf("task_manage should not attach descriptor UI in %s mode: %#v", mode, ui)
 			}
-			assertAppOnlyTool(t, tools["task_snapshot"])
+			if tools["task_snapshot"] != nil {
+				t.Fatal("task_snapshot should not be exposed; the live card reads task_manage action=get")
+			}
 
 			taskDef, ok := harness.runtime.ToolDefinition("task_manage")
 			if !ok {
 				t.Fatal("task_manage definition missing")
 			}
-			createMeta := toolResultMetadata(taskDef, map[string]any{"action": "create"}, mode)
-			ui, ok := createMeta["ui"].(map[string]any)
-			if !ok || ui["resourceUri"] != protocol.TaskProgressUIResourceURI {
-				t.Fatalf("legacy task_manage create UI metadata in %s mode = %#v", mode, createMeta)
-			}
-			for _, action := range []string{"list", "get", "checkpoint", "block", "resume", "final_review", "complete"} {
+			for _, action := range []string{"create", "list", "get", "checkpoint", "block", "resume", "final_review", "complete"} {
 				if meta := toolResultMetadata(taskDef, map[string]any{"action": action}, mode); len(meta) != 0 {
 					t.Fatalf("task %s should not attach another Task UI in %s mode: %#v", action, mode, meta)
 				}
@@ -289,14 +261,16 @@ func TestMCPAppsCompactFiltersBindingsButKeepsResources(t *testing.T) {
 			}
 		}
 	}
-	assertAppOnlyTool(t, tools["task_snapshot"])
+	if tools["task_snapshot"] != nil {
+		t.Fatal("task_snapshot should not be exposed in compact mode")
+	}
 	assertToolUIResource(t, tools["file_publish"], protocol.ArtifactUIResourceURI, "file_arg_rewrite_paths", "openai/fileParams")
 
 	taskDef, ok := harness.runtime.ToolDefinition("task_manage")
 	if !ok {
 		t.Fatal("task_manage definition missing")
 	}
-	for _, action := range []string{"list", "get", "checkpoint", "block", "resume", "final_review", "complete"} {
+	for _, action := range []string{"create", "list", "get", "checkpoint", "block", "resume", "final_review", "complete"} {
 		if meta := toolResultMetadata(taskDef, map[string]any{"action": action}, config.MCPAppsModeCompact); len(meta) != 0 {
 			t.Fatalf("task %s should not attach UI in compact mode: %#v", action, meta)
 		}
@@ -661,6 +635,19 @@ func TestMCPAppsBindResourcesDirectlyToBusinessTools(t *testing.T) {
 	createdTaskStructured, ok := createdTask.StructuredContent.(map[string]any)
 	if !ok || createdTaskStructured["action"] != "create" || createdTaskStructured["view"] != nil || createdTaskStructured["task_summary"] == nil {
 		t.Fatalf("task_create structuredContent = %#v", createdTask.StructuredContent)
+	}
+	taskID, _ := createdTaskStructured["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("task_create returned no task_id: %#v", createdTaskStructured)
+	}
+	readTask, err := harness.session.CallTool(t.Context(), &mcpsdk.CallToolParams{
+		Name: "task_manage", Arguments: map[string]any{"action": "get", "task_id": taskID},
+	})
+	if err != nil || readTask.IsError {
+		t.Fatalf("task_manage get result=%#v err=%v", readTask, err)
+	}
+	if ui := readTask.Meta["ui"]; ui != nil {
+		t.Fatalf("task_manage get must refresh the existing card without attaching another UI: %#v", readTask.Meta)
 	}
 	listedTasks, err := harness.session.CallTool(t.Context(), &mcpsdk.CallToolParams{Name: "task_manage", Arguments: map[string]any{"action": "list"}})
 	if err != nil || listedTasks.IsError {

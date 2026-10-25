@@ -13,10 +13,6 @@ type LearningCheckRequest struct {
 	OnFailure   string `json:"on_failure"`
 }
 
-type SnapshotRequest struct {
-	TaskID string `json:"task_id"`
-}
-
 type CreateRequest struct {
 	Title                string                 `json:"title"`
 	Goal                 string                 `json:"goal"`

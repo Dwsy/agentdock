@@ -86,27 +86,6 @@ func TestRuntimeOutputContractDefaultToolSuccessPaths(t *testing.T) {
 	}
 }
 
-func TestRuntimeOutputContractTaskSnapshot(t *testing.T) {
-	runtime := newRuntimeValidationTestRuntime(t)
-	created, err := runtime.Call(context.Background(), "task_create", map[string]any{
-		"title":                 "Snapshot contract",
-		"goal":                  "verify app-only task reads",
-		"completion_conditions": []string{"snapshot validates"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	taskID, _ := created["task_id"].(string)
-	if taskID == "" {
-		t.Fatalf("task_create returned no task_id: %#v", created)
-	}
-	result, err := runtime.Call(context.Background(), "task_snapshot", map[string]any{"task_id": taskID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertToolResultMatchestestOutputSchema(t, "task_snapshot", result)
-}
-
 func TestRuntimeOutputContractRecallReadMaintain(t *testing.T) {
 	store := map[string]string{
 		"devices/test.md": "---\ntype: test\n---\n\n# Contract\n",

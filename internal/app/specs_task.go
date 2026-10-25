@@ -14,9 +14,6 @@ func taskManageToolSpecs() []ToolSpec {
 		{Name: "task_manage", Contract: taskToolContract, Title: "Manage recoverable tasks", Description: "Persist substantial AgentDock tasks and update live step progress with checkpoint.", Annotations: mutatingToolAnnotations(false, false), Handler: typedToolHandler("task_manage", func(ctx context.Context, r *Runtime, request tooltask.ManageRequest) (Result, error) {
 			return r.taskTools.Manage(ctx, request)
 		})},
-		{Name: "task_snapshot", Contract: taskToolContract, Title: "Read task snapshot", Description: "Read the latest authoritative compact state for one task. Reserved for MCP Apps task progress refresh.", UIVisibility: []string{"app"}, Annotations: readOnlyToolAnnotations(false), Availability: requiresMCPApps, Handler: typedToolHandler("task_snapshot", func(ctx context.Context, r *Runtime, request tooltask.SnapshotRequest) (Result, error) {
-			return r.taskTools.Snapshot(ctx, request)
-		})},
 	}
 }
 

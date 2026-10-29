@@ -127,7 +127,7 @@ codesign --verify --deep --strict "$TARGET"
 # ad-hoc 签名重签后 cdhash 变化，SMAppService 里记录的 LWCR 不匹配，launchd 会以
 # OS_REASON_CODESIGNING 拒绝 spawn；手工 bootstrap 的 job 不经过该约束。
 # launchd 只接受 /tmp 下、扩展名为 .plist 且权限 644 的文件：mktemp 默认落在
-# $TMPDIR（/var/folders/...）且权限 600，且无 .plist 后缀时 bootstrap 会以
+# ${TMPDIR}（/var/folders/...）且权限 600，且无 .plist 后缀时 bootstrap 会以
 # Input/output error 失败。
 BOOTSTRAP_PLIST="$(mktemp /tmp/agentdock-core.XXXXXX).plist"
 mv "${BOOTSTRAP_PLIST%.plist}" "$BOOTSTRAP_PLIST"

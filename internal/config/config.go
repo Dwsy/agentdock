@@ -25,6 +25,45 @@ const (
 	maxOAuthAccessTokenTTLSeconds     = int64(999999 * 24 * 60 * 60)
 )
 
+// TraceMode 控制工具调用 trace 的保留方式：off 不采集，memory 只保留在
+// 进程内环形索引，disk 额外批量追加 JSONL 并按保留天数清理。
+type TraceMode string
+
+const (
+	TraceModeOff    TraceMode = "off"
+	TraceModeMemory TraceMode = "memory"
+	TraceModeDisk   TraceMode = "disk"
+)
+
+const (
+	defaultTraceRetentionDays = 3
+	defaultTraceBufferSize    = 32
+	defaultTraceFlushMS       = 1000
+	defaultTraceMaxRecords    = 2000
+	maxTraceRetentionDays     = 30
+)
+
+func ParseTraceMode(value string) (TraceMode, error) {
+	mode := TraceMode(strings.ToLower(strings.TrimSpace(value)))
+	if mode == "" {
+		return TraceModeOff, nil
+	}
+	switch mode {
+	case TraceModeOff, TraceModeMemory, TraceModeDisk:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported trace mode %q; expected off, memory, or disk", value)
+	}
+}
+
+func traceModeFromEnv() (TraceMode, error) {
+	mode, err := ParseTraceMode(os.Getenv("AGENTDOCK_TRACE_MODE"))
+	if err != nil {
+		return "", fmt.Errorf("AGENTDOCK_TRACE_MODE: %w", err)
+	}
+	return mode, nil
+}
+
 type MCPAppsMode string
 
 const (
@@ -94,6 +133,11 @@ type Config struct {
 	ACPInteractionMS             int
 	Stdio                        bool
 	TrustedProxyCIDRs            []string
+	TraceMode                    TraceMode
+	TraceRetentionDays           int
+	TraceBufferSize              int
+	TraceFlushMS                 int
+	TraceMaxRecords              int
 }
 
 // ACPProfile 表示一个可独立运行、独立持久化会话的 ACP 实例。
@@ -118,6 +162,26 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	browserReuseExistingCDP, err := getenvBool("AGENTDOCK_BROWSER_REUSE_EXISTING_CDP", false)
+	if err != nil {
+		return Config{}, err
+	}
+	traceMode, err := traceModeFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	traceRetentionDays, err := getenvInt("AGENTDOCK_TRACE_RETENTION_DAYS", defaultTraceRetentionDays)
+	if err != nil {
+		return Config{}, err
+	}
+	traceBufferSize, err := getenvInt("AGENTDOCK_TRACE_BUFFER_SIZE", defaultTraceBufferSize)
+	if err != nil {
+		return Config{}, err
+	}
+	traceFlushMS, err := getenvInt("AGENTDOCK_TRACE_FLUSH_MS", defaultTraceFlushMS)
+	if err != nil {
+		return Config{}, err
+	}
+	traceMaxRecords, err := getenvInt("AGENTDOCK_TRACE_MAX_RECORDS", defaultTraceMaxRecords)
 	if err != nil {
 		return Config{}, err
 	}
@@ -199,6 +263,11 @@ func FromEnv() (Config, error) {
 		ACPInteractionMS:             acpInteractionMS,
 		Stdio:                        stdio,
 		TrustedProxyCIDRs:            splitCommaSeparated(os.Getenv("AGENTDOCK_TRUSTED_PROXY_CIDRS")),
+		TraceMode:                    traceMode,
+		TraceRetentionDays:           traceRetentionDays,
+		TraceBufferSize:              traceBufferSize,
+		TraceFlushMS:                 traceFlushMS,
+		TraceMaxRecords:              traceMaxRecords,
 	}, nil
 }
 
@@ -248,6 +317,40 @@ func (c *Config) Normalize() error {
 		return err
 	}
 	c.MCPAppsMode = mcpAppsMode
+	// 零值代表“未配置”，先补默认再校验，避免直接构造 Config 的调用方失败。
+	if c.TraceRetentionDays == 0 {
+		c.TraceRetentionDays = defaultTraceRetentionDays
+	}
+	if c.TraceBufferSize == 0 {
+		c.TraceBufferSize = defaultTraceBufferSize
+	}
+	if c.TraceFlushMS == 0 {
+		c.TraceFlushMS = defaultTraceFlushMS
+	}
+	if c.TraceMaxRecords == 0 {
+		c.TraceMaxRecords = defaultTraceMaxRecords
+	}
+	c.TraceMode = TraceMode(strings.ToLower(strings.TrimSpace(string(c.TraceMode))))
+	if c.TraceMode == "" {
+		c.TraceMode = TraceModeOff
+	}
+	switch c.TraceMode {
+	case TraceModeOff, TraceModeMemory, TraceModeDisk:
+	default:
+		return fmt.Errorf("unsupported trace mode %q; expected off, memory, or disk", c.TraceMode)
+	}
+	if c.TraceRetentionDays < 1 || c.TraceRetentionDays > maxTraceRetentionDays {
+		return fmt.Errorf("AGENTDOCK_TRACE_RETENTION_DAYS must be between 1 and %d: %d", maxTraceRetentionDays, c.TraceRetentionDays)
+	}
+	if c.TraceBufferSize < 1 || c.TraceBufferSize > 1024 {
+		return fmt.Errorf("AGENTDOCK_TRACE_BUFFER_SIZE must be between 1 and 1024: %d", c.TraceBufferSize)
+	}
+	if c.TraceFlushMS < 100 || c.TraceFlushMS > 60000 {
+		return fmt.Errorf("AGENTDOCK_TRACE_FLUSH_MS must be between 100 and 60000: %d", c.TraceFlushMS)
+	}
+	if c.TraceMaxRecords < 100 || c.TraceMaxRecords > 50000 {
+		return fmt.Errorf("AGENTDOCK_TRACE_MAX_RECORDS must be between 100 and 50000: %d", c.TraceMaxRecords)
+	}
 	c.BrowserExecutablePath = strings.TrimSpace(c.BrowserExecutablePath)
 	if c.BrowserExecutablePath != "" {
 		c.BrowserExecutablePath = filepath.Clean(c.BrowserExecutablePath)

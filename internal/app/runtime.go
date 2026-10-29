@@ -52,6 +52,7 @@ type Runtime struct {
 	taskTools      *tooltask.Service
 	acp            *toolacp.Service
 	observer       *observability.Recorder
+	traces         *observability.TraceStore
 	tracing        *observability.Tracing
 	resourceOnce   sync.Once
 	resourceSvc    *resourcelibrary.Service
@@ -139,6 +140,19 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 		}, nil
 	}, runtime.commandExecutionContext)
 	runtime.files = toolfile.New(ws, skills.ResolveResource, runtime.command.CommandEnv)
+	traces, err := observability.NewTraceStore(observability.TraceOptions{
+		Mode:          observability.TraceMode(cfg.TraceMode),
+		Root:          filepath.Join(cfg.AgentDockHome, "traces"),
+		Retention:     time.Duration(cfg.TraceRetentionDays) * 24 * time.Hour,
+		BufferSize:    cfg.TraceBufferSize,
+		FlushInterval: time.Duration(cfg.TraceFlushMS) * time.Millisecond,
+		MaxRecords:    cfg.TraceMaxRecords,
+	})
+	if err != nil {
+		_ = runtime.Close()
+		return nil, fmt.Errorf("initialize trace store: %w", err)
+	}
+	runtime.traces = traces
 	runtime.dynamicMCP = toolmcp.New(mcpClients, envs)
 	if err := runtime.configureMCPOAuthCallbacks(); err != nil {
 		_ = runtime.dynamicMCP.Close()
@@ -244,6 +258,11 @@ func (r *Runtime) Close() error {
 		if r.plugins != nil {
 			r.plugins.ReleaseMCPLeases()
 		}
+		if r.traces != nil {
+			if err := r.traces.Close(); err != nil {
+				closeErrors = append(closeErrors, fmt.Errorf("close trace store: %w", err))
+			}
+		}
 		r.closeErr = errors.Join(closeErrors...)
 	})
 	return r.closeErr
@@ -283,17 +302,19 @@ func (r *Runtime) Call(ctx context.Context, name string, args map[string]any) (r
 		ctx = context.Background()
 	}
 	startedAt := time.Now()
+	// 先归一化再注册 defer/校验：defer 参数在注册时求值，nil 参数会让 trace
+	// 记录成 null，而不是真实的空对象。
+	if args == nil {
+		args = map[string]any{}
+	}
 	r.observer.BeginTool()
 	source := observability.SourceFromContext(ctx)
 	parentCtx := ctx
 	ctx, span := r.tracing.StartTool(ctx, source)
 	defer span.End()
 	ctx = observability.WithExecution(ctx, startedAt)
-	defer r.observeToolCall(parentCtx, ctx, name, startedAt, &err)
+	defer r.observeToolCall(parentCtx, ctx, name, startedAt, args, &result, &err)
 
-	if args == nil {
-		args = map[string]any{}
-	}
 	if err = r.validateToolArguments(name, args); err != nil {
 		return nil, err
 	}

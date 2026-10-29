@@ -15,6 +15,415 @@ struct DesktopServiceStatusPayload: Decodable {
     }
 }
 
+// Runtime API 路径集中在一处：dashboard 计数只允许走 overview，
+// 能力目录/任务/trace 是独立只读端点，两者不能互相替代。
+private enum RuntimeAPIPath {
+    static let skills = "/internal/runtime/skills"
+    static let plugins = "/internal/runtime/plugins"
+    static let catalog = "/internal/runtime/catalog"
+    static let tasks = "/internal/runtime/tasks"
+    static let traces = "/internal/runtime/traces"
+}
+
+// MARK: - Runtime capability catalog
+
+/// 任意 JSON 值。工具 Schema 是开放结构，控制面板只需要把它格式化成可读文本，
+/// 因此不能为每个工具声明静态字段。
+enum RuntimeJSONValue: Decodable {
+    case object([String: RuntimeJSONValue])
+    case array([RuntimeJSONValue])
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case null
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+            return
+        }
+        if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+            return
+        }
+        if let value = try? container.decode(Double.self) {
+            self = .number(value)
+            return
+        }
+        if let value = try? container.decode(String.self) {
+            self = .string(value)
+            return
+        }
+        if let value = try? container.decode([String: RuntimeJSONValue].self) {
+            self = .object(value)
+            return
+        }
+        if let value = try? container.decode([RuntimeJSONValue].self) {
+            self = .array(value)
+            return
+        }
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported JSON value")
+    }
+
+    var foundationValue: Any {
+        switch self {
+        case .object(let value): return value.mapValues(\.foundationValue)
+        case .array(let value): return value.map(\.foundationValue)
+        case .string(let value): return value
+        case .number(let value): return value
+        case .bool(let value): return value
+        case .null: return NSNull()
+        }
+    }
+
+    var prettyText: String {
+        guard JSONSerialization.isValidJSONObject(foundationValue),
+              let data = try? JSONSerialization.data(
+                withJSONObject: foundationValue,
+                options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+              ),
+              let text = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return text
+    }
+}
+
+struct RuntimeCatalogTool: Decodable, Identifiable {
+    let name: String
+    let title: String?
+    let description: String
+    let inputSchema: RuntimeJSONValue?
+    let outputSchema: RuntimeJSONValue?
+
+    var id: String { name }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, title, description
+        case inputSchema = "input_schema"
+        case outputSchema = "output_schema"
+    }
+}
+
+struct RuntimeCatalogRule: Decodable, Identifiable {
+    let scope: String
+    let path: String
+    let status: String
+    let content: String?
+    let sha256: String?
+    let sizeBytes: Int64?
+    let reason: String?
+    let duplicateOf: String?
+
+    var id: String { path }
+
+    private enum CodingKeys: String, CodingKey {
+        case scope, path, status, content, sha256, reason
+        case sizeBytes = "size_bytes"
+        case duplicateOf = "duplicate_of"
+    }
+}
+
+struct RuntimeCommonSkillItem: Decodable, Identifiable {
+    let name: String
+    let description: String
+    let file: String
+    let skillRef: String
+    let sourceType: String
+
+    var id: String { skillRef }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description, file
+        case skillRef = "skill_ref"
+        case sourceType = "source_type"
+    }
+}
+
+struct RuntimeCommonSkillIndex: Decodable {
+    let root: String
+    let total: Int
+    let truncated: Bool
+    let items: [RuntimeCommonSkillItem]
+}
+
+struct RuntimeCatalogPayload: Decodable {
+    let tools: [RuntimeCatalogTool]
+    let rules: [RuntimeCatalogRule]
+    let workdir: String
+    let workspaceRoot: String
+    let commonSkills: RuntimeCommonSkillIndex?
+
+    private enum CodingKeys: String, CodingKey {
+        case tools, rules, workdir
+        case workspaceRoot = "workspace_root"
+        case commonSkills = "common_skills"
+    }
+}
+
+struct RuntimeSkillItem: Decodable, Identifiable {
+    let name: String
+    let description: String
+    let skillRef: String
+    let sourceType: String
+    let contentDigest: String
+    let pluginName: String?
+    let fileCount: Int
+
+    var id: String { skillRef }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description, fileCount
+        case skillRef = "skill_ref"
+        case sourceType = "source_type"
+        case contentDigest = "content_digest"
+        case pluginName = "plugin_name"
+    }
+}
+
+struct RuntimeSkillsPayload: Decodable {
+    let count: Int
+    let skills: [RuntimeSkillItem]
+}
+
+struct RuntimePluginProvenance: Decodable {
+    let origin: String
+    let ref: String?
+    let revision: String?
+    let subdir: String?
+
+    var summary: String {
+        var parts = [origin]
+        if let ref, !ref.isEmpty { parts.append(ref) }
+        if let revision, !revision.isEmpty { parts.append(revision) }
+        if let subdir, !subdir.isEmpty { parts.append(subdir) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct RuntimePluginItem: Decodable, Identifiable {
+    let name: String
+    let version: String
+    let enabled: Bool
+    let packageDigest: String
+    let provenance: RuntimePluginProvenance?
+    let format: String
+    let skillCount: Int
+    let mcpCount: Int
+
+    var id: String { name }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, version, enabled, provenance, format
+        case packageDigest = "package_digest"
+        case skillCount = "skill_count"
+        case mcpCount = "mcp_count"
+    }
+}
+
+struct RuntimePluginsPayload: Decodable {
+    let count: Int
+    let plugins: [RuntimePluginItem]
+}
+
+struct RuntimeTaskRow: Decodable, Identifiable {
+    let id: String
+    let title: String
+    let status: String
+    let phase: String
+    let project: String?
+    let device: String?
+    let completedStepCount: Int
+    let stepCount: Int
+    let updatedAt: String
+    let completedAt: String?
+    let blocker: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, status, phase, project, device, blocker
+        case completedStepCount = "completed_step_count"
+        case stepCount = "step_count"
+        case updatedAt = "updated_at"
+        case completedAt = "completed_at"
+    }
+}
+
+struct RuntimeTasksPayload: Decodable {
+    let count: Int
+    let tasks: [RuntimeTaskRow]
+}
+
+struct RuntimeTaskCondition: Decodable, Identifiable {
+    let id: String
+    let text: String
+}
+
+struct RuntimeTaskStep: Decodable, Identifiable {
+    let id: String
+    let title: String
+    let phase: String
+    let status: String
+    let updatedAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, phase, status
+        case updatedAt = "updated_at"
+    }
+}
+
+struct RuntimeTaskEvent: Decodable, Identifiable {
+    let type: String
+    let summary: String
+    let createdAt: String
+
+    var id: String { createdAt + type + summary }
+
+    private enum CodingKeys: String, CodingKey {
+        case type, summary
+        case createdAt = "created_at"
+    }
+}
+
+struct RuntimeTaskReview: Decodable {
+    let status: String
+    let summary: String
+    let verifiedFacts: [String]?
+    let openRisks: [String]?
+
+    private enum CodingKeys: String, CodingKey {
+        case status, summary
+        case verifiedFacts = "verified_facts"
+        case openRisks = "open_risks"
+    }
+}
+
+struct RuntimeTaskDetail: Decodable, Identifiable {
+    let id: String
+    let title: String
+    let goal: String
+    let project: String?
+    let device: String?
+    let status: String
+    let phase: String
+    let conditions: [RuntimeTaskCondition]?
+    let steps: [RuntimeTaskStep]?
+    let events: [RuntimeTaskEvent]?
+    let blocker: String?
+    let summary: String?
+    let finalReview: RuntimeTaskReview?
+    let createdAt: String
+    let updatedAt: String
+    let completedAt: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, goal, project, device, status, phase, conditions, steps, events, blocker, summary
+        case finalReview = "final_review"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case completedAt = "completed_at"
+    }
+}
+
+struct RuntimeTaskDetailPayload: Decodable {
+    let task: RuntimeTaskDetail
+}
+
+struct RuntimeTraceRecord: Decodable, Identifiable {
+    let id: UInt64
+    let tool: String
+    let source: String
+    let startedAt: String
+    let durationMS: Double
+    let success: Bool
+    let errorCode: String?
+    let arguments: String?
+    let result: String?
+    let error: String?
+    let truncated: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, tool, source, success, arguments, result, error, truncated
+        case startedAt = "started_at"
+        case durationMS = "duration_ms"
+        case errorCode = "error_code"
+    }
+}
+
+struct RuntimeTraceStatus: Decodable {
+    let mode: String
+    let root: String?
+    let retentionDays: Int?
+    let maxRecords: Int
+    let count: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case mode, root, count
+        case retentionDays = "retention_days"
+        case maxRecords = "max_records"
+    }
+}
+
+struct RuntimeTracesPayload: Decodable {
+    let mode: String?
+    let status: RuntimeTraceStatus?
+    let count: Int
+    let records: [RuntimeTraceRecord]
+    let tools: [String]
+
+    var effectiveMode: String { status?.mode ?? mode ?? "off" }
+}
+
+/// 任务与 trace 的时间戳可能带 6~9 位小数，ISO8601DateFormatter 只稳定支持 3 位，
+/// 因此统一先截断再解析；解析失败时原样展示，不编造时间。
+enum RuntimeTimestamp {
+    private static let withFraction: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let plain: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    private static let display: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        return formatter
+    }()
+
+    private static let exact: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
+        return formatter
+    }()
+
+    static func parse(_ raw: String?) -> Date? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let normalized = raw.replacingOccurrences(
+            of: #"\.(\d{3})\d+"#,
+            with: ".$1",
+            options: .regularExpression
+        )
+        return withFraction.date(from: normalized) ?? plain.date(from: normalized)
+    }
+
+    static func minute(_ raw: String?) -> String {
+        guard let date = parse(raw) else { return raw ?? "—" }
+        return display.string(from: date)
+    }
+
+    static func precise(_ raw: String?) -> String {
+        guard let date = parse(raw) else { return raw ?? "" }
+        return exact.string(from: date)
+    }
+}
+
 struct RuntimeExtensionOverview: Equatable {
     let available: Bool
     let skillCount: Int
@@ -435,6 +844,80 @@ final class ServiceController: @unchecked Sendable {
             RuntimeAnalyticsPayload.self,
             configuration: configuration,
             path: "/internal/runtime/analytics"
+        )
+    }
+
+    func runtimeCatalog(configuration: ServiceConfiguration?) async -> RuntimeCatalogPayload? {
+        guard let configuration else { return nil }
+        // 全量工具 Schema 比状态查询重得多，给独立更宽的超时。
+        return await fetchRuntimePayload(
+            RuntimeCatalogPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.catalog,
+            timeout: 6
+        )
+    }
+
+    func runtimeSkills(configuration: ServiceConfiguration?) async -> RuntimeSkillsPayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeSkillsPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.skills,
+            timeout: 5
+        )
+    }
+
+    func runtimePlugins(configuration: ServiceConfiguration?) async -> RuntimePluginsPayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimePluginsPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.plugins,
+            timeout: 5
+        )
+    }
+
+    func runtimeTasks(configuration: ServiceConfiguration?) async -> RuntimeTasksPayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeTasksPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.tasks,
+            queryItems: [URLQueryItem(name: "limit", value: "200")],
+            timeout: 5
+        )
+    }
+
+    func runtimeTask(id: String, configuration: ServiceConfiguration?) async -> RuntimeTaskDetail? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeTaskDetailPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.tasks + "/" + id,
+            timeout: 5
+        )?.task
+    }
+
+    func runtimeTraces(
+        query: String = "",
+        tool: String = "",
+        source: String = "",
+        status: String = "",
+        configuration: ServiceConfiguration?
+    ) async -> RuntimeTracesPayload? {
+        guard let configuration else { return nil }
+        var items: [URLQueryItem] = []
+        if !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
+        if !tool.isEmpty { items.append(URLQueryItem(name: "tool", value: tool)) }
+        if !source.isEmpty { items.append(URLQueryItem(name: "source", value: source)) }
+        if !status.isEmpty { items.append(URLQueryItem(name: "status", value: status)) }
+        return await fetchRuntimePayload(
+            RuntimeTracesPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.traces,
+            queryItems: items,
+            timeout: 5
         )
     }
 
@@ -1433,7 +1916,9 @@ final class ServiceController: @unchecked Sendable {
     private func fetchRuntimePayload<T: Decodable>(
         _ type: T.Type,
         configuration: ServiceConfiguration,
-        path: String
+        path: String,
+        queryItems: [URLQueryItem] = [],
+        timeout: TimeInterval = 2.5
     ) async -> T? {
         guard let localMCPURL = configuration.localMCPURL,
               var components = URLComponents(url: localMCPURL, resolvingAgainstBaseURL: false),
@@ -1442,13 +1927,13 @@ final class ServiceController: @unchecked Sendable {
             return nil
         }
         components.path = path
-        components.query = nil
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
         components.fragment = nil
         guard let url = components.url else { return nil }
 
         do {
             var request = URLRequest(url: url)
-            request.timeoutInterval = 2.5
+            request.timeoutInterval = timeout
             if !configuration.authToken.isEmpty {
                 request.setValue("Bearer \(configuration.authToken)", forHTTPHeaderField: "Authorization")
             }

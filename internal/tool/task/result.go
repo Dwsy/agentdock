@@ -92,6 +92,14 @@ func compactTaskListItem(task taskstate.Task) map[string]any {
 		"completed_step_count": summary["completed_step_count"], "step_count": summary["step_count"],
 		"review_status": summary["review_status"], "updated_at": summary["updated_at"],
 	}
+	// 控制面板按项目分组、按设备搜索，列表项必须带这两个维度；
+	// 它们是任务自身字段，不引入新的派生状态。
+	if task.Project != "" {
+		item["project"] = task.Project
+	}
+	if task.Device != "" {
+		item["device"] = task.Device
+	}
 	for _, key := range []string{"current_step", "summary", "blocker"} {
 		if value, ok := summary[key]; ok {
 			item[key] = value

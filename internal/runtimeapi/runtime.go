@@ -39,6 +39,17 @@ type DiagnosticsRuntime interface {
 	RuntimeDiagnostics() app.Result
 }
 
+// CatalogRuntime 是桌面控制面板的只读能力：工具定义与规则扫描结果。
+// 它不参与 MCP 工具契约，也不从 Nexus 暴露。
+type CatalogRuntime interface {
+	RuntimeCatalog(context.Context) (app.Result, error)
+}
+
+// TraceRuntime 是可选的可观测能力；trace 关闭时实现仍返回 mode=off。
+type TraceRuntime interface {
+	RuntimeTraces(query, tool, source, status string, limit int) (app.Result, error)
+}
+
 type MCPOAuthRuntime interface {
 	RuntimeMCPOAuthCallback(context.Context, oauthclient.CallbackResult) error
 }

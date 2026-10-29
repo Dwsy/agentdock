@@ -18,6 +18,12 @@ type runtimeStub struct {
 	skillTarget   string
 	skillFilePath string
 	pluginName    string
+	traceQuery    string
+	traceTool     string
+	traceSource   string
+	traceStatus   string
+	traceLimit    int
+	traceCalled   bool
 }
 
 func (r *runtimeStub) RuntimeStatus() app.Result    { return app.Result{"status": "ok"} }
@@ -58,6 +64,16 @@ func (r *runtimeStub) RuntimeTask(string) (app.Result, error)       { return app
 func (r *runtimeStub) RuntimeTaskDelete(string) (app.Result, error) { return app.Result{}, nil }
 func (r *runtimeStub) RuntimeCapabilities(context.Context, bool) (app.Result, error) {
 	return app.Result{}, nil
+}
+
+func (r *runtimeStub) RuntimeCatalog(context.Context) (app.Result, error) {
+	return app.Result{"tools": []any{}, "rules": []any{}, "tool_count": 0}, nil
+}
+
+func (r *runtimeStub) RuntimeTraces(query, tool, source, status string, limit int) (app.Result, error) {
+	r.traceCalled = true
+	r.traceQuery, r.traceTool, r.traceSource, r.traceStatus, r.traceLimit = query, tool, source, status, limit
+	return app.Result{"mode": "memory", "count": 0}, nil
 }
 func (r *runtimeStub) RuntimeMCPServers(context.Context) (app.Result, error) {
 	return app.Result{}, nil
@@ -318,4 +334,41 @@ func TestDispatchKeepsRouteSpecificValidationErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDispatchCatalogAndTraces(t *testing.T) {
+	t.Run("catalog", func(t *testing.T) {
+		result, err := Dispatch(context.Background(), &runtimeStub{}, Request{Method: "GET", Path: "/internal/runtime/catalog"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := result["tools"]; !ok {
+			t.Fatalf("catalog result = %#v", result)
+		}
+	})
+	t.Run("traces pass filters", func(t *testing.T) {
+		stub := &runtimeStub{}
+		_, err := Dispatch(context.Background(), stub, Request{
+			Method: "GET",
+			Path:   "/internal/runtime/traces",
+			Query:  url.Values{"q": {"file"}, "tool": {"read_file"}, "source": {"mcp"}, "status": {"error"}, "limit": {"25"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !stub.traceCalled || stub.traceQuery != "file" || stub.traceTool != "read_file" || stub.traceSource != "mcp" || stub.traceStatus != "error" || stub.traceLimit != 25 {
+			t.Fatalf("trace args = %#v", stub)
+		}
+	})
+	t.Run("traces reject invalid limit", func(t *testing.T) {
+		_, err := Dispatch(context.Background(), &runtimeStub{}, Request{
+			Method: "GET",
+			Path:   "/internal/runtime/traces",
+			Query:  url.Values{"limit": {"-1"}},
+		})
+		var toolErr *app.ToolError
+		if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" {
+			t.Fatalf("error = %#v", err)
+		}
+	})
 }

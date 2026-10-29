@@ -70,6 +70,38 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			}
 		}
 		return map[string]any(diagnostics.RuntimeDiagnostics()), nil
+	case path == "/internal/runtime/catalog":
+		catalog, ok := runtime.(CatalogRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "CATALOG_UNSUPPORTED", Message: "runtime does not support the capability catalog", Category: "not_found",
+			}
+		}
+		result, err := catalog.RuntimeCatalog(ctx)
+		return map[string]any(result), err
+	case path == "/internal/runtime/traces":
+		traceRuntime, ok := runtime.(TraceRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TRACES_UNSUPPORTED", Message: "runtime does not support trace records", Category: "not_found",
+			}
+		}
+		limit := 0
+		if raw := strings.TrimSpace(request.queryValue("limit")); raw != "" {
+			parsed, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || parsed < 0 {
+				return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace limit must be a non-negative integer", Category: "validation"}
+			}
+			limit = parsed
+		}
+		result, err := traceRuntime.RuntimeTraces(
+			request.queryValue("q"),
+			request.queryValue("tool"),
+			request.queryValue("source"),
+			request.queryValue("status"),
+			limit,
+		)
+		return map[string]any(result), err
 	case path == "/internal/runtime/capabilities":
 		refresh := strings.EqualFold(request.queryValue("refresh"), "true") || method == http.MethodPost
 		result, err := runtime.RuntimeCapabilities(ctx, refresh)

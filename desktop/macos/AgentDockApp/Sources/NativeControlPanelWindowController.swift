@@ -83,13 +83,15 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
 @MainActor
 private final class ControlPanelModel: ObservableObject {
     enum Page: String, CaseIterable, Identifiable {
-        case home, connections, capabilities, activity, settings
+        case home, connections, capabilities, tasks, traces, activity, settings
         var id: String { rawValue }
         var title: String {
             switch self {
             case .home: return L10n.text("Home")
             case .connections: return L10n.text("Connections")
             case .capabilities: return L10n.text("Capabilities")
+            case .tasks: return L10n.text("Tasks")
+            case .traces: return L10n.text("Traces")
             case .activity: return L10n.text("Activity")
             case .settings: return L10n.text("Settings")
             }
@@ -99,10 +101,22 @@ private final class ControlPanelModel: ObservableObject {
             case .home: return "house"
             case .connections: return "link"
             case .capabilities: return "square.grid.2x2"
+            case .tasks: return "checklist"
+            case .traces: return "waveform.path.ecg"
             case .activity: return "clock.arrow.circlepath"
             case .settings: return "gearshape"
             }
         }
+    }
+
+    /// Sidebar 把页面导航与能力目录条目放在同一个 List 里，因此需要单一 selection 类型。
+    enum SidebarSelection: Hashable {
+        case page(Page)
+        case tool(String)
+        case skill(String)
+        case commonSkill(String)
+        case rule(String)
+        case plugin(String)
     }
 
     enum SettingsPage: String, CaseIterable, Identifiable {
@@ -128,10 +142,29 @@ private final class ControlPanelModel: ObservableObject {
         let progress: Double?
     }
 
-    @Published var page: Page = .home
+    /// page 与 selection 是同一份导航状态的两个视图：
+    /// 点击侧栏条目走 selection，代码内跳转（通知/按钮）走 page，两者互相收敛。
+    @Published var page: Page = .home {
+        didSet {
+            if selection != .page(page) {
+                selection = .page(page)
+            }
+        }
+    }
+    @Published var selection: SidebarSelection = .page(.home) {
+        didSet {
+            if case .page(let value) = selection, value != page {
+                page = value
+            }
+        }
+    }
     @Published var settingsPage: SettingsPage = .appearance
     @Published var status: ServiceStatus = .missing
     @Published var dashboard = RuntimeDashboardSnapshot.empty
+    @Published var catalog: RuntimeCatalogPayload?
+    @Published var runtimeSkills: RuntimeSkillsPayload?
+    @Published var runtimePlugins: RuntimePluginsPayload?
+    @Published var runtimeTasks: RuntimeTasksPayload?
     @Published var cloudflaredComponent = CloudflaredComponentStatus.unavailable
     @Published var statusUpdatedAt = Date()
     @Published private(set) var languageRevision = 0
@@ -149,6 +182,8 @@ private final class ControlPanelModel: ObservableObject {
     private lazy var installer = InstallerRunner(service: service)
     private lazy var configurationController = ServiceConfigurationController(service: service)
     private var cloudflaredComponentOperationRevision = 0
+    // 目录数据较重，status 轮询会反复触发；20 秒内复用上一次结果。
+    private var lastRuntimeDataRefresh = Date.distantPast
 
     init(service: ServiceController, menuLoginAgent: MenuLoginAgentController, onChanged: @escaping () -> Void, onUpdateRequested: @escaping () -> Void) {
         self.service = service
@@ -163,6 +198,10 @@ private final class ControlPanelModel: ObservableObject {
         self.status = status
         if !status.loaded || !status.healthy {
             dashboard = .empty
+            catalog = nil
+            runtimeSkills = nil
+            runtimePlugins = nil
+            runtimeTasks = nil
         }
         statusUpdatedAt = Date()
     }
@@ -185,6 +224,64 @@ private final class ControlPanelModel: ObservableObject {
             return
         }
         dashboard = await service.dashboard(configuration: status.configuration)
+    }
+
+    /// 能力目录与任务列表都来自只读 Runtime API，一次并发拉取，避免逐个串行请求。
+    func refreshRuntimeData(force: Bool = false) async {
+        let now = Date()
+        if !force, now.timeIntervalSince(lastRuntimeDataRefresh) < 20 {
+            return
+        }
+        lastRuntimeDataRefresh = now
+        guard status.loaded, status.healthy, let configuration = status.configuration else {
+            catalog = nil
+            runtimeSkills = nil
+            runtimePlugins = nil
+            runtimeTasks = nil
+            return
+        }
+        async let catalogTask = service.runtimeCatalog(configuration: configuration)
+        async let skillsTask = service.runtimeSkills(configuration: configuration)
+        async let pluginsTask = service.runtimePlugins(configuration: configuration)
+        async let tasksTask = service.runtimeTasks(configuration: configuration)
+        catalog = await catalogTask
+        runtimeSkills = await skillsTask
+        runtimePlugins = await pluginsTask
+        runtimeTasks = await tasksTask
+    }
+
+    func loadTaskDetail(id: String) async -> RuntimeTaskDetail? {
+        await service.runtimeTask(id: id, configuration: status.configuration)
+    }
+
+    func loadTraces(query: String, tool: String, source: String, status filter: String) async -> RuntimeTracesPayload? {
+        await service.runtimeTraces(
+            query: query,
+            tool: tool,
+            source: source,
+            status: filter,
+            configuration: status.configuration
+        )
+    }
+
+    func catalogTool(named name: String) -> RuntimeCatalogTool? {
+        catalog?.tools.first { $0.name == name }
+    }
+
+    func catalogSkill(reference: String) -> RuntimeSkillItem? {
+        runtimeSkills?.skills.first { $0.skillRef == reference }
+    }
+
+    func catalogCommonSkill(reference: String) -> RuntimeCommonSkillItem? {
+        catalog?.commonSkills?.items.first { $0.skillRef == reference }
+    }
+
+    func catalogRule(path: String) -> RuntimeCatalogRule? {
+        catalog?.rules.first { $0.path == path }
+    }
+
+    func catalogPlugin(named name: String) -> RuntimePluginItem? {
+        runtimePlugins?.plugins.first { $0.name == name }
     }
 
     func invalidatePublicEndpointCheck() {
@@ -381,16 +478,19 @@ private struct ControlPanelRootView: View {
                 .padding(.top, 18)
                 .padding(.bottom, 12)
 
-                List(selection: $model.page) {
-                    ForEach(ControlPanelModel.Page.allCases) { page in
-                        Label(page.title, systemImage: page.symbol)
-                            .tag(page)
+                List(selection: $model.selection) {
+                    Section {
+                        ForEach(ControlPanelModel.Page.allCases) { page in
+                            Label(page.title, systemImage: page.symbol)
+                                .tag(ControlPanelModel.SidebarSelection.page(page))
+                        }
                     }
+                    catalogSections
                 }
                 .id(model.languageRevision)
                 .listStyle(.sidebar)
             }
-            .navigationSplitViewColumnWidth(min: 160, ideal: 168, max: 180)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 300)
         } detail: {
             pageContent
                 // 原生透明标题栏没有可见标题，右侧内容不应再为系统安全区重复留白。
@@ -401,14 +501,91 @@ private struct ControlPanelRootView: View {
                 .background(Color(nsColor: .windowBackgroundColor))
         }
         .navigationSplitViewStyle(.balanced)
+        .task(id: model.statusUpdatedAt) {
+            await model.refreshRuntimeData()
+        }
+    }
+
+    /// 能力目录直接留在侧栏：工具数量、来源和顺序都要能被一眼扫完，
+    /// 详情只负责展示选中项的完整定义。
+    @ViewBuilder private var catalogSections: some View {
+        if let catalog = model.catalog {
+            Section {
+                ForEach(catalog.tools) { tool in
+                    Label(tool.name, systemImage: "wrench.and.screwdriver")
+                        .tag(ControlPanelModel.SidebarSelection.tool(tool.name))
+                }
+            } header: {
+                Text(L10n.format("Tools (%d)", catalog.tools.count))
+            }
+        }
+        if let skills = model.runtimeSkills {
+            Section {
+                ForEach(skills.skills) { skill in
+                    Label(skill.name, systemImage: "book.closed")
+                        .tag(ControlPanelModel.SidebarSelection.skill(skill.skillRef))
+                }
+            } header: {
+                Text(L10n.format("Skills (%d)", skills.count))
+            }
+        }
+        if let common = model.catalog?.commonSkills, common.total > 0 {
+            Section {
+                ForEach(common.items) { skill in
+                    Label(skill.name, systemImage: "books.vertical")
+                        .tag(ControlPanelModel.SidebarSelection.commonSkill(skill.skillRef))
+                }
+            } header: {
+                Text(L10n.format("Common skills (%d)", common.total))
+            }
+        }
+        if let catalog = model.catalog {
+            Section {
+                ForEach(catalog.rules) { rule in
+                    Label(Self.ruleLabel(rule), systemImage: "doc.text")
+                        .tag(ControlPanelModel.SidebarSelection.rule(rule.path))
+                }
+            } header: {
+                Text(L10n.format("Rules (%d)", catalog.rules.count))
+            }
+        }
+        if let plugins = model.runtimePlugins {
+            Section {
+                ForEach(plugins.plugins) { plugin in
+                    Label(plugin.name, systemImage: "puzzlepiece.extension")
+                        .tag(ControlPanelModel.SidebarSelection.plugin(plugin.name))
+                }
+            } header: {
+                Text(L10n.format("Plugins (%d)", plugins.count))
+            }
+        }
+    }
+
+    private static func ruleLabel(_ rule: RuntimeCatalogRule) -> String {
+        let name = (rule.path as NSString).lastPathComponent
+        let scope = rule.scope.isEmpty ? "AGENTS.md" : rule.scope
+        return "\(name) · \(scope)"
     }
 
     @ViewBuilder private var pageContent: some View {
+        switch model.selection {
+        case .tool(let name): ToolCatalogDetailView(model: model, toolName: name)
+        case .skill(let reference): SkillCatalogDetailView(model: model, skillRef: reference)
+        case .commonSkill(let reference): CommonSkillCatalogDetailView(model: model, skillRef: reference)
+        case .rule(let path): RuleCatalogDetailView(model: model, rulePath: path)
+        case .plugin(let name): PluginCatalogDetailView(model: model, pluginName: name)
+        default: pageView
+        }
+    }
+
+    @ViewBuilder private var pageView: some View {
         switch model.page {
         case .home: HomeView(model: model)
         case .settings: SettingsView(model: model)
         case .connections: ConnectionsView(model: model)
         case .capabilities: CapabilitiesView(model: model)
+        case .tasks: TasksView(model: model)
+        case .traces: TracesView(model: model)
         case .activity: ActivityView(model: model)
         }
     }
@@ -2226,4 +2403,716 @@ private struct SettingsView: View {
 
 private extension Notification.Name {
     static let agentDockOpenPermissions = Notification.Name("AgentDockOpenPermissions")
+}
+
+// MARK: - Capability catalog
+
+private struct CatalogDetailScroll<Content: View>: View {
+    let title: String
+    var detail: String?
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                PageHeader(title: title, detail: detail)
+                content()
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 28)
+            .frame(maxWidth: 920, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct CatalogCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+private struct CatalogKeyValueRow: View {
+    let label: String
+    let value: String
+    var mono = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(label)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 118, alignment: .leading)
+            Text(value)
+                .font(.system(size: 12, design: mono ? .monospaced : .default))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct CatalogUnavailable: View {
+    let reason: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.text("Unavailable"))
+                .font(.system(size: 15, weight: .semibold))
+            Text(reason)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+private struct ToolCatalogDetailView: View {
+    @ObservedObject var model: ControlPanelModel
+    let toolName: String
+
+    var body: some View {
+        if let tool = model.catalogTool(named: toolName) {
+            CatalogDetailScroll(title: tool.name, detail: tool.title) {
+                if !tool.description.isEmpty {
+                    Text(tool.description)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                schemaBlock(L10n.text("Input schema"), tool.inputSchema)
+                schemaBlock(L10n.text("Output schema"), tool.outputSchema)
+            }
+        } else {
+            CatalogUnavailable(reason: L10n.text("The capability catalog is not available. Start AgentDock Core and try again."))
+        }
+    }
+
+    @ViewBuilder private func schemaBlock(_ title: String, _ schema: RuntimeJSONValue?) -> some View {
+        CatalogCard(title: title) {
+            if let text = schema?.prettyText, !text.isEmpty {
+                Text(text)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("—").foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct SkillCatalogDetailView: View {
+    @ObservedObject var model: ControlPanelModel
+    let skillRef: String
+
+    var body: some View {
+        if let skill = model.catalogSkill(reference: skillRef) {
+            CatalogDetailScroll(title: skill.name, detail: skill.description) {
+                CatalogCard(title: L10n.text("Skill")) {
+                    CatalogKeyValueRow(label: L10n.text("Source"), value: skill.sourceType)
+                    CatalogKeyValueRow(label: L10n.text("Reference"), value: skill.skillRef, mono: true)
+                    CatalogKeyValueRow(label: L10n.text("Content digest"), value: skill.contentDigest, mono: true)
+                    CatalogKeyValueRow(label: L10n.text("Files"), value: "\(skill.fileCount)")
+                    if let plugin = skill.pluginName, !plugin.isEmpty {
+                        CatalogKeyValueRow(label: L10n.text("Plugin"), value: plugin)
+                    }
+                }
+            }
+        } else {
+            CatalogUnavailable(reason: L10n.text("This Skill is no longer in the current index."))
+        }
+    }
+}
+
+private struct CommonSkillCatalogDetailView: View {
+    @ObservedObject var model: ControlPanelModel
+    let skillRef: String
+
+    var body: some View {
+        if let skill = model.catalogCommonSkill(reference: skillRef) {
+            CatalogDetailScroll(title: skill.name, detail: skill.description) {
+                CatalogCard(title: L10n.text("Skill")) {
+                    CatalogKeyValueRow(label: L10n.text("Source"), value: skill.sourceType)
+                    CatalogKeyValueRow(label: L10n.text("Reference"), value: skill.skillRef, mono: true)
+                    CatalogKeyValueRow(label: L10n.text("File"), value: skill.file, mono: true)
+                }
+            }
+        } else {
+            CatalogUnavailable(reason: L10n.text("This shared Skill is no longer indexed."))
+        }
+    }
+}
+
+private struct RuleCatalogDetailView: View {
+    @ObservedObject var model: ControlPanelModel
+    let rulePath: String
+
+    var body: some View {
+        if let rule = model.catalogRule(path: rulePath) {
+            CatalogDetailScroll(title: (rule.path as NSString).lastPathComponent, detail: rule.path) {
+                CatalogCard(title: L10n.text("Rule")) {
+                    CatalogKeyValueRow(label: L10n.text("Scope"), value: rule.scope)
+                    CatalogKeyValueRow(label: L10n.text("Status"), value: rule.status)
+                    if let size = rule.sizeBytes {
+                        CatalogKeyValueRow(label: L10n.text("Size"), value: ByteCountFormatter.string(fromByteCount: size, countStyle: .file))
+                    }
+                    if let digest = rule.sha256, !digest.isEmpty {
+                        CatalogKeyValueRow(label: L10n.text("SHA-256"), value: digest, mono: true)
+                    }
+                    if let reason = rule.reason, !reason.isEmpty {
+                        CatalogKeyValueRow(label: L10n.text("Reason"), value: reason)
+                    }
+                    if let duplicate = rule.duplicateOf, !duplicate.isEmpty {
+                        CatalogKeyValueRow(label: L10n.text("Duplicate of"), value: duplicate)
+                    }
+                }
+                if let content = rule.content, !content.isEmpty {
+                    CatalogCard(title: L10n.text("Content")) {
+                        Text(content)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        } else {
+            CatalogUnavailable(reason: L10n.text("This rule file is no longer in the current scan."))
+        }
+    }
+}
+
+private struct PluginCatalogDetailView: View {
+    @ObservedObject var model: ControlPanelModel
+    let pluginName: String
+
+    var body: some View {
+        if let plugin = model.catalogPlugin(named: pluginName) {
+            CatalogDetailScroll(title: plugin.name, detail: plugin.format) {
+                CatalogCard(title: L10n.text("Plugin")) {
+                    CatalogKeyValueRow(label: L10n.text("Version"), value: plugin.version)
+                    CatalogKeyValueRow(label: L10n.text("Enabled"), value: plugin.enabled ? L10n.text("Yes") : L10n.text("No"))
+                    CatalogKeyValueRow(label: L10n.text("Format"), value: plugin.format)
+                    CatalogKeyValueRow(label: L10n.text("Skills"), value: "\(plugin.skillCount)")
+                    CatalogKeyValueRow(label: L10n.text("MCP servers"), value: "\(plugin.mcpCount)")
+                    if let provenance = plugin.provenance, !provenance.origin.isEmpty {
+                        CatalogKeyValueRow(label: L10n.text("Provenance"), value: provenance.summary)
+                    }
+                    CatalogKeyValueRow(label: L10n.text("Package digest"), value: plugin.packageDigest, mono: true)
+                }
+            }
+        } else {
+            CatalogUnavailable(reason: L10n.text("This Plugin is no longer installed."))
+        }
+    }
+}
+
+// MARK: - Tasks
+
+private struct TasksView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var query = ""
+    @State private var statusFilter = "all"
+    @State private var selectedTaskID: String?
+    @State private var detail: RuntimeTaskDetail?
+    @State private var expandedProjects: Set<String> = []
+
+    private var allTasks: [RuntimeTaskRow] { model.runtimeTasks?.tasks ?? [] }
+
+    private var filtered: [RuntimeTaskRow] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return allTasks.filter { task in
+            if statusFilter != "all" && task.status != statusFilter { return false }
+            guard !needle.isEmpty else { return true }
+            let haystack = [task.title, task.project ?? "", task.device ?? ""].joined(separator: " ").lowercased()
+            return haystack.contains(needle)
+        }
+    }
+
+    private var groups: [(label: String, rows: [RuntimeTaskRow])] {
+        var map: [String: [RuntimeTaskRow]] = [:]
+        for task in filtered {
+            map[task.project ?? "", default: []].append(task)
+        }
+        return map
+            .map { key, rows in
+                (label: key.isEmpty ? L10n.text("Unassigned") : key,
+                 rows: rows.sorted { $0.updatedAt > $1.updatedAt })
+            }
+            .sorted { left, right in
+                (left.rows.first?.updatedAt ?? "") > (right.rows.first?.updatedAt ?? "")
+            }
+    }
+
+    private var isFiltering: Bool {
+        statusFilter != "all" || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func isExpanded(_ label: String) -> Bool {
+        isFiltering || expandedProjects.contains(label)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                PageHeader(title: L10n.text("Tasks"), detail: L10n.format("%d tasks", allTasks.count))
+                HStack(spacing: 10) {
+                    TextField(L10n.text("Search title, project, or device"), text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                    Picker(L10n.text("Status"), selection: $statusFilter) {
+                        Text(L10n.text("All")).tag("all")
+                        Text(L10n.text("Active")).tag("active")
+                        Text(L10n.text("Blocked")).tag("blocked")
+                        Text(L10n.text("Completed")).tag("completed")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 300)
+                    Spacer()
+                    Button(L10n.text("Refresh")) {
+                        Task { await model.refreshRuntimeData(force: true) }
+                    }
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            if model.runtimeTasks == nil {
+                CatalogUnavailable(reason: L10n.text("Tasks are unavailable while AgentDock Core is not running."))
+            } else {
+                HStack(spacing: 0) {
+                    List(selection: $selectedTaskID) {
+                        ForEach(groups, id: \.label) { group in
+                            Section {
+                                if isExpanded(group.label) {
+                                    ForEach(group.rows) { task in
+                                        TaskRowView(task: task)
+                                            .tag(task.id)
+                                    }
+                                }
+                            } header: {
+                                Button {
+                                    if expandedProjects.contains(group.label) {
+                                        expandedProjects.remove(group.label)
+                                    } else {
+                                        expandedProjects.insert(group.label)
+                                    }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: isExpanded(group.label) ? "chevron.down" : "chevron.right")
+                                            .font(.system(size: 10, weight: .semibold))
+                                        Text(group.label).lineLimit(1)
+                                        Spacer()
+                                        Text("\(group.rows.count)")
+                                            .monospacedDigit()
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    .frame(minWidth: 300, idealWidth: 340, maxWidth: 420)
+
+                    Divider()
+
+                    taskDetailPane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .task { await model.refreshRuntimeData(force: true) }
+        .task(id: selectedTaskID) {
+            guard let id = selectedTaskID else {
+                detail = nil
+                return
+            }
+            detail = await model.loadTaskDetail(id: id)
+        }
+    }
+
+    @ViewBuilder private var taskDetailPane: some View {
+        if let detail {
+            TaskDetailContent(task: detail)
+        } else if selectedTaskID != nil {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            Text(L10n.text("Select a task"))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+private struct TaskRowView: View {
+    let task: RuntimeTaskRow
+
+    private var statusColor: Color {
+        switch task.status {
+        case "active": return .accentColor
+        case "blocked": return .orange
+        case "completed": return .secondary
+        default: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle().fill(statusColor).frame(width: 7, height: 7).padding(.top, 5)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(task.title).lineLimit(2)
+                HStack(spacing: 8) {
+                    if task.stepCount > 0 {
+                        Text("\(task.completedStepCount)/\(task.stepCount)")
+                            .monospacedDigit()
+                    }
+                    if let device = task.device, !device.isEmpty {
+                        Text(device)
+                    }
+                    Text(RuntimeTimestamp.minute(task.updatedAt))
+                        .monospacedDigit()
+                        .help(RuntimeTimestamp.precise(task.updatedAt))
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct TaskDetailContent: View {
+    let task: RuntimeTaskDetail
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(task.title).font(.system(size: 18, weight: .semibold))
+                    HStack(spacing: 10) {
+                        Text(task.status)
+                        Text(task.phase)
+                        if let project = task.project, !project.isEmpty {
+                            Text(project)
+                        }
+                        if let device = task.device, !device.isEmpty {
+                            Text(device)
+                        }
+                    }
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        Text(RuntimeTimestamp.minute(task.updatedAt))
+                            .help(RuntimeTimestamp.precise(task.updatedAt))
+                        if let completed = task.completedAt {
+                            Text(RuntimeTimestamp.minute(completed))
+                                .help(RuntimeTimestamp.precise(completed))
+                        }
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                }
+
+                if !task.goal.isEmpty {
+                    CatalogCard(title: L10n.text("Goal")) {
+                        Text(task.goal).font(.system(size: 12.5)).textSelection(.enabled)
+                    }
+                }
+                if let blocker = task.blocker, !blocker.isEmpty {
+                    CatalogCard(title: L10n.text("Blocker")) {
+                        Text(blocker).font(.system(size: 12.5)).foregroundStyle(.orange).textSelection(.enabled)
+                    }
+                }
+                if let conditions = task.conditions, !conditions.isEmpty {
+                    CatalogCard(title: L10n.text("Conditions")) {
+                        ForEach(conditions) { condition in
+                            Text("• \(condition.text)").font(.system(size: 12)).textSelection(.enabled)
+                        }
+                    }
+                }
+                if let steps = task.steps, !steps.isEmpty {
+                    CatalogCard(title: L10n.text("Steps")) {
+                        ForEach(steps) { step in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: stepIcon(step.status))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(stepColor(step.status))
+                                    .frame(width: 14)
+                                Text(step.title).font(.system(size: 12))
+                                Spacer()
+                                Text(step.status).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                if let summary = task.summary, !summary.isEmpty {
+                    CatalogCard(title: L10n.text("Summary")) {
+                        Text(summary).font(.system(size: 12.5)).textSelection(.enabled)
+                    }
+                }
+                if let review = task.finalReview {
+                    CatalogCard(title: L10n.text("Final review")) {
+                        CatalogKeyValueRow(label: L10n.text("Status"), value: review.status)
+                        if !review.summary.isEmpty {
+                            Text(review.summary).font(.system(size: 12)).textSelection(.enabled)
+                        }
+                        ForEach(review.verifiedFacts ?? [], id: \.self) { fact in
+                            Text("✓ \(fact)").font(.system(size: 11.5)).textSelection(.enabled)
+                        }
+                        ForEach(review.openRisks ?? [], id: \.self) { risk in
+                            Text("! \(risk)").font(.system(size: 11.5)).foregroundStyle(.orange).textSelection(.enabled)
+                        }
+                    }
+                }
+                if let events = task.events, !events.isEmpty {
+                    CatalogCard(title: L10n.text("Events")) {
+                        ForEach(events.suffix(30)) { event in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(RuntimeTimestamp.minute(event.createdAt))
+                                    .font(.system(size: 10.5, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .help(RuntimeTimestamp.precise(event.createdAt))
+                                Text(event.summary).font(.system(size: 11.5)).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: 760, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func stepIcon(_ status: String) -> String {
+        switch status {
+        case "completed": return "checkmark.circle.fill"
+        case "in_progress": return "circle.lefthalf.filled"
+        default: return "circle"
+        }
+    }
+
+    private func stepColor(_ status: String) -> Color {
+        switch status {
+        case "completed": return .green
+        case "in_progress": return .accentColor
+        default: return .secondary
+        }
+    }
+}
+
+// MARK: - Traces
+
+private struct TracesView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var query = ""
+    @State private var toolFilter = ""
+    @State private var statusFilter = "all"
+    @State private var payload: RuntimeTracesPayload?
+    @State private var selectedTraceID: UInt64?
+    @State private var loading = false
+
+    private var records: [RuntimeTraceRecord] { payload?.records ?? [] }
+
+    private var selectedRecord: RuntimeTraceRecord? {
+        records.first { $0.id == selectedTraceID }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                PageHeader(title: L10n.text("Traces"), detail: statusDetail)
+                HStack(spacing: 10) {
+                    TextField(L10n.text("Search tool, arguments, or result"), text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                    Picker(L10n.text("Tool"), selection: $toolFilter) {
+                        Text(L10n.text("All tools")).tag("")
+                        ForEach(payload?.tools ?? [], id: \.self) { name in
+                            Text(name).tag(name)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 190)
+                    Picker(L10n.text("Status"), selection: $statusFilter) {
+                        Text(L10n.text("All")).tag("all")
+                        Text(L10n.text("Success")).tag("success")
+                        Text(L10n.text("Error")).tag("error")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 210)
+                    Spacer()
+                    Button(L10n.text("Refresh")) { Task { await reload() } }
+                        .disabled(loading)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            if payload == nil {
+                CatalogUnavailable(reason: L10n.text("Traces are unavailable while AgentDock Core is not running."))
+            } else if payload?.effectiveMode == "off" {
+                CatalogUnavailable(reason: L10n.text("Trace capture is off. Set AGENTDOCK_TRACE_MODE to memory or disk and restart AgentDock Core."))
+            } else {
+                HStack(spacing: 0) {
+                    List(selection: $selectedTraceID) {
+                        ForEach(records) { record in
+                            TraceRowView(record: record)
+                                .tag(record.id)
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    .frame(minWidth: 320, idealWidth: 380, maxWidth: 460)
+
+                    Divider()
+
+                    traceDetailPane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .task { await reload() }
+    }
+
+    private var statusDetail: String {
+        guard let payload else { return "" }
+        let mode = payload.effectiveMode
+        let retention = payload.status?.retentionDays.map { L10n.format("%d days", $0) } ?? "—"
+        return L10n.format("%d records · %@ · retention %@", payload.count, mode, retention)
+    }
+
+    @ViewBuilder private var traceDetailPane: some View {
+        if let record = selectedRecord {
+            TraceDetailContent(record: record)
+        } else {
+            Text(L10n.text("Select a trace"))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func reload() async {
+        loading = true
+        payload = await model.loadTraces(
+            query: query,
+            tool: toolFilter,
+            source: "",
+            status: statusFilter
+        )
+        if let selectedTraceID, !records.contains(where: { $0.id == selectedTraceID }) {
+            self.selectedTraceID = nil
+        }
+        loading = false
+    }
+}
+
+private struct TraceRowView: View {
+    let record: RuntimeTraceRecord
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(record.success ? Color.green : Color.red)
+                .frame(width: 7, height: 7)
+                .padding(.top, 5)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.tool).font(.system(size: 12, weight: .medium))
+                HStack(spacing: 8) {
+                    Text(record.source)
+                    Text(String(format: "%.1f ms", record.durationMS)).monospacedDigit()
+                    Text(RuntimeTimestamp.minute(record.startedAt)).monospacedDigit()
+                        .help(RuntimeTimestamp.precise(record.startedAt))
+                }
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                if let code = record.errorCode, !code.isEmpty {
+                    Text(code).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.red)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+private struct TraceDetailContent: View {
+    let record: RuntimeTraceRecord
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(record.tool).font(.system(size: 18, weight: .semibold))
+                    HStack(spacing: 10) {
+                        Text(record.source)
+                        Text(String(format: "%.1f ms", record.durationMS)).monospacedDigit()
+                        Text(record.success ? L10n.text("Success") : L10n.text("Error"))
+                        Text(RuntimeTimestamp.precise(record.startedAt)).monospacedDigit()
+                    }
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                }
+
+                if let code = record.errorCode, !code.isEmpty {
+                    CatalogCard(title: L10n.text("Error")) {
+                        CatalogKeyValueRow(label: L10n.text("Code"), value: code, mono: true)
+                        if let error = record.error, !error.isEmpty {
+                            Text(error).font(.system(size: 12)).textSelection(.enabled)
+                        }
+                    }
+                }
+
+                payloadCard(L10n.text("Arguments"), record.arguments)
+                payloadCard(L10n.text("Result"), record.result)
+
+                if record.truncated == true {
+                    Text(L10n.text("Payload preview is truncated to 8 KiB per side."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: 860, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder private func payloadCard(_ title: String, _ text: String?) -> some View {
+        CatalogCard(title: title) {
+            if let text, !text.isEmpty {
+                Text(text)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("—").foregroundStyle(.secondary)
+            }
+        }
+    }
 }

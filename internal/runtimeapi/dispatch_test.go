@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/uvwt/agentdock/internal/app"
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 type runtimeStub struct {
@@ -18,11 +19,7 @@ type runtimeStub struct {
 	skillTarget   string
 	skillFilePath string
 	pluginName    string
-	traceQuery    string
-	traceTool     string
-	traceSource   string
-	traceStatus   string
-	traceLimit    int
+	traceQuery    observability.TraceQuery
 	traceCalled   bool
 	changeQuery   string
 	changeLimit   int
@@ -81,9 +78,9 @@ func (r *runtimeStub) RuntimeFileChanges(query string, limit int) (app.Result, e
 	return app.Result{"count": 0, "changes": []any{}}, nil
 }
 
-func (r *runtimeStub) RuntimeTraces(query, tool, source, status string, limit int) (app.Result, error) {
+func (r *runtimeStub) RuntimeTraces(query observability.TraceQuery) (app.Result, error) {
 	r.traceCalled = true
-	r.traceQuery, r.traceTool, r.traceSource, r.traceStatus, r.traceLimit = query, tool, source, status, limit
+	r.traceQuery = query
 	return app.Result{"mode": "memory", "count": 0}, nil
 }
 func (r *runtimeStub) RuntimeMCPServers(context.Context) (app.Result, error) {
@@ -391,8 +388,8 @@ func TestDispatchCatalogAndTraces(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !stub.traceCalled || stub.traceQuery != "file" || stub.traceTool != "read_file" || stub.traceSource != "mcp" || stub.traceStatus != "error" || stub.traceLimit != 25 {
-			t.Fatalf("trace args = %#v", stub)
+		if !stub.traceCalled || stub.traceQuery.Query != "file" || stub.traceQuery.Tool != "read_file" || stub.traceQuery.Source != "mcp" || stub.traceQuery.Status != "error" || stub.traceQuery.Limit != 25 || stub.traceQuery.Summary {
+			t.Fatalf("trace args = %#v", stub.traceQuery)
 		}
 	})
 	t.Run("traces reject invalid limit", func(t *testing.T) {

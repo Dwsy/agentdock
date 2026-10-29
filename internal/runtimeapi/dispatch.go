@@ -11,6 +11,7 @@ import (
 
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/mcp/oauthclient"
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 // MethodAllowed 返回指定 Runtime API 路径允许当前方法与否。
@@ -198,6 +199,19 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			"ok": true, "source": app.RuntimeAPISource, "action": "export",
 			"format": format, "content_type": contentType, "filename": filename, "body": string(body),
 		}, nil
+	case path == "/internal/runtime/traces/detail":
+		detailRuntime, ok := runtime.(TraceDetailRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TRACES_DETAIL_UNSUPPORTED", Message: "runtime does not support trace detail lookups", Category: "not_found",
+			}
+		}
+		id, parseErr := strconv.ParseUint(strings.TrimSpace(request.queryValue("id")), 10, 64)
+		if parseErr != nil || id == 0 {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace id must be a positive integer", Category: "validation"}
+		}
+		result, err := detailRuntime.RuntimeTraceDetail(id)
+		return map[string]any(result), err
 	case path == "/internal/runtime/traces":
 		traceRuntime, ok := runtime.(TraceRuntime)
 		if !ok {
@@ -213,13 +227,23 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			}
 			limit = parsed
 		}
-		result, err := traceRuntime.RuntimeTraces(
-			request.queryValue("q"),
-			request.queryValue("tool"),
-			request.queryValue("source"),
-			request.queryValue("status"),
-			limit,
-		)
+		// view=summary 只下发列表摘要；旧客户端不传 view 时保持完整预览语义。
+		summary := false
+		switch view := strings.ToLower(strings.TrimSpace(request.queryValue("view"))); view {
+		case "", "full":
+		case "summary":
+			summary = true
+		default:
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace view must be full or summary", Category: "validation"}
+		}
+		result, err := traceRuntime.RuntimeTraces(observability.TraceQuery{
+			Query:   request.queryValue("q"),
+			Tool:    request.queryValue("tool"),
+			Source:  request.queryValue("source"),
+			Status:  request.queryValue("status"),
+			Limit:   limit,
+			Summary: summary,
+		})
 		return map[string]any(result), err
 	case path == "/internal/runtime/artifacts":
 		artifacts, ok := runtime.(ArtifactRuntime)

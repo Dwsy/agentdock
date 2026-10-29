@@ -22,6 +22,8 @@ const (
 var traceExportCSVHeader = []string{
 	"id", "started_at", "tool", "source", "user_agent", "trace_id",
 	"duration_ms", "success", "error_code", "arguments", "result", "error",
+	// 命令证据追加在末尾：既有列位置不变，旧解析器可以忽略新增列。
+	"command", "stdout", "stderr", "exit_code",
 }
 
 // RuntimeTracesExport 按与 RuntimeTraces 相同的过滤语义导出记录。
@@ -72,6 +74,15 @@ func (r *Runtime) RuntimeTracesExport(format, query, tool, source, status string
 
 // traceCSVRow 把记录投影成固定列顺序的 CSV 行。
 func traceCSVRow(record observability.TraceRecord) []string {
+	command, stdout, stderr, exitCode := "", "", "", ""
+	if record.Command != nil {
+		command = traceCSVSingleLine(record.Command.Command)
+		stdout = traceCSVSingleLine(record.Command.Stdout)
+		stderr = traceCSVSingleLine(record.Command.Stderr)
+		if record.Command.ExitCode != nil {
+			exitCode = strconv.Itoa(*record.Command.ExitCode)
+		}
+	}
 	return []string{
 		strconv.FormatUint(record.ID, 10),
 		record.StartedAt.UTC().Format(time.RFC3339Nano),
@@ -85,6 +96,7 @@ func traceCSVRow(record observability.TraceRecord) []string {
 		traceCSVSingleLine(record.Arguments),
 		traceCSVSingleLine(record.Result),
 		record.Error,
+		command, stdout, stderr, exitCode,
 	}
 }
 

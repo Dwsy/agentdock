@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -90,17 +91,17 @@ func TestRuntimeTracesExportCSVHeaderAndEscaping(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("csv line count = %d\n%s", len(lines), body)
 	}
-	header := "id,started_at,tool,source,user_agent,trace_id,duration_ms,success,error_code,arguments,result,error"
+	header := "id,started_at,tool,source,user_agent,trace_id,duration_ms,success,error_code,arguments,result,error,command,stdout,stderr,exit_code"
 	if lines[0] != header {
 		t.Fatalf("csv header = %q", lines[0])
 	}
 	// 引号翻倍、含逗号/引号的字段加引号；换行转成字面 \n 保持单行。
 	// 记录顺序与 Query 一致：新到旧。
-	wantNewest := `2,2024-01-02T03:04:06Z,write_file,mcp,,,0,false,INVALID_ARGUMENT,"{""plain"":true}",,boom`
+	wantNewest := `2,2024-01-02T03:04:06Z,write_file,mcp,,,0,false,INVALID_ARGUMENT,"{""plain"":true}",,boom,,,,`
 	if lines[1] != wantNewest {
 		t.Fatalf("csv row 1 = %q\nwant     %q", lines[1], wantNewest)
 	}
-	wantOldest := `1,2024-01-02T03:04:05Z,read_file,internal,ua/1,tr-1,12.5,true,,"a,""b""\nsecond line","x,y",`
+	wantOldest := `1,2024-01-02T03:04:05Z,read_file,internal,ua/1,tr-1,12.5,true,,"a,""b""\nsecond line","x,y",,,,,`
 	if lines[2] != wantOldest {
 		t.Fatalf("csv row 2 = %q\nwant     %q", lines[2], wantOldest)
 	}
@@ -143,7 +144,7 @@ func TestRuntimeTracesClearMemory(t *testing.T) {
 	if result["ok"] != true || result["source"] != runtimeAPISource || result["action"] != "clear" || result["cleared"] != 2 {
 		t.Fatalf("clear result = %#v", result)
 	}
-	traces, err := rt.RuntimeTraces("", "", "", "", 0)
+	traces, err := rt.RuntimeTraces(observability.TraceQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +190,7 @@ func TestRuntimeTracesClearDiskRemovesFiles(t *testing.T) {
 	if err != nil || len(files) != 0 {
 		t.Fatalf("trace files after clear = %v (err=%v)", files, err)
 	}
-	traces, err := rt.RuntimeTraces("", "", "", "", 0)
+	traces, err := rt.RuntimeTraces(observability.TraceQuery{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,5 +214,38 @@ func TestRuntimeTracesClearDisabled(t *testing.T) {
 	}
 	if result["cleared"] != 0 || result["ok"] != true {
 		t.Fatalf("clear result = %#v", result)
+	}
+}
+
+func TestRuntimeTracesExportCSVIncludesCommandColumns(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	exitCode := 0
+	rt.traces.Record(observability.TraceRecord{
+		Tool: "exec_command", Source: "mcp", StartedAt: time.Now(), Success: true,
+		Result: "exit_code=0 stdout=3B stderr=1B",
+		Command: &observability.CommandTrace{
+			Command: "printf 'a\\nb'", Stdout: "a\nb", Stderr: "e", ExitCode: &exitCode,
+		},
+	})
+
+	body, _, _, err := rt.RuntimeTracesExport("csv", "", "", "", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := csv.NewReader(strings.NewReader(string(body))).ReadAll()
+	if err != nil {
+		t.Fatalf("csv parse: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d", len(rows))
+	}
+	// 追加列必须携带命令与输出，否则 exec_command 的 stdout 只能从 JSON 导出回读。
+	if rows[1][2] != "exec_command" {
+		t.Fatalf("tool column = %q", rows[1][2])
+	}
+	want := []string{"printf 'a\\nb'", "a\\nb", "e", "0"}
+	got := rows[1][len(rows[1])-4:]
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("command columns = %#v, want %#v", got, want)
 	}
 }

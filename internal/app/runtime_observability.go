@@ -74,6 +74,11 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	}
 	// trace 是独立开关：默认关闭时 r.traces 为 nil，不产生任何序列化开销。
 	if r != nil && r.traces != nil {
+		var resultMap map[string]any
+		if result != nil {
+			resultMap = *result
+		}
+		command := observability.CommandTraceFrom(toolName, args, resultMap)
 		r.traces.Record(observability.TraceRecord{
 			Tool:          toolName,
 			Source:        string(source),
@@ -86,8 +91,9 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			ErrorCategory: errorCategory,
 			TraceID:       traceID,
 			Arguments:     tracePayload(args),
-			Result:        tracePayload(result),
+			Result:        traceResultText(result, command),
 			Error:         traceErrorText(callErr),
+			Command:       command,
 			FileChanges:   traceFileChanges(toolName, args, result, success),
 		})
 	}
@@ -129,6 +135,19 @@ func tracePayload(value any) string {
 		return ""
 	}
 	return string(encoded)
+}
+
+// traceResultText 在命令类工具上用结构化摘要替代完整 Result 的 JSON 序列化。
+// exec_command 的 Result 含最多 max_output_bytes（上限 4 MiB）的 stdout/stderr，
+// 整份序列化再脱敏会让工具返回路径多花几十到几百毫秒；正文已经由
+// CommandTrace 分字段保存，所以这里只留规模与退出状态。
+func traceResultText(result any, command *observability.CommandTrace) string {
+	if command != nil {
+		if summary, ok := command.ResultSummary(); ok {
+			return summary
+		}
+	}
+	return tracePayload(result)
 }
 
 func traceErrorText(callErr *error) string {

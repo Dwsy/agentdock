@@ -23,6 +23,7 @@ private enum RuntimeAPIPath {
     static let catalog = "/internal/runtime/catalog"
     static let tasks = "/internal/runtime/tasks"
     static let traces = "/internal/runtime/traces"
+    static let traceDetail = "/internal/runtime/traces/detail"
     static let fileChanges = "/internal/runtime/file-changes"
     static let artifacts = "/internal/runtime/artifacts"
 }
@@ -410,9 +411,11 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
     let result: String?
     let error: String?
     let truncated: Bool?
+    /// 命令类工具的结构化入参/出参；其他工具为 nil。
+    let command: RuntimeTraceCommand?
 
     private enum CodingKeys: String, CodingKey {
-        case id, tool, source, success, arguments, result, error, truncated
+        case id, tool, source, success, arguments, result, error, truncated, command
         case userAgent = "user_agent"
         case startedAt = "started_at"
         case durationMS = "duration_ms"
@@ -486,7 +489,7 @@ struct RuntimeFileChangeEntry: Decodable, Identifiable {
     var id: String { "\(rawID)-\(path)" }
 
     private enum CodingKeys: String, CodingKey {
-        case tool, source, path, action, insertions, deletions, diff, truncated
+        case tool, source, success, path, action, insertions, deletions, diff, truncated
         case rawID = "id"
         case traceID = "trace_id"
         case startedAt = "started_at"
@@ -1078,6 +1081,7 @@ final class ServiceController: @unchecked Sendable {
         tool: String = "",
         source: String = "",
         status: String = "",
+        view: String = "full",
         configuration: ServiceConfiguration?
     ) async -> RuntimeTracesPayload? {
         guard let configuration else { return nil }
@@ -1086,6 +1090,8 @@ final class ServiceController: @unchecked Sendable {
         if !tool.isEmpty { items.append(URLQueryItem(name: "tool", value: tool)) }
         if !source.isEmpty { items.append(URLQueryItem(name: "source", value: source)) }
         if !status.isEmpty { items.append(URLQueryItem(name: "status", value: status)) }
+        // view=summary 让列表只回摘要；正文由 runtimeTraceDetail 按需拉取。
+        if !view.isEmpty { items.append(URLQueryItem(name: "view", value: view)) }
         return await fetchRuntimePayload(
             RuntimeTracesPayload.self,
             configuration: configuration,
@@ -1093,6 +1099,17 @@ final class ServiceController: @unchecked Sendable {
             queryItems: items,
             timeout: 5
         )
+    }
+
+    func runtimeTraceDetail(id: UInt64, configuration: ServiceConfiguration?) async -> RuntimeTraceRecord? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeTraceDetailPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.traceDetail,
+            queryItems: [URLQueryItem(name: "id", value: String(id))],
+            timeout: 5
+        )?.record
     }
 
     func start() async throws -> BackgroundServiceLifecycleResult {

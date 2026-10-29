@@ -51,12 +51,23 @@ const (
 )
 
 const (
+	// TracePreviewBytes 是通用 Arguments/Result 单侧预览上限。
 	TracePreviewBytes = 8 << 10
-	traceQueryLimit   = 500
-	traceDefaultLimit = 100
+	// TraceCommandTextBytes 是 exec_command 的命令/stdout/stderr 单侧预览上限。
+	// 与通用预览同一量级，保证单条命令记录最多约 30 KiB：trace 默认保留
+	// 2000 条且全部驻留内存，再大就会让“记住一次调用”变成几十 MB 的常驻成本。
+	TraceCommandTextBytes = 8 << 10
+	// traceRedactionScanBytes 是脱敏正则的扫描窗口。脱敏对每个字节都要跑一遍
+	// 规则，实测 1 MiB 命令输出约 65 ms；先把原始文本裁到保留窗口的两倍
+	// （留出脱敏收缩的余量），再脱敏、再裁到预览上限，
+	// 避免大输出阻塞工具返回路径。
+	traceRedactionScanBytes = 2 * TracePreviewBytes
+	traceQueryLimit         = 500
+	traceDefaultLimit       = 100
 	// traceExportLimit 是导出的默认条数：导出要覆盖完整保留窗口，
 	// 不能沿用 UI 首屏的 traceQueryLimit 上限。
-	traceExportLimit = 2000
+	traceExportLimit     = 2000
+	traceTruncatedMarker = "…(truncated)"
 )
 
 type TraceOptions struct {
@@ -116,6 +127,9 @@ type TraceRecord struct {
 	Result        string    `json:"result,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	Truncated     bool      `json:"truncated,omitempty"`
+	// Command 只在命令类工具（exec_command 等）非空：它把命令、cwd 与输出
+	// 拆成有上限的独立字段，UI 才能分段渲染并标出到底哪一侧被截断。
+	Command *CommandTrace `json:"command,omitempty"`
 	// FileChanges 只在 file_edit 成功时非空；关闭 trace 时不产生。
 	FileChanges []FileChange `json:"file_changes,omitempty"`
 }
@@ -126,6 +140,9 @@ type TraceQuery struct {
 	Source string
 	Status string
 	Limit  int
+	// Summary 只返回列表摘要：去掉 Arguments/Result 与命令输出正文，
+	// 让“100 条记录”的控制面板请求保持在几十 KB 而不是几 MB。
+	Summary bool
 }
 
 type TraceStatus struct {
@@ -235,11 +252,13 @@ func (s *TraceStore) Record(record TraceRecord) {
 		return
 	}
 	record.Arguments, record.Truncated = tracePreview(record.Arguments)
-	if extra, truncated := tracePreview(record.Result); truncated {
+	result, truncated := tracePreview(record.Result)
+	record.Result = result
+	if truncated {
 		record.Truncated = true
-		record.Result = extra
-	} else {
-		record.Result = extra
+	}
+	if record.Command != nil && record.Command.trim() {
+		record.Truncated = true
 	}
 	record.Error = toolcore.RedactSecrets(record.Error, nil)
 
@@ -263,12 +282,37 @@ func (s *TraceStore) Record(record TraceRecord) {
 	}
 }
 
+// tracePreview 先裁扫描窗口再脱敏，最后裁到预览上限。顺序不能反：
+// 脱敏代价与输入长度成正比，先对 MB 级文本跑正则会卡住调用方。
 func tracePreview(value string) (string, bool) {
-	value = redactTracePayload(value)
-	if len(value) <= TracePreviewBytes {
-		return value, false
+	return tracePreviewWith(value, TracePreviewBytes, redactTracePayload)
+}
+
+func tracePreviewLimit(value string, limit int) (string, bool) {
+	return tracePreviewWith(value, limit, redactTracePayload)
+}
+
+// traceCommandPreview 在通用脱敏之外补命令行凭据规则；通用规则只认
+// KEY=value，而 curl -H "Authorization: Bearer ..." 这类写法匹配不到。
+func traceCommandPreview(value string, limit int) (string, bool) {
+	return tracePreviewWith(value, limit, redactCommandPayload)
+}
+
+func tracePreviewWith(value string, limit int, redact func(string) string) (string, bool) {
+	truncated := false
+	if len(value) > traceRedactionScanBytes {
+		value = value[:traceRedactionScanBytes]
+		truncated = true
 	}
-	return value[:TracePreviewBytes] + "…(truncated)", true
+	value = redact(value)
+	if len(value) > limit {
+		value = traceCut(value, limit)
+		truncated = true
+	}
+	if truncated {
+		value += traceTruncatedMarker
+	}
+	return value, truncated
 }
 
 // JSON 参数里的凭据是 "token": "..." 形式，不带等号，默认命令输出规则
@@ -277,13 +321,37 @@ var traceJSONSecretPattern = regexp.MustCompile(`(?i)"(token|password|secret|api
 
 func redactTracePayload(value string) string {
 	out := toolcore.RedactSecrets(value, nil)
-	return traceJSONSecretPattern.ReplaceAllStringFunc(out, func(match string) string {
-		index := strings.Index(match, ":")
-		if index < 0 {
-			return "***"
+	out = traceJSONSecretPattern.ReplaceAllStringFunc(out, traceJSONSecretReplacement)
+	return traceJSONOpenSecretPattern.ReplaceAllStringFunc(out, traceJSONSecretReplacement)
+}
+
+// traceJSONOpenSecretPattern 处理“截断正好落在敏感值中间”的尾巴：预截断后
+// 未闭合的字符串匹配不到键值规则，若不额外抹掉，预览会把凭据前缀带出去。
+// 只匹配到文本结尾的未闭合值，合法 JSON 不会命中。
+var traceJSONOpenSecretPattern = regexp.MustCompile(`(?i)"(token|password|secret|api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|private[_-]?key)"\s*:\s*"(?:[^"\\]|\\.)*$`)
+
+func traceJSONSecretReplacement(match string) string {
+	index := strings.Index(match, ":")
+	if index < 0 {
+		return "***"
+	}
+	return match[:index+1] + `"***"`
+}
+
+// RecordByID 返回保留窗口内指定 ID 的完整记录，供详情页按需读取；
+// 列表接口只带摘要，避免一次拉取全部大 payload。
+func (s *TraceStore) RecordByID(id uint64) (TraceRecord, bool) {
+	if s == nil || id == 0 {
+		return TraceRecord{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for i := len(s.records) - 1; i >= 0; i-- {
+		if s.records[i].ID == id {
+			return s.records[i], true
 		}
-		return match[:index+1] + `"***"`
-	})
+	}
+	return TraceRecord{}, false
 }
 
 // Query 从新到旧过滤，保证 UI 打开即看到最近一次调用。
@@ -336,6 +404,9 @@ func (s *TraceStore) filterRecords(query TraceQuery, limit int, invalidStatusNil
 		record := s.records[i]
 		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter) {
 			continue
+		}
+		if query.Summary {
+			record = traceSummaryRecord(record)
 		}
 		out = append(out, record)
 		if len(out) >= limit {
@@ -417,8 +488,26 @@ func (s *TraceStore) Clear() (int, error) {
 	return cleared, errors.Join(clearErrs...)
 }
 
+// traceSummaryRecord 去掉正文只保留摘要。这里复制 Command 而不是原地修改：
+// 记录本身仍在保留窗口里，摘要投影不能破坏后续详情读取。
+func traceSummaryRecord(record TraceRecord) TraceRecord {
+	record.Arguments = ""
+	record.Result = ""
+	if record.Command != nil {
+		command := *record.Command
+		command.Command = ""
+		command.Stdout = ""
+		command.Stderr = ""
+		record.Command = &command
+	}
+	return record
+}
+
 func traceMatches(record TraceRecord, needle string) bool {
 	fields := []string{record.Tool, string(record.Source), record.UserAgent, record.TaskID, record.ErrorCode, record.Error, record.Arguments, record.Result, record.TraceID}
+	if record.Command != nil {
+		fields = append(fields, record.Command.searchFields()...)
+	}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), needle) {
 			return true

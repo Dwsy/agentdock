@@ -40,7 +40,7 @@ func newTraceTestRuntime(t *testing.T, mode config.TraceMode) *Runtime {
 
 func TestRuntimeTracesDisabledByDefault(t *testing.T) {
 	rt := newRuntimeValidationTestRuntime(t)
-	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	result, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestRuntimeTracesCaptureArgumentsAndResult(t *testing.T) {
 	if _, err := rt.Call(context.Background(), "agentdock_context", nil); err != nil {
 		t.Fatal(err)
 	}
-	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	result, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestRuntimeTracesRecordFailures(t *testing.T) {
 	if _, err := rt.Call(context.Background(), "read_file", map[string]any{}); err == nil {
 		t.Fatal("expected validation error")
 	}
-	result, err := rt.RuntimeTraces("", "", "", "error", 10)
+	result, err := rt.RuntimeTraces(observability.TraceQuery{Status: "error", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestRuntimeTracesDiskModeSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = second.Close() })
-	result, err := second.RuntimeTraces("", "", "", "", 10)
+	result, err := second.RuntimeTraces(observability.TraceQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func mustCatalog(t *testing.T, rt *Runtime) Result {
 
 func mustTraces(t *testing.T, rt *Runtime) Result {
 	t.Helper()
-	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	result, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestRuntimeCapturesUserAgent(t *testing.T) {
 		t.Fatalf("analytics recent calls = %#v", records)
 	}
 
-	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	result, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestRuntimeCapturesTaskID(t *testing.T) {
 		t.Fatalf("analytics recent calls = %#v", records)
 	}
 
-	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	result, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

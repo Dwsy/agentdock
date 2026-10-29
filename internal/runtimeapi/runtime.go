@@ -47,8 +47,16 @@ type CatalogRuntime interface {
 }
 
 // TraceRuntime 是可选的可观测能力；trace 关闭时实现仍返回 mode=off。
+// 查询条件用 observability.TraceQuery 结构携带，让 list 摘要视图和后续过滤
+// 条件可以增量扩展，不再给每个传输层重复改一遍参数列表。
 type TraceRuntime interface {
-	RuntimeTraces(query, tool, source, status string, limit int) (app.Result, error)
+	RuntimeTraces(observability.TraceQuery) (app.Result, error)
+}
+
+// TraceDetailRuntime 是 trace 详情能力：列表只带摘要，选中记录后按 ID 拉取
+// 完整预览。独立于 TraceRuntime，旧实现可以明确报“不支持”而不是返回空记录。
+type TraceDetailRuntime interface {
+	RuntimeTraceDetail(id uint64) (app.Result, error)
 }
 
 // FileChangeRuntime 是 trace 之上的文件历史投影，供控制面板构建目录树。

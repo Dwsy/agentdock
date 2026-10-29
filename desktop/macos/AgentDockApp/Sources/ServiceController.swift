@@ -91,17 +91,32 @@ enum RuntimeJSONValue: Decodable {
     }
 }
 
+struct RuntimeToolAnnotations: Decodable {
+    let readOnlyHint: Bool
+    let destructiveHint: Bool?
+    let idempotentHint: Bool
+    let openWorldHint: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case readOnlyHint = "read_only_hint"
+        case destructiveHint = "destructive_hint"
+        case idempotentHint = "idempotent_hint"
+        case openWorldHint = "open_world_hint"
+    }
+}
+
 struct RuntimeCatalogTool: Decodable, Identifiable {
     let name: String
     let title: String?
     let description: String
     let inputSchema: RuntimeJSONValue?
     let outputSchema: RuntimeJSONValue?
+    let annotations: RuntimeToolAnnotations?
 
     var id: String { name }
 
     private enum CodingKeys: String, CodingKey {
-        case name, title, description
+        case name, title, description, annotations
         case inputSchema = "input_schema"
         case outputSchema = "output_schema"
     }
@@ -226,6 +241,57 @@ struct RuntimePluginItem: Decodable, Identifiable {
 struct RuntimePluginsPayload: Decodable {
     let count: Int
     let plugins: [RuntimePluginItem]
+}
+
+struct RuntimePluginSkill: Decodable, Identifiable {
+    let name: String
+    let description: String
+    let path: String
+
+    var id: String { name + "·" + path }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description
+        case path = "path"
+    }
+}
+
+struct RuntimePluginMCP: Decodable, Identifiable {
+    let name: String
+    let description: String
+    let transport: String
+    let url: String?
+    let command: String?
+    let runtimeName: String?
+
+    var id: String { name }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, description, transport, url, command
+        case runtimeName = "runtime_name"
+    }
+}
+
+struct RuntimePluginDetail: Decodable {
+    let name: String
+    let version: String
+    let description: String?
+    let enabled: Bool
+    let packageDigest: String
+    let format: String
+    let skills: [RuntimePluginSkill]?
+    let mcp: [RuntimePluginMCP]?
+    let executables: [String]?
+    let warnings: [String]?
+
+    private enum CodingKeys: String, CodingKey {
+        case name, version, description, enabled, format, skills, mcp, executables, warnings
+        case packageDigest = "package_digest"
+    }
+}
+
+struct RuntimePluginDetailPayload: Decodable {
+    let plugin: RuntimePluginDetail
 }
 
 struct RuntimeTaskRow: Decodable, Identifiable {
@@ -913,6 +979,16 @@ final class ServiceController: @unchecked Sendable {
         )
     }
 
+    func runtimePlugin(name: String, configuration: ServiceConfiguration?) async -> RuntimePluginDetail? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimePluginDetailPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.plugins + "/" + name,
+            timeout: 5
+        )?.plugin
+    }
+
     func runtimeTasks(configuration: ServiceConfiguration?) async -> RuntimeTasksPayload? {
         guard let configuration else { return nil }
         return await fetchRuntimePayload(
@@ -934,9 +1010,9 @@ final class ServiceController: @unchecked Sendable {
         )?.task
     }
 
-    func runtimeFileChanges(query: String = "", configuration: ServiceConfiguration?) async -> RuntimeFileChangesPayload? {
+    func runtimeFileChanges(query: String = "", limit: Int = 500, configuration: ServiceConfiguration?) async -> RuntimeFileChangesPayload? {
         guard let configuration else { return nil }
-        var items: [URLQueryItem] = []
+        var items: [URLQueryItem] = [URLQueryItem(name: "limit", value: String(limit))]
         if !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
         return await fetchRuntimePayload(
             RuntimeFileChangesPayload.self,

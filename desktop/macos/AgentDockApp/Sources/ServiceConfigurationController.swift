@@ -11,6 +11,8 @@ struct EditableServiceSettings {
     let acpEnabled: Bool
     let acpProfiles: [ACPProfileConfiguration]
     let acpDefaultProfile: String
+    let traceMode: TraceMode
+    let traceRetentionDays: Int
 
     init(
         port: Int,
@@ -21,7 +23,9 @@ struct EditableServiceSettings {
         browserReuseExistingCDP: Bool,
         acpEnabled: Bool,
         acpProfiles: [ACPProfileConfiguration] = [],
-        acpDefaultProfile: String = ""
+        acpDefaultProfile: String = "",
+        traceMode: TraceMode,
+        traceRetentionDays: Int
     ) {
         self.port = port
         self.logLevel = logLevel
@@ -32,10 +36,15 @@ struct EditableServiceSettings {
         self.acpEnabled = acpEnabled
         self.acpProfiles = acpProfiles
         self.acpDefaultProfile = acpDefaultProfile
+        self.traceMode = traceMode
+        self.traceRetentionDays = traceRetentionDays
     }
 
     func validated() throws -> EditableServiceSettings {
         try ServicePortValidation.validate(port)
+        guard (1...30).contains(traceRetentionDays) else {
+            throw ValidationError(L10n.text("Trace retention must be between 1 and 30 days."))
+        }
         let normalizedLogLevel = ServiceConfiguration.normalizedLogLevel(logLevel)
         guard ["debug", "info", "warn", "error"].contains(normalizedLogLevel) else {
             throw ValidationError(L10n.text("Log level must be debug, info, warn, or error."))
@@ -115,7 +124,9 @@ struct EditableServiceSettings {
             browserReuseExistingCDP: browserReuseExistingCDP,
             acpEnabled: acpEnabled,
             acpProfiles: profiles,
-            acpDefaultProfile: defaultProfileID
+            acpDefaultProfile: defaultProfileID,
+            traceMode: traceMode,
+            traceRetentionDays: traceRetentionDays
         )
     }
 
@@ -182,6 +193,8 @@ final class ServiceConfigurationController {
             "AGENTDOCK_ACP_ENABLED": settings.acpEnabled ? "true" : "false",
             "AGENTDOCK_ACP_PROFILES_JSON": try ACPDesktopConfiguration.encodeProfiles(settings.acpProfiles),
             "AGENTDOCK_ACP_DEFAULT_PROFILE": settings.acpDefaultProfile,
+            "AGENTDOCK_TRACE_MODE": settings.traceMode.rawValue,
+            "AGENTDOCK_TRACE_RETENTION_DAYS": String(settings.traceRetentionDays),
         ]
         let updatedData = try environment.dataByUpdating(replacements, removing: ServiceConfiguration.removableLegacyKeys)
         let wasLoaded = service.isLoaded()

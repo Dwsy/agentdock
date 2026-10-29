@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/uvwt/agentdock/internal/config"
@@ -192,5 +194,100 @@ func TestRuntimeFileChangesDisabledReportsOff(t *testing.T) {
 	}
 	if changes := result["changes"].([]observability.FileChangeEntry); len(changes) != 0 {
 		t.Fatalf("changes = %#v", changes)
+	}
+}
+
+// TestRuntimeTraceAPIsJSONShape 锁定 Swift 端依赖的字段名；改字段必须先改 UI 解码器。
+func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	target := filepath.Join(t.TempDir(), "shape.txt")
+	if err := os.WriteFile(target, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Call(context.Background(), "file_edit", map[string]any{
+		"action": "replace", "path": target, "old": "a", "new": "b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Call(context.Background(), "agentdock_context", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]struct {
+		result Result
+		fields []string
+	}{
+		"catalog": {
+			result: mustCatalog(t, rt),
+			fields: []string{`"tools"`, `"rules"`, `"common_skills"`, `"input_schema"`, `"output_schema"`, `"workspace_root"`, `"read_only_hint"`},
+		},
+		"traces": {
+			result: mustTraces(t, rt),
+			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`},
+		},
+		"file-changes": {
+			result: mustFileChanges(t, rt),
+			fields: []string{`"changes"`, `"path"`, `"action"`, `"insertions"`, `"deletions"`, `"diff"`, `"started_at"`},
+		},
+	}
+	for name, test := range cases {
+		encoded, err := json.Marshal(test.result)
+		if err != nil {
+			t.Fatalf("%s marshal: %v", name, err)
+		}
+		body := string(encoded)
+		for _, field := range test.fields {
+			if !strings.Contains(body, field) {
+				t.Fatalf("%s is missing %s: %s", name, field, body)
+			}
+		}
+	}
+}
+
+func mustCatalog(t *testing.T, rt *Runtime) Result {
+	t.Helper()
+	result, err := rt.RuntimeCatalog(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func mustTraces(t *testing.T, rt *Runtime) Result {
+	t.Helper()
+	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func mustFileChanges(t *testing.T, rt *Runtime) Result {
+	t.Helper()
+	result, err := rt.RuntimeFileChanges("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestRuntimeFileChangesSkipsFailedEdits(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	target := filepath.Join(t.TempDir(), "fail.txt")
+	if err := os.WriteFile(target, []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// old 不匹配 → 工具失败，不产生 diff，也不应进入文件历史。
+	if _, err := rt.Call(context.Background(), "file_edit", map[string]any{
+		"action": "replace", "path": target, "old": "missing", "new": "x",
+	}); err == nil {
+		t.Fatal("expected edit to fail")
+	}
+	result, err := rt.RuntimeFileChanges("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changes := result["changes"].([]observability.FileChangeEntry); len(changes) != 0 {
+		t.Fatalf("failed edit leaked into history: %#v", changes)
 	}
 }

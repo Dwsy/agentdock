@@ -40,6 +40,20 @@ enum MCPAppsMode: String, CaseIterable {
     case off
 }
 
+enum TraceMode: String, CaseIterable, Identifiable {
+    case off, memory, disk
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: return L10n.text("Off")
+        case .memory: return L10n.text("Memory only")
+        case .disk: return L10n.text("Memory + disk")
+        }
+    }
+}
+
 struct ServiceConfiguration: Equatable {
     static let editableKeys = [
         "AGENTDOCK_PORT",
@@ -51,6 +65,8 @@ struct ServiceConfiguration: Equatable {
         "AGENTDOCK_ACP_ENABLED",
         "AGENTDOCK_ACP_PROFILES_JSON",
         "AGENTDOCK_ACP_DEFAULT_PROFILE",
+        "AGENTDOCK_TRACE_MODE",
+        "AGENTDOCK_TRACE_RETENTION_DAYS",
     ]
     // 旧配置键只用于读取迁移或已停止使用；新版保存时统一清除，避免继续形成双写状态。
     static let removableLegacyKeys: Set<String> = [
@@ -77,6 +93,8 @@ struct ServiceConfiguration: Equatable {
     let acpEnabled: Bool
     let acpProfiles: [ACPProfileConfiguration]
     let acpDefaultProfile: String
+    let traceMode: TraceMode
+    let traceRetentionDays: Int
 
     var healthHost: String {
         switch host {
@@ -137,6 +155,9 @@ struct ServiceConfiguration: Equatable {
         guard acpProfiles.contains(where: { $0.id == acpDefaultProfile }) else {
             return nil
         }
+        // 未知 trace 值按 off 展示；Core 自己会在启动时严格校验，UI 不放大错误。
+        let traceMode = TraceMode(rawValue: (values["AGENTDOCK_TRACE_MODE"] ?? "off").lowercased()) ?? .off
+        let traceRetentionDays = Int(values["AGENTDOCK_TRACE_RETENTION_DAYS"] ?? "3") ?? 3
         return ServiceConfiguration(
             host: host,
             port: port,
@@ -150,7 +171,9 @@ struct ServiceConfiguration: Equatable {
             browserReuseExistingCDP: parseBool(values["AGENTDOCK_BROWSER_REUSE_EXISTING_CDP"]),
             acpEnabled: acpEnabled,
             acpProfiles: acpProfiles,
-            acpDefaultProfile: acpDefaultProfile
+            acpDefaultProfile: acpDefaultProfile,
+            traceMode: traceMode,
+            traceRetentionDays: traceRetentionDays
         )
     }
 

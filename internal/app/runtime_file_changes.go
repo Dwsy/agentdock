@@ -13,14 +13,11 @@ const traceFileDiffBytes = 8 << 10
 
 // traceFileChanges 从 file_edit 的返回结果提取文件级变更。
 // 只在成功调用上产生数据：失败调用的 diff 不可信，也不应出现在历史里。
-func traceFileChanges(tool string, args map[string]any, result *Result) []observability.FileChange {
-	if tool != "file_edit" || result == nil {
+func traceFileChanges(tool string, args map[string]any, result *Result, success bool) []observability.FileChange {
+	if tool != "file_edit" || !success || result == nil {
 		return nil
 	}
 	payload := *result
-	if success, ok := payload["command_ok"].(bool); ok && !success {
-		return nil
-	}
 
 	diff, _ := payload["diff_preview"].(string)
 	truncated, _ := payload["truncated"].(bool)

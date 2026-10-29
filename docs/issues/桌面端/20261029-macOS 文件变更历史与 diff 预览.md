@@ -68,6 +68,8 @@ tags: ["workhub", "macos", "files", "diff", "trace"]
 | 日期 | 错误 | 解决方案 |
 |------|------|---------|
 | 2026-10-29 | 测试比较路径失败（`/var` vs `/private/var`） | 用 `filepath.EvalSymlinks` 对齐真实路径 |
+| 2026-10-29 | 失败编辑也可能带部分 result，曾被误采集 | `traceFileChanges` 增加 `success` 门控并补回归测试 |
+| 2026-10-29 | 绝对路径树根出现 `//a/b` | 单独拼接 pathComponents 的前导 `/` |
 
 ## 相关资源
 

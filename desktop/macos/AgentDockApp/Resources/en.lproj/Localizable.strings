@@ -676,3 +676,25 @@
 "No file changes recorded yet. History starts when trace capture is enabled." = "No file changes recorded yet. History starts when trace capture is enabled.";
 "truncated" = "truncated";
 "%d changes · %@" = "%d changes · %@";
+
+"Annotations" = "Annotations";
+"Read only" = "Read only";
+"Destructive" = "Destructive";
+"Idempotent" = "Idempotent";
+"Open world" = "Open world";
+"Description" = "Description";
+"Executables" = "Executables";
+"Warnings" = "Warnings";
+"Call tracing" = "Call tracing";
+"Record tool arguments and results for debugging." = "Record tool arguments and results for debugging.";
+"Keep traces" = "Keep traces";
+"Older trace files are deleted after this window." = "Older trace files are deleted after this window.";
+"Memory only" = "Memory only";
+"Memory + disk" = "Memory + disk";
+"Trace retention must be between 1 and 30 days." = "Trace retention must be between 1 and 30 days.";
+
+"Created" = "Created";
+"Edited" = "Edited";
+"Patched" = "Patched";
+"Deleted" = "Deleted";
+"Moved" = "Moved";

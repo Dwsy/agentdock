@@ -70,7 +70,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			Arguments:     tracePayload(args),
 			Result:        tracePayload(result),
 			Error:         traceErrorText(callErr),
-			FileChanges:   traceFileChanges(toolName, args, result),
+			FileChanges:   traceFileChanges(toolName, args, result, success),
 		})
 	}
 

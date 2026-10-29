@@ -268,6 +268,10 @@ private final class ControlPanelModel: ObservableObject {
         )
     }
 
+    func loadPluginDetail(name: String) async -> RuntimePluginDetail? {
+        await service.runtimePlugin(name: name, configuration: status.configuration)
+    }
+
     func loadFileChanges(query: String) async -> RuntimeFileChangesPayload? {
         await service.runtimeFileChanges(query: query, configuration: status.configuration)
     }
@@ -1307,6 +1311,8 @@ private struct CapabilitiesView: View {
     @State private var profiles: [ACPProfileConfiguration] = []
     @State private var defaultProfile = ""
     @State private var selectedMCPAppsMode: MCPAppsMode = .full
+    @State private var traceMode: TraceMode = .off
+    @State private var traceRetentionDays = 3
     @State private var customName = ""
     @State private var customCommand = ""
     @State private var customArguments = ""
@@ -1410,6 +1416,28 @@ private struct CapabilitiesView: View {
                             }.labelsHidden().frame(width: 120, alignment: .trailing)
                         }
                     }
+
+                    SettingsCard {
+                        SettingsRow(L10n.text("Call tracing"), detail: L10n.text("Record tool arguments and results for debugging.")) {
+                            Picker(L10n.text("Call tracing"), selection: $traceMode) {
+                                ForEach(TraceMode.allCases) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 160, alignment: .trailing)
+                        }
+                        if traceMode != .off {
+                            RowDivider()
+                            SettingsRow(L10n.text("Keep traces"), detail: L10n.text("Older trace files are deleted after this window.")) {
+                                Stepper(value: $traceRetentionDays, in: 1...30) {
+                                    Text(L10n.format("%d days", traceRetentionDays))
+                                        .monospacedDigit()
+                                }
+                                .frame(width: 120, alignment: .trailing)
+                            }
+                        }
+                    }
                 }
 
                 Button(L10n.text("Save and restart")) {
@@ -1422,7 +1450,9 @@ private struct CapabilitiesView: View {
                         browserReuseExistingCDP: browserMode == 1,
                         acpEnabled: acpEnabled,
                         acpProfiles: profiles,
-                        acpDefaultProfile: defaultProfile
+                        acpDefaultProfile: defaultProfile,
+                        traceMode: traceMode,
+                        traceRetentionDays: traceRetentionDays
                     )
                     Task {
                         if await model.applySettings(settings) { loadConfiguration() }
@@ -1481,6 +1511,8 @@ private struct CapabilitiesView: View {
         }
         defaultProfile = configuration.acpDefaultProfile
         selectedMCPAppsMode = configuration.mcpAppsMode
+        traceMode = configuration.traceMode
+        traceRetentionDays = configuration.traceRetentionDays
         configurationInitialized = true
     }
 
@@ -2116,7 +2148,9 @@ private struct SettingsView: View {
                                         browserReuseExistingCDP: configuration.browserReuseExistingCDP,
                                         acpEnabled: configuration.acpEnabled,
                                         acpProfiles: configuration.acpProfiles,
-                                        acpDefaultProfile: configuration.acpDefaultProfile
+                                        acpDefaultProfile: configuration.acpDefaultProfile,
+                                        traceMode: configuration.traceMode,
+                                        traceRetentionDays: configuration.traceRetentionDays
                                     )
                                     Task {
                                         if await model.applySettings(settings) {
@@ -2333,7 +2367,9 @@ private struct SettingsView: View {
             browserReuseExistingCDP: configuration.browserReuseExistingCDP,
             acpEnabled: configuration.acpEnabled,
             acpProfiles: configuration.acpProfiles,
-            acpDefaultProfile: configuration.acpDefaultProfile
+            acpDefaultProfile: configuration.acpDefaultProfile,
+            traceMode: configuration.traceMode,
+            traceRetentionDays: configuration.traceRetentionDays
         )
         Task { await model.applySettings(settings) }
     }
@@ -2508,12 +2544,28 @@ private struct ToolCatalogDetailView: View {
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let annotations = tool.annotations {
+                    CatalogCard(title: L10n.text("Annotations")) {
+                        CatalogKeyValueRow(label: L10n.text("Read only"), value: yesNo(annotations.readOnlyHint))
+                        if let destructive = annotations.destructiveHint {
+                            CatalogKeyValueRow(label: L10n.text("Destructive"), value: yesNo(destructive))
+                        }
+                        CatalogKeyValueRow(label: L10n.text("Idempotent"), value: yesNo(annotations.idempotentHint))
+                        if let openWorld = annotations.openWorldHint {
+                            CatalogKeyValueRow(label: L10n.text("Open world"), value: yesNo(openWorld))
+                        }
+                    }
+                }
                 schemaBlock(L10n.text("Input schema"), tool.inputSchema)
                 schemaBlock(L10n.text("Output schema"), tool.outputSchema)
             }
         } else {
             CatalogUnavailable(reason: L10n.text("The capability catalog is not available. Start AgentDock Core and try again."))
         }
+    }
+
+    private func yesNo(_ value: Bool) -> String {
+        value ? L10n.text("Yes") : L10n.text("No")
     }
 
     @ViewBuilder private func schemaBlock(_ title: String, _ schema: RuntimeJSONValue?) -> some View {
@@ -2613,6 +2665,8 @@ private struct RuleCatalogDetailView: View {
 private struct PluginCatalogDetailView: View {
     @ObservedObject var model: ControlPanelModel
     let pluginName: String
+    @State private var detail: RuntimePluginDetail?
+    @State private var loading = false
 
     var body: some View {
         if let plugin = model.catalogPlugin(named: pluginName) {
@@ -2628,6 +2682,61 @@ private struct PluginCatalogDetailView: View {
                     }
                     CatalogKeyValueRow(label: L10n.text("Package digest"), value: plugin.packageDigest, mono: true)
                 }
+
+                if let detail {
+                    if let description = detail.description, !description.isEmpty {
+                        CatalogCard(title: L10n.text("Description")) {
+                            Text(description).font(.system(size: 12.5)).textSelection(.enabled)
+                        }
+                    }
+                    if let skills = detail.skills, !skills.isEmpty {
+                        CatalogCard(title: L10n.text("Skills")) {
+                            ForEach(skills) { skill in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(skill.name).font(.system(size: 12, weight: .medium))
+                                    Text(skill.description)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    if let mcp = detail.mcp, !mcp.isEmpty {
+                        CatalogCard(title: L10n.text("MCP servers")) {
+                            ForEach(mcp) { server in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(server.name).font(.system(size: 12, weight: .medium))
+                                    Text([server.transport, server.url ?? server.command ?? ""]
+                                        .filter { !$0.isEmpty }
+                                        .joined(separator: " · "))
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    if let executables = detail.executables, !executables.isEmpty {
+                        CatalogCard(title: L10n.text("Executables")) {
+                            ForEach(executables, id: \.self) { path in
+                                Text(path).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                            }
+                        }
+                    }
+                    if let warnings = detail.warnings, !warnings.isEmpty {
+                        CatalogCard(title: L10n.text("Warnings")) {
+                            ForEach(warnings, id: \.self) { warning in
+                                Text(warning).font(.system(size: 11.5)).foregroundStyle(.orange).textSelection(.enabled)
+                            }
+                        }
+                    }
+                } else if loading {
+                    ProgressView()
+                }
+            }
+            .task(id: pluginName) {
+                loading = true
+                detail = await model.loadPluginDetail(name: pluginName)
+                loading = false
             }
         } else {
             CatalogUnavailable(reason: L10n.text("This Plugin is no longer installed."))
@@ -2672,6 +2781,15 @@ private struct TasksView: View {
             }
     }
 
+    private var statusSummary: [(String, Int, Color, String)] {
+        let counts = Dictionary(grouping: allTasks, by: \.status).mapValues(\.count)
+        return [
+            (L10n.text("Active"), counts["active"] ?? 0, Color.accentColor, "active"),
+            (L10n.text("Blocked"), counts["blocked"] ?? 0, Color.orange, "blocked"),
+            (L10n.text("Completed"), counts["completed"] ?? 0, Color.secondary, "completed"),
+        ]
+    }
+
     private var isFiltering: Bool {
         statusFilter != "all" || !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -2684,6 +2802,23 @@ private struct TasksView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 PageHeader(title: L10n.text("Tasks"), detail: L10n.format("%d tasks", allTasks.count))
+                HStack(spacing: 14) {
+                    ForEach(statusSummary, id: \.0) { item in
+                        Button {
+                            statusFilter = statusFilter == item.3 ? "all" : item.3
+                        } label: {
+                            HStack(spacing: 5) {
+                                Circle().fill(item.2).frame(width: 7, height: 7)
+                                Text("\(item.1) \(item.0)")
+                                    .font(.system(size: 11.5, weight: statusFilter == item.3 ? .semibold : .regular))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
                 HStack(spacing: 10) {
                     TextField(L10n.text("Search title, project, or device"), text: $query)
                         .textFieldStyle(.roundedBorder)
@@ -3436,8 +3571,15 @@ private enum FileTree {
         if common.count == components.first?.count, components.count == 1 || common.last?.contains(".") == true {
             common = Array(common.dropLast())
         }
-        let rootPrefix = common.joined(separator: "/")
-        let root = rootPrefix.isEmpty ? "/" : rootPrefix
+        let root: String
+        if common.isEmpty {
+            root = "/"
+        } else if common.first == "/" {
+            // pathComponents 把绝对路径拆出前导 "/"，直接 join 会产生 "//a/b"。
+            root = "/" + common.dropFirst().joined(separator: "/")
+        } else {
+            root = common.joined(separator: "/")
+        }
 
         let tree = FileTreeBuilder(name: root, path: root, isDirectory: true)
         for entry in entries {
@@ -3512,6 +3654,14 @@ private struct FilesView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
+                    }
+                    if let root = payload?.status?.root, !root.isEmpty {
+                        Text(root)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(root)
                     }
                     Button(L10n.text("Refresh")) { Task { await reload() } }
                         .disabled(loading)
@@ -3616,7 +3766,7 @@ private struct FilesView: View {
         ScrollView([.horizontal, .vertical]) {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 10) {
-                    Text(entry.action.isEmpty ? entry.tool : entry.action)
+                    Text(fileActionTitle(entry.action, fallback: entry.tool))
                         .font(.system(size: 11, weight: .medium))
                     Text("+\(entry.insertions ?? 0)")
                         .foregroundStyle(.green)
@@ -3684,6 +3834,18 @@ private struct FilesView: View {
             selectedChangeID = nil
         }
         loading = false
+    }
+}
+
+private func fileActionTitle(_ action: String, fallback: String) -> String {
+    switch action {
+    case "add": return L10n.text("Created")
+    case "replace": return L10n.text("Edited")
+    case "patch": return L10n.text("Patched")
+    case "delete": return L10n.text("Deleted")
+    case "move": return L10n.text("Moved")
+    case "": return fallback
+    default: return action
     }
 }
 

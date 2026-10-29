@@ -676,3 +676,25 @@
 "No file changes recorded yet. History starts when trace capture is enabled." = "暂无文件变更记录。开启追踪后开始记录。";
 "truncated" = "已截断";
 "%d changes · %@" = "%d 条变更 · %@";
+
+"Annotations" = "行为注解";
+"Read only" = "只读";
+"Destructive" = "破坏性";
+"Idempotent" = "幂等";
+"Open world" = "开放世界";
+"Description" = "描述";
+"Executables" = "可执行文件";
+"Warnings" = "警告";
+"Call tracing" = "调用追踪";
+"Record tool arguments and results for debugging." = "记录工具入参与出参，用于排障。";
+"Keep traces" = "保留时长";
+"Older trace files are deleted after this window." = "超过该窗口的追踪文件会被删除。";
+"Memory only" = "仅内存";
+"Memory + disk" = "内存 + 磁盘";
+"Trace retention must be between 1 and 30 days." = "追踪保留天数必须在 1 到 30 天之间。";
+
+"Created" = "已创建";
+"Edited" = "已编辑";
+"Patched" = "已打补丁";
+"Deleted" = "已删除";
+"Moved" = "已移动";

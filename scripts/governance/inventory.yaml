@@ -187,6 +187,13 @@ scripts:
     public_contract: false
     deletable: false
 
+  - path: packaging/macos/build-local.sh
+    class: packaging
+    owner: release
+    public_contract: false
+    deletable: false
+    notes: 本地一键构建 macOS App；串联 i18n/Swift 校验、载荷打包、build-app.sh、安装与 Core bootstrap。CI 不走这条路径。
+
   - path: packaging/macos/build-app.sh
     class: packaging
     owner: release

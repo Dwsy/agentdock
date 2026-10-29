@@ -28,6 +28,9 @@ usage() {
   AGENTDOCK_MACOS_OFFLINE_PAYLOAD_DIR
                                双架构离线载荷目录，构建 DMG 时必须提供
   AGENTDOCK_MACOS_MIN_VERSION   最低 macOS 版本，默认 13.0
+  AGENTDOCK_MACOS_SDK_PATH      显式指定 SDK 路径；默认用 xcrun 当前 macOS SDK。
+                                CLT-only 机器的当前 SDK 已把 SwiftUI @State 改成宏，
+                                而 CLT 不随包提供 SwiftUIMacros 插件，此时需指向旧 SDK。
   AGENTDOCK_MACOS_BUILD_VERSION macOS CFBundleVersion；Release CI 使用单调递增的 run number
   AGENTDOCK_CODESIGN_IDENTITY   代码签名身份；默认 -（ad-hoc）
   AGENTDOCK_CODESIGN_KEYCHAIN   可选，指定签名身份所在钥匙串
@@ -81,7 +84,9 @@ BUNDLE_VERSION="${AGENTDOCK_MACOS_BUILD_VERSION:-$MARKETING_VERSION}"
 [[ "$BUNDLE_VERSION" == <-> || "$BUNDLE_VERSION" == <->.<-> || "$BUNDLE_VERSION" == <->.<->.<-> ]] || \
   die "macOS CFBundleVersion 必须是 1-3 段数字：$BUNDLE_VERSION"
 
-SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+# CLT-only 环境的当前 SDK 把 SwiftUI 的 @State 实现成宏，但宏插件 SwiftUIMacros
+# 只随完整 Xcode 分发；允许显式指定 SDK，使无 Xcode 的机器仍能构建 App。
+SDK_PATH="${AGENTDOCK_MACOS_SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentdock-macos-app.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 

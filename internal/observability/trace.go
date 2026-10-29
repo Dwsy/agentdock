@@ -65,6 +65,35 @@ type TraceOptions struct {
 	MaxRecords    int
 }
 
+// FileChange 是 file_edit 调用产生的文件级变更摘要。
+// Diff 是工具返回的 unified diff 预览（再次截断），用于控制面板的历史预览；
+// 它不替代文件系统快照，也不保证能重放变更。
+type FileChange struct {
+	Path       string `json:"path"`
+	Action     string `json:"action"`
+	Insertions int    `json:"insertions,omitempty"`
+	Deletions  int    `json:"deletions,omitempty"`
+	Diff       string `json:"diff,omitempty"`
+	Truncated  bool   `json:"truncated,omitempty"`
+}
+
+// FileChangeEntry 是文件历史视图的扁平投影：一次调用可能影响多个文件
+// （patch/move），因此按文件拆成条目，但保留同一个 trace id 与时间。
+type FileChangeEntry struct {
+	ID         uint64    `json:"id"`
+	TraceID    string    `json:"trace_id,omitempty"`
+	Tool       string    `json:"tool"`
+	Source     string    `json:"source"`
+	StartedAt  time.Time `json:"started_at"`
+	Success    bool      `json:"success"`
+	Path       string    `json:"path"`
+	Action     string    `json:"action"`
+	Insertions int       `json:"insertions,omitempty"`
+	Deletions  int       `json:"deletions,omitempty"`
+	Diff       string    `json:"diff,omitempty"`
+	Truncated  bool      `json:"truncated,omitempty"`
+}
+
 // TraceRecord 是一条可读的工具调用证据。Arguments/Result 是截断后的 JSON
 // 文本而不是 json.RawMessage：截断会破坏 JSON 合法性，UI 只需要原文预览。
 type TraceRecord struct {
@@ -81,6 +110,8 @@ type TraceRecord struct {
 	Result        string    `json:"result,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	Truncated     bool      `json:"truncated,omitempty"`
+	// FileChanges 只在 file_edit 成功时非空；关闭 trace 时不产生。
+	FileChanges []FileChange `json:"file_changes,omitempty"`
 }
 
 type TraceQuery struct {
@@ -285,6 +316,44 @@ func traceMatches(record TraceRecord, needle string) bool {
 		}
 	}
 	return false
+}
+
+// FileChanges 返回当前保留窗口内的文件变更条目（新到旧）。
+// 过滤基于路径子串，大小写不敏感；limit<=0 使用默认值。
+func (s *TraceStore) FileChanges(query string, limit int) []FileChangeEntry {
+	if s == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = traceDefaultLimit
+	}
+	if limit > traceQueryLimit {
+		limit = traceQueryLimit
+	}
+	needle := strings.ToLower(strings.TrimSpace(query))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]FileChangeEntry, 0, limit)
+	for i := len(s.records) - 1; i >= 0; i-- {
+		record := s.records[i]
+		for j := len(record.FileChanges) - 1; j >= 0; j-- {
+			change := record.FileChanges[j]
+			if needle != "" && !strings.Contains(strings.ToLower(change.Path), needle) {
+				continue
+			}
+			out = append(out, FileChangeEntry{
+				ID: record.ID, TraceID: record.TraceID, Tool: record.Tool, Source: record.Source,
+				StartedAt: record.StartedAt, Success: record.Success,
+				Path: change.Path, Action: change.Action,
+				Insertions: change.Insertions, Deletions: change.Deletions,
+				Diff: change.Diff, Truncated: change.Truncated,
+			})
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // ToolNames 返回当前窗口内出现过的工具名，供 UI 构建筛选器。

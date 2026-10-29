@@ -665,3 +665,14 @@
 "%d tools" = "%d tools";
 "No tool calls recorded yet." = "No tool calls recorded yet.";
 "Showing top %d of %d tools." = "Showing top %d of %d tools.";
+
+"Created and edited files recorded from tool calls." = "Created and edited files recorded from tool calls.";
+"Search paths" = "Search paths";
+"Select a file to preview its diff" = "Select a file to preview its diff";
+"Select a recorded change" = "Select a recorded change";
+"No diff preview was recorded for this change." = "No diff preview was recorded for this change.";
+"File history is unavailable while AgentDock Core is not running." = "File history is unavailable while AgentDock Core is not running.";
+"File history comes from tool call traces. Set AGENTDOCK_TRACE_MODE to memory or disk and restart AgentDock Core to record file_edit calls." = "File history comes from tool call traces. Set AGENTDOCK_TRACE_MODE to memory or disk and restart AgentDock Core to record file_edit calls.";
+"No file changes recorded yet. History starts when trace capture is enabled." = "No file changes recorded yet. History starts when trace capture is enabled.";
+"truncated" = "truncated";
+"%d changes · %@" = "%d changes · %@";

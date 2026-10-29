@@ -80,7 +80,11 @@ func TestTraceStoreDiskPersistsAndReloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Record(TraceRecord{Tool: "exec_command", Source: "mcp", Success: true, Arguments: `{"cmd":"ls"}`, StartedAt: time.Now()})
+	store.Record(TraceRecord{
+		Tool: "file_edit", Source: "mcp", Success: true, Arguments: `{"action":"add"}`,
+		FileChanges: []FileChange{{Path: "/tmp/a.txt", Action: "add", Insertions: 1, Diff: "@@ -0,0 +1 @@"}},
+		StartedAt:   time.Now(),
+	})
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -96,8 +100,11 @@ func TestTraceStoreDiskPersistsAndReloads(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reloaded.Close() })
 	records := reloaded.Query(TraceQuery{})
-	if len(records) != 1 || records[0].Tool != "exec_command" || records[0].Arguments != `{"cmd":"ls"}` {
+	if len(records) != 1 || records[0].Tool != "file_edit" || records[0].Arguments != `{"action":"add"}` {
 		t.Fatalf("reloaded records = %#v", records)
+	}
+	if changes := reloaded.FileChanges("/tmp/a.txt", 10); len(changes) != 1 || changes[0].Diff == "" {
+		t.Fatalf("reloaded file changes = %#v", changes)
 	}
 	// 重启后 ID 必须继续递增，不能覆盖已落盘记录的排序。
 	reloaded.Record(TraceRecord{Tool: "read_file", Success: true, StartedAt: time.Now()})
@@ -143,5 +150,45 @@ func TestTraceStoreOffReturnsNil(t *testing.T) {
 	}
 	if err := nilStore.Close(); err != nil {
 		t.Fatalf("nil store close = %v", err)
+	}
+}
+
+func TestTraceStoreFileChangesProjection(t *testing.T) {
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	store.Record(TraceRecord{
+		Tool: "file_edit", Source: "mcp", Success: true, StartedAt: time.Now(),
+		FileChanges: []FileChange{
+			{Path: "/tmp/project/a.go", Action: "replace", Insertions: 2, Deletions: 1, Diff: "@@ -1 +1 @@"},
+			{Path: "/tmp/project/sub/b.go", Action: "add", Insertions: 5},
+		},
+	})
+	store.Record(TraceRecord{Tool: "read_file", Success: true, StartedAt: time.Now()})
+	store.Record(TraceRecord{
+		Tool: "file_edit", Source: "internal", Success: true, StartedAt: time.Now(),
+		FileChanges: []FileChange{{Path: "/tmp/other/c.go", Action: "delete"}},
+	})
+
+	all := store.FileChanges("", 10)
+	if len(all) != 3 {
+		t.Fatalf("FileChanges() = %d entries", len(all))
+	}
+	if all[0].Path != "/tmp/other/c.go" {
+		t.Fatalf("newest entry = %#v", all[0])
+	}
+	if all[1].Path != "/tmp/project/sub/b.go" || all[1].Action != "add" {
+		t.Fatalf("second entry = %#v", all[1])
+	}
+
+	filtered := store.FileChanges("PROJECT/A", 10)
+	if len(filtered) != 1 || filtered[0].Path != "/tmp/project/a.go" {
+		t.Fatalf("filtered = %#v", filtered)
+	}
+	if limited := store.FileChanges("", 1); len(limited) != 1 {
+		t.Fatalf("limit not applied: %#v", limited)
 	}
 }

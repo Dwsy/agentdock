@@ -665,3 +665,14 @@
 "%d tools" = "%d 个工具";
 "No tool calls recorded yet." = "暂无工具调用记录。";
 "Showing top %d of %d tools." = "仅显示前 %d 个工具，共 %d 个。";
+
+"Created and edited files recorded from tool calls." = "从工具调用记录的创建与编辑文件。";
+"Search paths" = "搜索路径";
+"Select a file to preview its diff" = "选择一个文件预览 diff";
+"Select a recorded change" = "选择一条变更记录";
+"No diff preview was recorded for this change." = "本次变更没有记录 diff 预览。";
+"File history is unavailable while AgentDock Core is not running." = "AgentDock Core 未运行时无法读取文件历史。";
+"File history comes from tool call traces. Set AGENTDOCK_TRACE_MODE to memory or disk and restart AgentDock Core to record file_edit calls." = "文件历史来自工具调用追踪。将 AGENTDOCK_TRACE_MODE 设为 memory 或 disk 后重启 AgentDock Core 才会记录 file_edit。";
+"No file changes recorded yet. History starts when trace capture is enabled." = "暂无文件变更记录。开启追踪后开始记录。";
+"truncated" = "已截断";
+"%d changes · %@" = "%d 条变更 · %@";

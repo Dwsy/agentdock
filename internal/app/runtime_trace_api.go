@@ -23,3 +23,22 @@ func (r *Runtime) RuntimeTraces(query, tool, source, status string, limit int) (
 		"tools":   r.traces.ToolNames(),
 	}, nil
 }
+
+// RuntimeFileChanges 返回 trace 窗口内的文件创建/编辑历史。
+// trace 关闭时返回空集合并标记 mode=off，让 UI 区分“没开历史”和“没有变更”。
+func (r *Runtime) RuntimeFileChanges(query string, limit int) (Result, error) {
+	if r.traces == nil {
+		return Result{
+			"ok": true, "source": runtimeAPISource, "mode": string(observability.TraceModeOff),
+			"changes": []observability.FileChangeEntry{}, "count": 0,
+		}, nil
+	}
+	changes := r.traces.FileChanges(query, limit)
+	return Result{
+		"ok":      true,
+		"source":  runtimeAPISource,
+		"status":  r.traces.Status(),
+		"changes": changes,
+		"count":   len(changes),
+	}, nil
+}

@@ -24,6 +24,8 @@ type runtimeStub struct {
 	traceStatus   string
 	traceLimit    int
 	traceCalled   bool
+	changeQuery   string
+	changeLimit   int
 }
 
 func (r *runtimeStub) RuntimeStatus() app.Result    { return app.Result{"status": "ok"} }
@@ -68,6 +70,11 @@ func (r *runtimeStub) RuntimeCapabilities(context.Context, bool) (app.Result, er
 
 func (r *runtimeStub) RuntimeCatalog(context.Context) (app.Result, error) {
 	return app.Result{"tools": []any{}, "rules": []any{}, "tool_count": 0}, nil
+}
+
+func (r *runtimeStub) RuntimeFileChanges(query string, limit int) (app.Result, error) {
+	r.changeQuery, r.changeLimit = query, limit
+	return app.Result{"count": 0, "changes": []any{}}, nil
 }
 
 func (r *runtimeStub) RuntimeTraces(query, tool, source, status string, limit int) (app.Result, error) {
@@ -371,4 +378,32 @@ func TestDispatchCatalogAndTraces(t *testing.T) {
 			t.Fatalf("error = %#v", err)
 		}
 	})
+}
+
+func TestDispatchFileChanges(t *testing.T) {
+	stub := &runtimeStub{}
+	result, err := Dispatch(context.Background(), stub, Request{
+		Method: "GET",
+		Path:   "/internal/runtime/file-changes",
+		Query:  url.Values{"q": {"src/"}, "limit": {"50"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.changeQuery != "src/" || stub.changeLimit != 50 {
+		t.Fatalf("file change args = %#v", stub)
+	}
+	if _, ok := result["changes"]; !ok {
+		t.Fatalf("result = %#v", result)
+	}
+
+	_, err = Dispatch(context.Background(), stub, Request{
+		Method: "GET",
+		Path:   "/internal/runtime/file-changes",
+		Query:  url.Values{"limit": {"-5"}},
+	})
+	var toolErr *app.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" {
+		t.Fatalf("error = %#v", err)
+	}
 }

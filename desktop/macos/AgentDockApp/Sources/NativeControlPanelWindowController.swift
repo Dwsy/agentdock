@@ -83,7 +83,7 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
 @MainActor
 private final class ControlPanelModel: ObservableObject {
     enum Page: String, CaseIterable, Identifiable {
-        case home, connections, capabilities, tasks, traces, analytics, activity, settings
+        case home, connections, capabilities, tasks, files, traces, analytics, activity, settings
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -91,6 +91,7 @@ private final class ControlPanelModel: ObservableObject {
             case .connections: return L10n.text("Connections")
             case .capabilities: return L10n.text("Capabilities")
             case .tasks: return L10n.text("Tasks")
+            case .files: return L10n.text("Files")
             case .traces: return L10n.text("Traces")
             case .analytics: return L10n.text("Analytics")
             case .activity: return L10n.text("Activity")
@@ -103,6 +104,7 @@ private final class ControlPanelModel: ObservableObject {
             case .connections: return "link"
             case .capabilities: return "square.grid.2x2"
             case .tasks: return "checklist"
+            case .files: return "folder"
             case .traces: return "waveform.path.ecg"
             case .analytics: return "chart.bar.xaxis"
             case .activity: return "clock.arrow.circlepath"
@@ -264,6 +266,10 @@ private final class ControlPanelModel: ObservableObject {
             status: filter,
             configuration: status.configuration
         )
+    }
+
+    func loadFileChanges(query: String) async -> RuntimeFileChangesPayload? {
+        await service.runtimeFileChanges(query: query, configuration: status.configuration)
     }
 
     func catalogTool(named name: String) -> RuntimeCatalogTool? {
@@ -587,6 +593,7 @@ private struct ControlPanelRootView: View {
         case .connections: ConnectionsView(model: model)
         case .capabilities: CapabilitiesView(model: model)
         case .tasks: TasksView(model: model)
+        case .files: FilesView(model: model)
         case .traces: TracesView(model: model)
         case .analytics: AnalyticsView(model: model)
         case .activity: ActivityView(model: model)
@@ -3365,4 +3372,408 @@ private struct AnalyticsBarRow: View {
             }
         }
     }
+}
+
+// MARK: - File change history
+
+private struct FileTreeNode: Identifiable {
+    let id: String
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let changeCount: Int
+    let latest: String?
+    let children: [FileTreeNode]?
+}
+
+private final class FileTreeBuilder {
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    var children: [String: FileTreeBuilder] = [:]
+    var changeCount = 0
+    var latest: String?
+
+    init(name: String, path: String, isDirectory: Bool) {
+        self.name = name
+        self.path = path
+        self.isDirectory = isDirectory
+    }
+
+    func freeze() -> FileTreeNode {
+        let sorted = children.values
+            .map { $0.freeze() }
+            .sorted { left, right in
+                if left.isDirectory != right.isDirectory { return left.isDirectory }
+                return left.name.localizedStandardCompare(right.name) == .orderedAscending
+            }
+        return FileTreeNode(
+            id: path,
+            name: name,
+            path: path,
+            isDirectory: isDirectory,
+            changeCount: changeCount,
+            latest: latest,
+            children: isDirectory ? sorted : nil
+        )
+    }
+}
+
+private enum FileTree {
+    /// 去掉所有路径的公共目录前缀，让树从一个有意义的项目根开始。
+    static func build(_ entries: [RuntimeFileChangeEntry]) -> (root: String, nodes: [FileTreeNode]) {
+        guard !entries.isEmpty else { return ("", []) }
+        let components = entries.map { ($0.path as NSString).pathComponents }
+        var common = components.first ?? []
+        for parts in components.dropFirst() {
+            var index = 0
+            while index < common.count, index < parts.count, common[index] == parts[index] {
+                index += 1
+            }
+            common = Array(common.prefix(index))
+        }
+        // 公共部分是文件本身时退回父目录，避免根节点变成一个文件名。
+        if common.count == components.first?.count, components.count == 1 || common.last?.contains(".") == true {
+            common = Array(common.dropLast())
+        }
+        let rootPrefix = common.joined(separator: "/")
+        let root = rootPrefix.isEmpty ? "/" : rootPrefix
+
+        let tree = FileTreeBuilder(name: root, path: root, isDirectory: true)
+        for entry in entries {
+            let all = (entry.path as NSString).pathComponents
+            let relative = all.count > common.count ? Array(all.dropFirst(common.count)) : [all.last ?? entry.path]
+            var node = tree
+            tree.changeCount += 1
+            if tree.latest == nil || entry.startedAt > (tree.latest ?? "") { tree.latest = entry.startedAt }
+            for (index, part) in relative.enumerated() {
+                let isLeaf = index == relative.count - 1
+                let path = (node.path == "/" ? "" : node.path) + "/" + part
+                if let existing = node.children[part] {
+                    node = existing
+                } else {
+                    let child = FileTreeBuilder(name: part, path: path, isDirectory: !isLeaf)
+                    node.children[part] = child
+                    node = child
+                }
+                node.changeCount += 1
+                if node.latest == nil || entry.startedAt > (node.latest ?? "") { node.latest = entry.startedAt }
+            }
+        }
+        return (root, tree.children.values.map { $0.freeze() }.sorted { left, right in
+            if left.isDirectory != right.isDirectory { return left.isDirectory }
+            return left.name.localizedStandardCompare(right.name) == .orderedAscending
+        })
+    }
+}
+
+private struct FilesView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var payload: RuntimeFileChangesPayload?
+    @State private var query = ""
+    @State private var selectedPath: String?
+    @State private var selectedChangeID: String?
+    @State private var loading = false
+
+    private var entries: [RuntimeFileChangeEntry] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return (payload?.changes ?? []).filter {
+            needle.isEmpty || $0.path.lowercased().contains(needle)
+        }
+    }
+
+    private var tree: (root: String, nodes: [FileTreeNode]) {
+        FileTree.build(entries)
+    }
+
+    private var selectedEntries: [RuntimeFileChangeEntry] {
+        guard let selectedPath else { return [] }
+        return entries.filter { $0.path == selectedPath }
+    }
+
+    private var selectedEntry: RuntimeFileChangeEntry? {
+        selectedEntries.first { $0.id == selectedChangeID } ?? selectedEntries.first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                PageHeader(
+                    title: L10n.text("Files"),
+                    detail: L10n.text("Created and edited files recorded from tool calls.")
+                )
+                HStack(spacing: 10) {
+                    TextField(L10n.text("Search paths"), text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                    Spacer()
+                    if let payload {
+                        Text(L10n.format("%d changes · %@", payload.count, payload.effectiveMode))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Button(L10n.text("Refresh")) { Task { await reload() } }
+                        .disabled(loading)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            if payload == nil {
+                CatalogUnavailable(reason: L10n.text("File history is unavailable while AgentDock Core is not running."))
+            } else if payload?.effectiveMode == "off" {
+                CatalogUnavailable(
+                    reason: L10n.text("File history comes from tool call traces. Set AGENTDOCK_TRACE_MODE to memory or disk and restart AgentDock Core to record file_edit calls.")
+                )
+            } else if entries.isEmpty {
+                CatalogUnavailable(reason: L10n.text("No file changes recorded yet. History starts when trace capture is enabled."))
+            } else {
+                HStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(tree.root)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.head)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                        Divider()
+                        List(selection: $selectedPath) {
+                            OutlineGroup(tree.nodes, children: \.children) { node in
+                                FileTreeRow(node: node)
+                                    .tag(node.path)
+                            }
+                        }
+                        .listStyle(.sidebar)
+                    }
+                    .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
+
+                    Divider()
+
+                    detailPane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .task { await reload() }
+    }
+
+    @ViewBuilder private var detailPane: some View {
+        if let node = treeNode(for: selectedPath) {
+            VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(node.name)
+                        .font(.system(size: 16, weight: .semibold))
+                    Text(selectedPath ?? "")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                .padding(.horizontal, 18)
+                .padding(.vertical, 12)
+
+                Divider()
+
+                let history = selectedEntries
+                if history.count > 1 {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(history) { entry in
+                                Button {
+                                    selectedChangeID = entry.id
+                                } label: {
+                                    FileChangeChip(entry: entry, selected: entry.id == selectedEntry?.id)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 8)
+                    }
+                    Divider()
+                }
+
+                if let entry = selectedEntry {
+                    diffPane(entry)
+                } else {
+                    Text(L10n.text("Select a recorded change"))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        } else {
+            Text(L10n.text("Select a file to preview its diff"))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func diffPane(_ entry: RuntimeFileChangeEntry) -> some View {
+        ScrollView([.horizontal, .vertical]) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 10) {
+                    Text(entry.action.isEmpty ? entry.tool : entry.action)
+                        .font(.system(size: 11, weight: .medium))
+                    Text("+\(entry.insertions ?? 0)")
+                        .foregroundStyle(.green)
+                    Text("-\(entry.deletions ?? 0)")
+                        .foregroundStyle(.red)
+                    Text(RuntimeTimestamp.minute(entry.startedAt))
+                        .foregroundStyle(.secondary)
+                        .help(RuntimeTimestamp.precise(entry.startedAt))
+                    if entry.truncated == true {
+                        Text(L10n.text("truncated"))
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer()
+                }
+                .font(.system(size: 11).monospacedDigit())
+                .padding(.horizontal, 18)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                let lines = diffLines(entry.diff ?? "")
+                if lines.isEmpty {
+                    Text(L10n.text("No diff preview was recorded for this change."))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding(18)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(lines) { line in
+                            Text(line.text.isEmpty ? " " : line.text)
+                                .font(.system(size: 11.5, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(line.kind.background)
+                                .foregroundStyle(line.kind.foreground)
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+            .frame(minWidth: 520, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func treeNode(for path: String?) -> FileTreeNode? {
+        guard let path else { return nil }
+        func find(_ nodes: [FileTreeNode]) -> FileTreeNode? {
+            for node in nodes {
+                if node.path == path { return node }
+                if let children = node.children, let hit = find(children) { return hit }
+            }
+            return nil
+        }
+        return find(tree.nodes)
+    }
+
+    private func reload() async {
+        loading = true
+        payload = await model.loadFileChanges(query: "")
+        if let selectedPath, !entries.contains(where: { $0.path == selectedPath }) {
+            self.selectedPath = nil
+            selectedChangeID = nil
+        }
+        loading = false
+    }
+}
+
+private struct FileTreeRow: View {
+    let node: FileTreeNode
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: node.isDirectory ? "folder" : "doc.text")
+                .font(.system(size: 11))
+                .foregroundStyle(node.isDirectory ? Color.secondary : Color.accentColor)
+            Text(node.name)
+                .font(.system(size: 12))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            if node.changeCount > 0 {
+                Text("\(node.changeCount)")
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct FileChangeChip: View {
+    let entry: RuntimeFileChangeEntry
+    let selected: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(RuntimeTimestamp.minute(entry.startedAt))
+                .font(.system(size: 10.5).monospacedDigit())
+            Text("+\(entry.insertions ?? 0)")
+                .foregroundStyle(.green)
+            Text("-\(entry.deletions ?? 0)")
+                .foregroundStyle(.red)
+        }
+        .font(.system(size: 10.5))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+    }
+}
+
+private struct FileDiffLine: Identifiable {
+    enum Kind {
+        case added, removed, header, context
+
+        var background: Color {
+            switch self {
+            case .added: return Color.green.opacity(0.12)
+            case .removed: return Color.red.opacity(0.12)
+            case .header: return Color.primary.opacity(0.06)
+            case .context: return .clear
+            }
+        }
+
+        var foreground: Color {
+            switch self {
+            case .added: return .primary
+            case .removed: return .primary
+            case .header: return .secondary
+            case .context: return .primary
+            }
+        }
+    }
+
+    let id: Int
+    let kind: Kind
+    let text: String
+}
+
+private func diffLines(_ diff: String) -> [FileDiffLine] {
+    guard !diff.isEmpty else { return [] }
+    return diff
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .enumerated()
+        .map { index, raw in
+            let line = String(raw)
+            let kind: FileDiffLine.Kind
+            if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") || line.hasPrefix("diff ") || line.hasPrefix("index ") {
+                kind = .header
+            } else if line.hasPrefix("+") {
+                kind = .added
+            } else if line.hasPrefix("-") {
+                kind = .removed
+            } else {
+                kind = .context
+            }
+            return FileDiffLine(id: index, kind: kind, text: line)
+        }
 }

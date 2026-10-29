@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -137,5 +138,59 @@ func TestRuntimeTracesDiskModeSurvivesRestart(t *testing.T) {
 	records := result["records"].([]observability.TraceRecord)
 	if len(records) != 1 || records[0].Tool != "agentdock_context" {
 		t.Fatalf("records after restart = %#v", records)
+	}
+}
+
+func TestRuntimeFileChangesCaptureEdits(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	target := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(target, []byte("one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rt.Call(context.Background(), "file_edit", map[string]any{
+		"action": "replace",
+		"path":   target,
+		"old":    "one",
+		"new":    "two",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// macOS 的临时目录在 /var → /private/var 上有符号链接，文件服务返回解析后的路径。
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := rt.RuntimeFileChanges("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := result["changes"].([]observability.FileChangeEntry)
+	if len(changes) != 1 {
+		t.Fatalf("changes = %#v", changes)
+	}
+	change := changes[0]
+	if change.Path != resolvedTarget || change.Action != "replace" {
+		t.Fatalf("change = %#v", change)
+	}
+	if change.Insertions != 1 || change.Deletions != 1 {
+		t.Fatalf("diff stats = %#v", change)
+	}
+	if change.Diff == "" {
+		t.Fatal("diff preview is empty")
+	}
+}
+
+func TestRuntimeFileChangesDisabledReportsOff(t *testing.T) {
+	rt := newRuntimeValidationTestRuntime(t)
+	result, err := rt.RuntimeFileChanges("", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result["mode"] != string(observability.TraceModeOff) {
+		t.Fatalf("mode = %#v", result["mode"])
+	}
+	if changes := result["changes"].([]observability.FileChangeEntry); len(changes) != 0 {
+		t.Fatalf("changes = %#v", changes)
 	}
 }

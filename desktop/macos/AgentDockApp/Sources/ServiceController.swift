@@ -23,6 +23,7 @@ private enum RuntimeAPIPath {
     static let catalog = "/internal/runtime/catalog"
     static let tasks = "/internal/runtime/tasks"
     static let traces = "/internal/runtime/traces"
+    static let fileChanges = "/internal/runtime/file-changes"
 }
 
 // MARK: - Runtime capability catalog
@@ -362,6 +363,40 @@ struct RuntimeTraceStatus: Decodable {
         case retentionDays = "retention_days"
         case maxRecords = "max_records"
     }
+}
+
+struct RuntimeFileChangeEntry: Decodable, Identifiable {
+    let rawID: UInt64
+    let traceID: String?
+    let tool: String
+    let source: String
+    let startedAt: String
+    let success: Bool
+    let path: String
+    let action: String
+    let insertions: Int?
+    let deletions: Int?
+    let diff: String?
+    let truncated: Bool?
+
+    /// 同一次 file_edit 可能影响多个文件，调用 ID 不足以区分条目。
+    var id: String { "\(rawID)-\(path)" }
+
+    private enum CodingKeys: String, CodingKey {
+        case tool, source, path, action, insertions, deletions, diff, truncated
+        case rawID = "id"
+        case traceID = "trace_id"
+        case startedAt = "started_at"
+    }
+}
+
+struct RuntimeFileChangesPayload: Decodable {
+    let mode: String?
+    let status: RuntimeTraceStatus?
+    let count: Int
+    let changes: [RuntimeFileChangeEntry]
+
+    var effectiveMode: String { status?.mode ?? mode ?? "off" }
 }
 
 struct RuntimeTracesPayload: Decodable {
@@ -897,6 +932,19 @@ final class ServiceController: @unchecked Sendable {
             path: RuntimeAPIPath.tasks + "/" + id,
             timeout: 5
         )?.task
+    }
+
+    func runtimeFileChanges(query: String = "", configuration: ServiceConfiguration?) async -> RuntimeFileChangesPayload? {
+        guard let configuration else { return nil }
+        var items: [URLQueryItem] = []
+        if !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
+        return await fetchRuntimePayload(
+            RuntimeFileChangesPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.fileChanges,
+            queryItems: items,
+            timeout: 5
+        )
     }
 
     func runtimeTraces(

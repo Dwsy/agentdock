@@ -102,6 +102,23 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			limit,
 		)
 		return map[string]any(result), err
+	case path == "/internal/runtime/file-changes":
+		fileChanges, ok := runtime.(FileChangeRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "FILE_CHANGES_UNSUPPORTED", Message: "runtime does not support file change history", Category: "not_found",
+			}
+		}
+		limit := 0
+		if raw := strings.TrimSpace(request.queryValue("limit")); raw != "" {
+			parsed, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || parsed < 0 {
+				return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "file change limit must be a non-negative integer", Category: "validation"}
+			}
+			limit = parsed
+		}
+		result, err := fileChanges.RuntimeFileChanges(request.queryValue("q"), limit)
+		return map[string]any(result), err
 	case path == "/internal/runtime/capabilities":
 		refresh := strings.EqualFold(request.queryValue("refresh"), "true") || method == http.MethodPost
 		result, err := runtime.RuntimeCapabilities(ctx, refresh)

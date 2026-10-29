@@ -24,6 +24,7 @@ func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg conf
 	mux.HandleFunc("/internal/runtime/diagnostics", h)
 	mux.HandleFunc("/internal/runtime/catalog", h)
 	mux.HandleFunc("/internal/runtime/traces", h)
+	mux.HandleFunc("/internal/runtime/file-changes", h)
 	mux.HandleFunc("/internal/runtime/capabilities", h)
 	mux.HandleFunc("/internal/runtime/skills", h)
 	mux.HandleFunc("/internal/runtime/skills/", h)

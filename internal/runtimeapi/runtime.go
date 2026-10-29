@@ -50,6 +50,11 @@ type TraceRuntime interface {
 	RuntimeTraces(query, tool, source, status string, limit int) (app.Result, error)
 }
 
+// FileChangeRuntime 是 trace 之上的文件历史投影，供控制面板构建目录树。
+type FileChangeRuntime interface {
+	RuntimeFileChanges(query string, limit int) (app.Result, error)
+}
+
 type MCPOAuthRuntime interface {
 	RuntimeMCPOAuthCallback(context.Context, oauthclient.CallbackResult) error
 }

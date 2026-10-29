@@ -76,8 +76,14 @@ func (s *Service) RuntimeTaskDelete(id string) (Result, error) {
 	if err != nil {
 		return nil, taskToolError(err)
 	}
+	s.notifyTaskEvent(task)
 	return Result{
 		"ok": true, "source": "agentdock-api", "action": "delete",
 		"task_id": task.ID, "deleted_task": compactTaskSummary(task),
 	}, nil
+}
+
+// BlockedTasks 返回全部 blocked 状态任务，供阈值告警评估阻塞停留时长。
+func (s *Service) BlockedTasks() ([]taskstate.Task, error) {
+	return s.tasks.List(taskstate.StatusBlocked, 200)
 }

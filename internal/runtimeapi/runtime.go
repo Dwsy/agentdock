@@ -7,6 +7,7 @@ import (
 
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/mcp/oauthclient"
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 // Runtime 定义 Runtime API 路由真正需要的应用能力。
@@ -93,6 +94,18 @@ type TaskActivityRuntime interface {
 // ResourceLibraryRuntime 同理由：避免 app 为了实现接口反过来导入 runtimeapi。
 type TaskActionRuntime interface {
 	RuntimeTaskAction(id string, body []byte) (app.Result, error)
+}
+
+// AlertRuntime 是阈值告警能力：惰性评估当前活跃告警与进程内去重表。
+type AlertRuntime interface {
+	RuntimeAlerts() (app.Result, error)
+}
+
+// EventStreamRuntime 是 SSE 事件流能力：返回进程内事件订阅通道。
+// 流式响应无法装进 Dispatch 的 map 返回值，由 HTTP 传输直接写流；
+// 其它传输拿不到该能力时应明确报“不支持”。
+type EventStreamRuntime interface {
+	RuntimeEventsSubscribe(ctx context.Context) <-chan observability.Event
 }
 
 // NexusOAuthCallbackRuntime 由节点 Bridge 在握手后提供 Nexus 公网 callback origin。

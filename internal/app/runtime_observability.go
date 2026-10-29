@@ -55,8 +55,22 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			span.SetStatus(codes.Error, errorCode)
 		}
 	}
+	recordID := uint64(0)
 	if r != nil && r.observer != nil {
-		r.observer.EndTool(toolName, source, startedAt, duration, success, errorCode, errorCategory, userAgent, taskID, traceID, spanID, stages)
+		recordID = r.observer.EndTool(toolName, source, startedAt, duration, success, errorCode, errorCategory, userAgent, taskID, traceID, spanID, stages)
+	}
+	// call 事件与 recorder 同源同步：发布非阻塞，事件里同样只有白名单元数据。
+	if r != nil {
+		r.events.Publish(observability.EventKindCall, observability.CallEvent{
+			ID:         recordID,
+			Tool:       toolName,
+			Source:     string(source),
+			TaskID:     taskID,
+			Success:    success,
+			DurationMS: float64(duration) / float64(time.Millisecond),
+			ErrorCode:  errorCode,
+			StartedAt:  startedAt.UTC(),
+		})
 	}
 	// trace 是独立开关：默认关闭时 r.traces 为 nil，不产生任何序列化开销。
 	if r != nil && r.traces != nil {

@@ -100,4 +100,8 @@ func (r *Runtime) observeArtifactMutation(action, artifactID string, startedAt t
 		})
 	}
 	slog.Info("artifact mutation", "action", action, "artifact_id", artifactID, "ok", success)
+	// 成功的发布物写操作进入事件流；失败不发事件，避免与错误日志重复。
+	if success {
+		r.publishArtifactEvent(action, artifactID)
+	}
 }

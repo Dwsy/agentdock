@@ -278,6 +278,10 @@ func (s *Service) Manage(ctx context.Context, request ManageRequest) (Result, er
 	if err != nil {
 		return nil, taskToolError(err)
 	}
+	// 与 Runtime 任务写操作同一套事件投影：checkpoint/complete 成功后发布 task 事件。
+	if input.Action == "checkpoint" || input.Action == "complete" {
+		s.notifyTaskEvent(task)
+	}
 	result := Result{"action": input.Action, "task_id": task.ID, "task_summary": compactTaskSummary(task), "state_dir": s.tasks.Root()}
 	if input.Action == "resume" && len(task.GuidanceContext) > 0 {
 		result["guidance_context"] = task.GuidanceContext

@@ -42,6 +42,13 @@ func MethodAllowed(method, path string) bool {
 		// 查询是 GET，清空是 DELETE；两条语义共用一条路由。
 		return method == http.MethodGet || method == http.MethodDelete
 	}
+	if cleanPath == "/internal/runtime/events" {
+		// SSE 事件流是只读长连接。
+		return method == http.MethodGet
+	}
+	if cleanPath == "/internal/runtime/alerts" {
+		return method == http.MethodGet
+	}
 	if method == http.MethodGet {
 		return true
 	}
@@ -68,6 +75,9 @@ func AllowHeader(path string) string {
 	}
 	if cleanPath == "/internal/runtime/traces" {
 		return "GET, DELETE"
+	}
+	if cleanPath == "/internal/runtime/events" || cleanPath == "/internal/runtime/alerts" {
+		return "GET"
 	}
 	if cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" {
 		return "GET, POST"
@@ -104,6 +114,20 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 	taskID, taskSub, isTaskPath := runtimeTaskPath(path)
 	artifactID, artifactSub, isArtifactPath := runtimeArtifactPath(path)
 	switch {
+	case path == "/internal/runtime/alerts":
+		alerts, ok := runtime.(AlertRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "ALERTS_UNSUPPORTED", Message: "runtime does not support threshold alerts", Category: "not_found",
+			}
+		}
+		result, err := alerts.RuntimeAlerts()
+		return map[string]any(result), err
+	case path == "/internal/runtime/events":
+		// 事件流是长连接：JSON 请求/响应传输装不下 SSE，只能由 HTTP 传输直接写流。
+		return nil, &app.ToolError{
+			Code: "EVENTS_STREAM_UNSUPPORTED", Message: "event stream requires the HTTP streaming transport", Category: "not_found",
+		}
 	case path == "/internal/runtime/status":
 		return map[string]any(runtime.RuntimeStatus()), nil
 	case path == "/internal/runtime/analytics":

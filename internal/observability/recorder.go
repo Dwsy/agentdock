@@ -94,6 +94,8 @@ func (r *Recorder) BeginTool() {
 	r.mu.Unlock()
 }
 
+// EndTool 记录一次工具调用并返回分配的记录 ID（未记录时为 0）。
+// 返回值供事件流把 call 事件与 analytics 记录对齐。
 func (r *Recorder) EndTool(
 	tool string,
 	source Source,
@@ -107,9 +109,9 @@ func (r *Recorder) EndTool(
 	traceID string,
 	spanID string,
 	stages []StageRecord,
-) {
+) uint64 {
 	if r == nil {
-		return
+		return 0
 	}
 	if startedAt.IsZero() {
 		startedAt = time.Now()
@@ -125,7 +127,7 @@ func (r *Recorder) EndTool(
 		r.activeCalls--
 	}
 	if r.capacity <= 0 || len(r.records) == 0 {
-		return
+		return 0
 	}
 
 	r.nextID++
@@ -154,6 +156,7 @@ func (r *Recorder) EndTool(
 	if r.size < r.capacity {
 		r.size++
 	}
+	return record.ID
 }
 
 // RecentCalls 返回当前内存环里最近调用的独立副本，不计算百分位或进程指标。

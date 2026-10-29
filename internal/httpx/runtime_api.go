@@ -20,6 +20,8 @@ func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg conf
 	h := runtimeAPIHandler(runtime, cfg, oauthStore)
 	mux.HandleFunc("/internal/runtime/status", h)
 	mux.HandleFunc("/internal/runtime/analytics", h)
+	mux.HandleFunc("/internal/runtime/events", h)
+	mux.HandleFunc("/internal/runtime/alerts", h)
 	mux.HandleFunc("/internal/runtime/overview", h)
 	mux.HandleFunc("/internal/runtime/diagnostics", h)
 	mux.HandleFunc("/internal/runtime/catalog", h)
@@ -65,6 +67,16 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 		body, err := runtimeRequestBody(r)
 		if err != nil {
 			writeRuntimeAPIError(w, http.StatusBadRequest, "INVALID_ARGUMENT", "failed to read runtime request body")
+			return
+		}
+		if r.Method == http.MethodGet && isRuntimeEventsPath(r.URL.Path) {
+			// SSE 事件流是长连接：不能套 Dispatch 的超时上下文，也不能走 JSON 写出。
+			subscriber, ok := runtime.(runtimeEventSubscriber)
+			if !ok {
+				writeRuntimeAPIError(w, http.StatusNotFound, "EVENTS_UNSUPPORTED", "runtime does not support the event stream")
+				return
+			}
+			streamRuntimeEvents(w, r, subscriber)
 			return
 		}
 		timeout := 8 * time.Second

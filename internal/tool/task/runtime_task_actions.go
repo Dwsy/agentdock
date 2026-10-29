@@ -61,18 +61,21 @@ func (s *Service) RuntimeTaskAction(id string, body []byte) (Result, error) {
 		if err != nil {
 			return nil, taskActionWriteError(err)
 		}
+		s.notifyTaskEvent(task)
 		return runtimeTaskActionResult(request.Action, task), nil
 	case "complete":
 		task, err := s.tasks.Complete(id)
 		if err != nil {
 			return nil, taskActionWriteError(err)
 		}
+		s.notifyTaskEvent(task)
 		return runtimeTaskActionResult(request.Action, task), nil
 	case "delete":
 		task, err := s.tasks.Delete(id)
 		if err != nil {
 			return nil, taskToolError(err)
 		}
+		s.notifyTaskEvent(task)
 		return runtimeTaskActionResult(request.Action, task), nil
 	default:
 		// decodeRuntimeTaskActionRequest 已限定动作枚举，这里 fail fast 防止新增分支漏配。

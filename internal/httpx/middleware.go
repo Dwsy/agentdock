@@ -33,6 +33,13 @@ func (r *statusRecorder) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// Flush 透传到底层 writer：SSE 流式响应需要穿过日志中间件逐段刷出。
+func (r *statusRecorder) Flush() {
+	if flusher, ok := r.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()

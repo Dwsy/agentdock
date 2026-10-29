@@ -191,6 +191,30 @@ func (s *TraceStore) Mode() TraceMode {
 	return s.mode
 }
 
+// DiskBytes 统计 trace 根目录下全部 JSONL 保留文件的总字节数，
+// 供阈值告警评估磁盘占用。memory/off 模式恒为 0。
+func (s *TraceStore) DiskBytes() int64 {
+	if s == nil || s.mode != TraceModeDisk || s.root == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
+	return total
+}
+
 func (s *TraceStore) Status() TraceStatus {
 	if s == nil {
 		return TraceStatus{Mode: TraceModeOff}

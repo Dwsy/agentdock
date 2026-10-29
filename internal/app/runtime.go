@@ -53,6 +53,8 @@ type Runtime struct {
 	taskTools      *tooltask.Service
 	acp            *toolacp.Service
 	observer       *observability.Recorder
+	events         *observability.EventBus
+	alerts         alertTracker
 	traces         *observability.TraceStore
 	artifacts      publicartifacts.Store
 	tracing        *observability.Tracing
@@ -102,6 +104,7 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 		cfg: cfg, ws: ws, skills: skills,
 		toolNames: toolNames, toolValidators: toolValidators,
 		observer:   observability.NewRecorder(observability.DefaultRecentCapacity),
+		events:     observability.NewEventBus(),
 		commandCtx: commandCtx, commandCancel: commandCancel,
 	}
 	runtime.command = toolcommand.New(func() config.Config { return runtime.cfg }, ws, envs, func(ctx context.Context, skillRef string) (toolcommand.SkillLease, error) {
@@ -181,6 +184,8 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 	runtime.recall = toolrecall.New(func() config.Config { return runtime.cfg })
 	runtime.evolution = evolution.New(func() config.Config { return runtime.cfg }, tasks)
 	runtime.taskTools = tooltask.New(func() config.Config { return runtime.cfg }, tasks, runtime.evolution)
+	// 任务状态迁移到事件总线：checkpoint/complete/delete 成功后发布 task 事件。
+	runtime.taskTools.SetTaskEventPublisher(runtime.publishTaskEvent)
 	runtime.tracing = observability.NewTracing(nil)
 
 	if cfg.ACPEnabled {
@@ -265,6 +270,9 @@ func (r *Runtime) Close() error {
 		}
 		if r.plugins != nil {
 			r.plugins.ReleaseMCPLeases()
+		}
+		if r.events != nil {
+			r.events.Close()
 		}
 		if r.traces != nil {
 			if err := r.traces.Close(); err != nil {

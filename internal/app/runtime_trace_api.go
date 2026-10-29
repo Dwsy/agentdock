@@ -31,7 +31,10 @@ func (r *Runtime) RuntimeTraces(query observability.TraceQuery) (Result, error) 
 
 // RuntimeTraceDetail 按 ID 返回单条完整记录，详情页只在选中记录时调用。
 // 记录可能已被保留窗口淘汰，此时返回 not_found 让 UI 提示刷新列表。
-func (r *Runtime) RuntimeTraceDetail(id uint64) (Result, error) {
+// full=true 时额外附带旁路全文副本（单侧上限 observability.TraceFullBytes）：
+// 旁路缺失（memory 模式、未截断的小 payload、已清理）时 full_available=false，
+// UI 应降级为预览而不是报错。
+func (r *Runtime) RuntimeTraceDetail(id uint64, full bool) (Result, error) {
 	if id == 0 {
 		return nil, toolErrorDetails("INVALID_ARGUMENT", "trace id must be a positive integer", "validation", map[string]any{"id": id})
 	}
@@ -42,11 +45,20 @@ func (r *Runtime) RuntimeTraceDetail(id uint64) (Result, error) {
 	if !ok {
 		return nil, toolErrorDetails("TRACE_NOT_FOUND", "trace record is not in the retention window", "not_found", map[string]any{"id": id})
 	}
-	return Result{
+	result := Result{
 		"ok":     true,
 		"source": runtimeAPISource,
 		"record": record,
-	}, nil
+	}
+	if full {
+		fullRecord, found := r.traces.FullRecord(id)
+		result["full"] = nil
+		if found {
+			result["full"] = fullRecord
+		}
+		result["full_available"] = found
+	}
+	return result, nil
 }
 
 // RuntimeFileChanges 返回 trace 窗口内的文件创建/编辑历史。

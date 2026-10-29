@@ -743,3 +743,15 @@
 "Stderr" = "Stderr";
 "output truncated" = "output truncated";
 "Load %d more lines" = "Load %d more lines";
+"Clear search" = "Clear search";
+"Pause auto refresh" = "Pause auto refresh";
+"Resume auto refresh" = "Resume auto refresh";
+"Load full text" = "Load full text";
+"Full text is unavailable. Showing the 8 KiB preview." = "Full text is unavailable. Showing the 8 KiB preview.";
+"Full text is truncated to 256 KiB per side." = "Full text is truncated to 256 KiB per side.";
+"Showing full text." = "Showing full text.";
+"Search published files" = "Search published files";
+"Search tool or source" = "Search tool or source";
+"No matching results." = "No matching results.";
+"Copy tool name" = "Copy tool name";
+"Copy trace ID" = "Copy trace ID";

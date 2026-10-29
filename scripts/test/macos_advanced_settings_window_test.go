@@ -186,7 +186,11 @@ func TestMacOSActivityOwnsRuntimeAnalytics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read AppDelegate.swift: %v", err)
 	}
-	content := string(controlPanelData) + string(serviceData) + string(appDelegateData)
+	listControlsData, err := os.ReadFile(filepath.Join(base, "ListPageControls.swift"))
+	if err != nil {
+		t.Fatalf("read ListPageControls.swift: %v", err)
+	}
+	content := string(controlPanelData) + string(serviceData) + string(appDelegateData) + string(listControlsData)
 
 	for _, want := range []string{
 		"presentActivity(status:",
@@ -207,6 +211,7 @@ func TestMacOSActivityOwnsRuntimeAnalytics(t *testing.T) {
 		"recentP95(analytics)",
 		"private static let pageSize = 20",
 		"5_000_000_000",
+		`autoRefresh(enabled:`,
 		`L10n.text("Show more")`,
 		"nextLatestID != currentLatestID",
 		`case .activity: ActivityView(model: model)`,

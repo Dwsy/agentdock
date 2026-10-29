@@ -56,8 +56,38 @@ struct RuntimeTraceCommand: Decodable {
     }
 }
 
+/// 全文旁路副本的命令正文（与预览分开传输，单侧上限 256 KiB）。
+struct RuntimeTraceFullCommand: Decodable {
+    let command: String?
+    let stdout: String?
+    let stderr: String?
+}
+
+/// 旁路全文副本：只在预览被截断时存在，正文已脱敏。
+struct RuntimeTraceFullRecord: Decodable {
+    let id: UInt64
+    let arguments: String?
+    let result: String?
+    let error: String?
+    let command: RuntimeTraceFullCommand?
+    let fullTruncated: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, arguments, result, error, command
+        case fullTruncated = "full_truncated"
+    }
+}
+
 struct RuntimeTraceDetailPayload: Decodable {
     let record: RuntimeTraceRecord
+    /// full=1 请求时附带；旁路缺失（memory 模式/未截断/已清理）时为 nil。
+    let full: RuntimeTraceFullRecord?
+    let fullAvailable: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case record, full
+        case fullAvailable = "full_available"
+    }
 }
 
 // MARK: - Lightweight syntax highlighting
@@ -466,11 +496,18 @@ private enum TraceFormat {
 
 /// exec_command 详情：命令、运行参数、退出状态与分段输出。
 /// 正文只在详情接口回读后渲染，列表页只显示 summary 一行。
+/// full 非空时优先渲染旁路全文副本（已脱敏）。
 struct TraceCommandCard: View {
     let command: RuntimeTraceCommand
+    var full: RuntimeTraceFullCommand? = nil
+
+    /// 全文副本优先：预览只是全文的前 8 KiB。
+    private var commandText: String? { full?.command ?? command.command }
+    private var stdoutText: String? { full?.stdout ?? command.stdout }
+    private var stderrText: String? { full?.stderr ?? command.stderr }
 
     private var hasCommandBody: Bool {
-        !(command.command ?? "").isEmpty
+        !(commandText ?? "").isEmpty
     }
 
     var body: some View {
@@ -480,13 +517,13 @@ struct TraceCommandCard: View {
                     .font(.system(size: 11.5, design: .monospaced))
                     .textSelection(.enabled)
             }
-            if let body = command.command, !body.isEmpty {
+            if let body = commandText, !body.isEmpty {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("$")
                         .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
                         .foregroundStyle(.secondary)
                     TraceCodeBlock(text: body, language: .shell)
-                    if command.commandPreviewTruncated == true {
+                    if full == nil && command.commandPreviewTruncated == true {
                         TraceBadge(text: L10n.text("truncated"))
                     }
                     copyButton(body)
@@ -527,20 +564,20 @@ struct TraceCommandCard: View {
 
             // 摘要视图没有输出正文（stdout/stderr 被省略），此时不渲染两个空块，
             // 等详情回读后再出现，避免选中瞬间的误导性“—”占位。
-            if command.stdout != nil || command.stderr != nil {
+            if stdoutText != nil || stderrText != nil {
                 TraceOutputSection(
                     title: L10n.text("Stdout"),
-                    text: command.stdout,
+                    text: stdoutText,
                     totalBytes: command.stdoutBytes,
                     toolTruncated: command.stdoutTruncated,
-                    previewTruncated: command.stdoutPreviewTruncated
+                    previewTruncated: full == nil ? command.stdoutPreviewTruncated : nil
                 )
                 TraceOutputSection(
                     title: L10n.text("Stderr"),
-                    text: command.stderr,
+                    text: stderrText,
                     totalBytes: command.stderrBytes,
                     toolTruncated: command.stderrTruncated,
-                    previewTruncated: command.stderrPreviewTruncated
+                    previewTruncated: full == nil ? command.stderrPreviewTruncated : nil
                 )
             }
         }
@@ -580,6 +617,9 @@ private struct TraceOutputSection: View {
                 if previewTruncated == true {
                     TraceBadge(text: L10n.text("truncated"))
                 }
+                if let text, !text.isEmpty {
+                    CopyButton(text: text)
+                }
             }
             if let text, !text.isEmpty {
                 TraceCodeBlock(text: text, language: .log)
@@ -601,11 +641,20 @@ private extension TraceFormat {
 
 /// 调用追踪详情页。record 可能是列表摘要（正文还没回来）也可能是完整详情；
 /// 摘要记录只渲染元数据，正文与命令输出等 detail 回读后再出现。
+/// 预览被截断时提供「加载全文」：全文来自旁路副本，缺失时降级为预览。
 struct TraceDetailView: View {
     let record: RuntimeTraceRecord
     var loadingDetail = false
+    var full: RuntimeTraceFullRecord?
+    var fullUnavailable = false
+    var fullLoading = false
+    var onLoadFull: (() -> Void)? = nil
 
     private var command: RuntimeTraceCommand? { record.command }
+
+    private var argumentsText: String? { full?.arguments ?? record.arguments }
+    private var resultText: String? { full?.result ?? record.result }
+    private var errorText: String? { full?.error ?? record.error }
 
     var body: some View {
         ScrollView {
@@ -615,29 +664,28 @@ struct TraceDetailView: View {
                 if let code = record.errorCode, !code.isEmpty {
                     TraceSurfaceCard(title: L10n.text("Error")) {
                         TraceMetadataRow(label: L10n.text("Code"), value: code)
-                        if let error = record.error, !error.isEmpty {
-                            Text(error).font(.system(size: 12)).textSelection(.enabled)
+                        if let error = errorText, !error.isEmpty {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(error).font(.system(size: 12)).textSelection(.enabled)
+                                CopyButton(text: error)
+                            }
                         }
                     }
                 }
 
                 if let command {
-                    TraceCommandCard(command: command)
+                    TraceCommandCard(command: command, full: full?.command)
                 }
 
-                payloadCard(L10n.text("Arguments"), record.arguments, language: .json)
-                payloadCard(L10n.text("Result"), record.result, language: .log)
+                payloadCard(L10n.text("Arguments"), argumentsText, language: .json)
+                payloadCard(L10n.text("Result"), resultText, language: .log)
 
                 if loadingDetail {
                     ProgressView()
                         .controlSize(.small)
                 }
 
-                if record.truncated == true {
-                    Text(L10n.text("Payload preview is truncated to 8 KiB per side."))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
+                fullTextFooter
             }
             .padding(22)
             .frame(maxWidth: 860, alignment: .leading)
@@ -645,9 +693,42 @@ struct TraceDetailView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    @ViewBuilder private var fullTextFooter: some View {
+        if record.truncated == true {
+            VStack(alignment: .leading, spacing: 6) {
+                if full != nil {
+                    Text(full?.fullTruncated == true
+                         ? L10n.text("Full text is truncated to 256 KiB per side.")
+                         : L10n.text("Showing full text."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else if fullUnavailable {
+                    Text(L10n.text("Full text is unavailable. Showing the 8 KiB preview."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(L10n.text("Payload preview is truncated to 8 KiB per side."))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Button(L10n.text("Load full text")) {
+                        onLoadFull?()
+                    }
+                    .disabled(fullLoading || onLoadFull == nil)
+                    if fullLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+            }
+        }
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(record.tool).font(.system(size: 18, weight: .semibold))
+            HStack(spacing: 8) {
+                Text(record.tool).font(.system(size: 18, weight: .semibold))
+                CopyButton(text: record.tool)
+            }
             HStack(spacing: 10) {
                 Text(record.source)
                 Text(String(format: "%.1f ms", record.durationMS)).monospacedDigit()
@@ -668,7 +749,10 @@ struct TraceDetailView: View {
     @ViewBuilder private func payloadCard(_ title: String, _ text: String?, language: TraceCodeLanguage) -> some View {
         TraceSurfaceCard(title: title) {
             if let text, !text.isEmpty {
-                TraceCodeBlock(text: text, language: language)
+                HStack(alignment: .top, spacing: 8) {
+                    TraceCodeBlock(text: text, language: language)
+                    CopyButton(text: text)
+                }
             } else {
                 Text("—").foregroundStyle(.secondary)
             }

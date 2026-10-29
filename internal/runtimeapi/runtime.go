@@ -54,9 +54,10 @@ type TraceRuntime interface {
 }
 
 // TraceDetailRuntime 是 trace 详情能力：列表只带摘要，选中记录后按 ID 拉取
-// 完整预览。独立于 TraceRuntime，旧实现可以明确报“不支持”而不是返回空记录。
+// 完整预览；full=true 时再附带旁路全文副本。独立于 TraceRuntime，旧实现可以
+// 明确报“不支持”而不是返回空记录。
 type TraceDetailRuntime interface {
-	RuntimeTraceDetail(id uint64) (app.Result, error)
+	RuntimeTraceDetail(id uint64, full bool) (app.Result, error)
 }
 
 // FileChangeRuntime 是 trace 之上的文件历史投影，供控制面板构建目录树。

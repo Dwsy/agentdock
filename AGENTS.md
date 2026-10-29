@@ -54,6 +54,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 ### 调用追踪契约
 
 - 读取：`GET /internal/runtime/traces?view=summary|full`，以及 `GET /internal/runtime/traces/detail?id=`。列表默认走 `summary`（只带 `command.summary` 与字节数），详情按需拉完整记录。
+- 全文旁路：仅当预览会被截断时，`Record` 同步把脱敏全文（单侧上限 256 KiB，超限打 `full_truncated`）写进 `<trace root>/full/YYYY-MM-DD.jsonl`，保留期与清理跟预览同步。`GET /internal/runtime/traces/detail?id=<id>&full=1` 按需回读；副本缺失时 `full_available=false`，UI 降级为预览。全文不进内存环、不进 summary、不进 CSV 导出。
 - 写入：`Arguments`/`Result`/`command.command`/`stdout`/`stderr` 统一在 `observability.TraceStore.Record` 处先脱敏（16 KiB 扫描窗口）再截断到 8 KiB，超限打 `truncated` 标记。不要在采集侧另开截断点。
 - 改 trace 字段必须同步三处：Swift 解码（`TraceRenderView.swift` / `ServiceController.swift`）、CSV 导出列、`runtime_trace*_test.go` 的字段断言。
 

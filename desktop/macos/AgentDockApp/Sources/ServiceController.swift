@@ -1082,6 +1082,7 @@ final class ServiceController: @unchecked Sendable {
         source: String = "",
         status: String = "",
         view: String = "full",
+        limit: Int = 0,
         configuration: ServiceConfiguration?
     ) async -> RuntimeTracesPayload? {
         guard let configuration else { return nil }
@@ -1092,6 +1093,7 @@ final class ServiceController: @unchecked Sendable {
         if !status.isEmpty { items.append(URLQueryItem(name: "status", value: status)) }
         // view=summary 让列表只回摘要；正文由 runtimeTraceDetail 按需拉取。
         if !view.isEmpty { items.append(URLQueryItem(name: "view", value: view)) }
+        if limit > 0 { items.append(URLQueryItem(name: "limit", value: String(limit))) }
         return await fetchRuntimePayload(
             RuntimeTracesPayload.self,
             configuration: configuration,
@@ -1101,15 +1103,18 @@ final class ServiceController: @unchecked Sendable {
         )
     }
 
-    func runtimeTraceDetail(id: UInt64, configuration: ServiceConfiguration?) async -> RuntimeTraceRecord? {
+    func runtimeTraceDetail(id: UInt64, full: Bool = false, configuration: ServiceConfiguration?) async -> RuntimeTraceDetailPayload? {
         guard let configuration else { return nil }
+        var items = [URLQueryItem(name: "id", value: String(id))]
+        // full=1 时后端附带旁路全文副本；预览足够时不必拉全文。
+        if full { items.append(URLQueryItem(name: "full", value: "1")) }
         return await fetchRuntimePayload(
             RuntimeTraceDetailPayload.self,
             configuration: configuration,
             path: RuntimeAPIPath.traceDetail,
-            queryItems: [URLQueryItem(name: "id", value: String(id))],
+            queryItems: items,
             timeout: 5
-        )?.record
+        )
     }
 
     func start() async throws -> BackgroundServiceLifecycleResult {

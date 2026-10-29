@@ -306,12 +306,14 @@ private final class ControlPanelModel: ObservableObject {
     }
 
     func loadTraces(query: String, tool: String, source: String, status filter: String) async -> RuntimeTracesPayload? {
+        // 后端单次查询上限 500；UI 分批渲染，不必为了首屏少拉而丢历史。
         let summary = await service.runtimeTraces(
             query: query,
             tool: tool,
             source: source,
             status: filter,
             view: "summary",
+            limit: 500,
             configuration: status.configuration
         )
         if summary != nil { return summary }
@@ -322,13 +324,15 @@ private final class ControlPanelModel: ObservableObject {
             source: source,
             status: filter,
             view: "full",
+            limit: 500,
             configuration: status.configuration
         )
     }
 
     /// 列表只带摘要，正文（命令/stdout/stderr）在选中记录后单独回读。
-    func loadTraceDetail(id: UInt64) async -> RuntimeTraceRecord? {
-        await service.runtimeTraceDetail(id: id, configuration: status.configuration)
+    /// full=true 时附带旁路全文副本；副本缺失时 payload.full_available=false。
+    func loadTraceDetail(id: UInt64, full: Bool = false) async -> RuntimeTraceDetailPayload? {
+        await service.runtimeTraceDetail(id: id, full: full, configuration: status.configuration)
     }
 
     func loadArtifacts() async -> RuntimeArtifactsPayload? {
@@ -1684,21 +1688,34 @@ private struct RuntimeActivityCallRow: View {
 
 private struct ActivityView: View {
     private static let pageSize = 20
-    private static let refreshIntervalNanoseconds: UInt64 = 5_000_000_000
 
     @ObservedObject var model: ControlPanelModel
     @State private var analytics: RuntimeAnalyticsPayload?
     @State private var visibleCallCount = pageSize
+    @State private var query = ""
+    @State private var autoRefresh = true
 
     private var running: Bool { model.status.loaded && model.status.healthy }
+
+    private var filteredCalls: [RuntimeAnalyticsCall] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return (analytics?.recentCalls ?? []).filter { call in
+            needle.isEmpty || call.tool.lowercased().contains(needle) || call.source.lowercased().contains(needle)
+        }
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                PageHeader(
-                    title: L10n.text("Activity"),
-                    detail: L10n.text("Recent tool calls and execution details.")
-                )
+                HStack(alignment: .top, spacing: 10) {
+                    PageHeader(
+                        title: L10n.text("Activity"),
+                        detail: L10n.text("Recent tool calls and execution details.")
+                    )
+                    Spacer(minLength: 12)
+                    SearchField(placeholder: L10n.text("Search tool or source"), text: $query)
+                    AutoRefreshToggle(enabled: $autoRefresh)
+                }
 
                 SettingsSection(L10n.text("Recent calls")) {
                     Text(
@@ -1711,16 +1728,23 @@ private struct ActivityView: View {
                     .padding(.horizontal, 13)
                     .padding(.vertical, 10)
 
-                    if let analytics {
-                        let visibleCalls = Array(analytics.recentCalls.prefix(visibleCallCount))
+                    if analytics != nil {
+                        let calls = filteredCalls
+                        let visibleCalls = Array(calls.prefix(visibleCallCount))
                         if !visibleCalls.isEmpty { RowDivider() }
                         ForEach(Array(visibleCalls.enumerated()), id: \.element.id) { index, call in
                             if index > 0 { RowDivider() }
                             RuntimeActivityCallRow(call: call)
+                                .onAppear {
+                                    // 滚动到末行自动加载下一批。
+                                    if index == visibleCalls.count - 1 {
+                                        visibleCallCount += Self.pageSize
+                                    }
+                                }
                         }
-                        if analytics.recentCalls.isEmpty {
+                        if calls.isEmpty {
                             emptyAnalytics(L10n.text("No call data yet."))
-                        } else if visibleCallCount < analytics.recentCalls.count {
+                        } else if visibleCallCount < calls.count {
                             RowDivider()
                             Button(L10n.text("Show more")) {
                                 visibleCallCount += Self.pageSize
@@ -1747,21 +1771,22 @@ private struct ActivityView: View {
             .padding(.bottom, 32)
             .frame(maxWidth: 760, alignment: .leading)
         }
-        .task {
-            while !Task.isCancelled {
-                if running {
-                    let nextAnalytics = await model.service.runtimeAnalytics(configuration: model.status.configuration)
-                    let currentLatestID = analytics?.recentCalls.first?.id
-                    let nextLatestID = nextAnalytics?.recentCalls.first?.id
-                    if analytics == nil || nextLatestID != currentLatestID {
-                        analytics = nextAnalytics
-                    }
-                } else if analytics != nil {
-                    analytics = nil
-                }
+        .task { await refreshAnalytics() }
+        .autoRefresh(enabled: autoRefresh) { await refreshAnalytics() }
+        .onChange(of: query) { _ in visibleCallCount = Self.pageSize }
+    }
 
-                try? await Task.sleep(nanoseconds: Self.refreshIntervalNanoseconds)
-            }
+    /// 只在列表头部变化时替换数据：自动刷新不能把用户正要点击的行换掉。
+    private func refreshAnalytics() async {
+        guard running else {
+            if analytics != nil { analytics = nil }
+            return
+        }
+        let nextAnalytics = await model.service.runtimeAnalytics(configuration: model.status.configuration)
+        let currentLatestID = analytics?.recentCalls.first?.id
+        let nextLatestID = nextAnalytics?.recentCalls.first?.id
+        if analytics == nil || nextLatestID != currentLatestID {
+            analytics = nextAnalytics
         }
     }
 
@@ -2577,9 +2602,7 @@ private struct CatalogSectionListView: View {
                     detail: L10n.format("%d items", entries.count)
                 )
 
-                TextField(L10n.text("Search"), text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 320)
+                SearchField(placeholder: L10n.text("Search"), text: $query)
             }
             .padding(.horizontal, 24)
             .padding(.top, 12)
@@ -2941,6 +2964,7 @@ private struct TasksView: View {
     @State private var selectedTaskID: String?
     @State private var detail: RuntimeTaskDetail?
     @State private var expandedProjects: Set<String> = []
+    @State private var autoRefresh = true
 
     private var allTasks: [RuntimeTaskRow] { model.runtimeTasks?.tasks ?? [] }
 
@@ -3007,9 +3031,7 @@ private struct TasksView: View {
                     Spacer(minLength: 0)
                 }
                 HStack(spacing: 10) {
-                    TextField(L10n.text("Search title, project, or device"), text: $query)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 300)
+                    SearchField(placeholder: L10n.text("Search title, project, or device"), text: $query)
                     Picker(L10n.text("Status"), selection: $statusFilter) {
                         Text(L10n.text("All")).tag("all")
                         Text(L10n.text("Active")).tag("active")
@@ -3020,6 +3042,7 @@ private struct TasksView: View {
                     .labelsHidden()
                     .frame(width: 300)
                     Spacer()
+                    AutoRefreshToggle(enabled: $autoRefresh)
                     Button(L10n.text("Refresh")) {
                         Task { await model.refreshRuntimeData(force: true) }
                     }
@@ -3098,6 +3121,7 @@ private struct TasksView: View {
             }
             detail = await model.loadTaskDetail(id: id)
         }
+        .autoRefresh(enabled: autoRefresh) { await model.refreshRuntimeData(force: true) }
     }
 
     @ViewBuilder private var taskDetailPane: some View {
@@ -3324,8 +3348,15 @@ private struct TracesView: View {
     @State private var detailRecord: RuntimeTraceRecord?
     @State private var detailLoading = false
     @State private var loading = false
+    @State private var autoRefresh = true
+    @State private var visibleCount = ListChunk.initial
+    @State private var reloadTask: Task<Void, Never>?
+    @State private var fullRecord: RuntimeTraceFullRecord?
+    @State private var fullUnavailable = false
+    @State private var fullLoading = false
 
     private var records: [RuntimeTraceRecord] { payload?.records ?? [] }
+    private var visibleRecords: [RuntimeTraceRecord] { Array(records.prefix(visibleCount)) }
 
     /// 详情回读完成前先用列表摘要渲染元数据，避免选中后出现空白等待。
     private var selectedRecord: RuntimeTraceRecord? {
@@ -3340,9 +3371,7 @@ private struct TracesView: View {
             VStack(alignment: .leading, spacing: 12) {
                 PageHeader(title: L10n.text("Traces"), detail: statusDetail)
                 HStack(spacing: 10) {
-                    TextField(L10n.text("Search tool, arguments, or result"), text: $query)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 300)
+                    SearchField(placeholder: L10n.text("Search tool, arguments, or result"), text: $query)
                     Picker(L10n.text("Tool"), selection: $toolFilter) {
                         Text(L10n.text("All tools")).tag("")
                         ForEach(payload?.tools ?? [], id: \.self) { name in
@@ -3360,6 +3389,7 @@ private struct TracesView: View {
                     .labelsHidden()
                     .frame(width: 210)
                     Spacer()
+                    AutoRefreshToggle(enabled: $autoRefresh)
                     Button(L10n.text("Refresh")) { Task { await reload() } }
                         .disabled(loading)
                 }
@@ -3377,9 +3407,15 @@ private struct TracesView: View {
             } else {
                 HStack(spacing: 0) {
                     List(selection: $selectedTraceID) {
-                        ForEach(records) { record in
+                        ForEach(Array(visibleRecords.enumerated()), id: \.element.id) { index, record in
                             TraceRowView(record: record)
                                 .tag(record.id)
+                                // 滚动到末行自动渲染下一批，大列表首帧只建 50 行。
+                                .onAppear {
+                                    if index == visibleRecords.count - 1 {
+                                        visibleCount += ListChunk.size
+                                    }
+                                }
                         }
                     }
                     .listStyle(.inset)
@@ -3393,7 +3429,17 @@ private struct TracesView: View {
             }
         }
         .task { await reload() }
-        .task(id: selectedTraceID) { await loadDetail() }
+        .task(id: selectedTraceID) {
+            // 只有切换选中行才重置全文状态；自动刷新（reload→loadDetail）
+            // 必须保留已加载的全文，否则 5 秒就把用户要看的正文抹掉。
+            fullRecord = nil
+            fullUnavailable = false
+            await loadDetail()
+        }
+        .onChange(of: query) { _ in scheduleReload() }
+        .onChange(of: toolFilter) { _ in scheduleReload() }
+        .onChange(of: statusFilter) { _ in scheduleReload() }
+        .autoRefresh(enabled: autoRefresh) { await reload() }
     }
 
     private var statusDetail: String {
@@ -3405,11 +3451,29 @@ private struct TracesView: View {
 
     @ViewBuilder private var traceDetailPane: some View {
         if let record = selectedRecord {
-            TraceDetailView(record: record, loadingDetail: detailLoading)
+            TraceDetailView(
+                record: record,
+                loadingDetail: detailLoading,
+                full: fullRecord,
+                fullUnavailable: fullUnavailable,
+                fullLoading: fullLoading,
+                onLoadFull: { Task { await loadFull() } }
+            )
         } else {
             Text(L10n.text("Select a trace"))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// 搜索输入防抖：过滤条件是 API 侧查询，不能每个按键打一次后端。
+    private func scheduleReload() {
+        reloadTask?.cancel()
+        visibleCount = ListChunk.initial
+        reloadTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
+            await reload()
         }
     }
 
@@ -3435,13 +3499,28 @@ private struct TracesView: View {
             detailLoading = false
             return
         }
-        detailLoading = true
+        // 自动刷新也走这里：已有该行详情时不再闪加载指示。
+        if detailRecord?.id != id {
+            detailLoading = true
+        }
         let loaded = await model.loadTraceDetail(id: id)
         // 用户可能在请求返回前切换了选中行，晚到的响应不能覆盖当前详情。
         if selectedTraceID == id {
-            detailRecord = loaded
+            detailRecord = loaded?.record
         }
         detailLoading = false
+    }
+
+    /// 全文来自旁路副本；缺失时（memory 模式/已清理）降级为预览。
+    private func loadFull() async {
+        guard let id = selectedTraceID else { return }
+        fullLoading = true
+        let loaded = await model.loadTraceDetail(id: id, full: true)
+        if selectedTraceID == id {
+            fullRecord = loaded?.full
+            fullUnavailable = !(loaded?.fullAvailable ?? false)
+        }
+        fullLoading = false
     }
 }
 
@@ -3484,6 +3563,10 @@ private struct TraceRowView: View {
             }
         }
         .padding(.vertical, 2)
+        .contextMenu {
+            Button(L10n.text("Copy tool name")) { copyToPasteboard(record.tool) }
+            Button(L10n.text("Copy trace ID")) { copyToPasteboard(String(record.id)) }
+        }
     }
 }
 
@@ -3504,13 +3587,13 @@ private enum AnalyticsSort: String, CaseIterable, Identifiable {
 }
 
 private struct AnalyticsView: View {
-    private static let refreshIntervalNanoseconds: UInt64 = 5_000_000_000
     private static let barLimit = 24
 
     @ObservedObject var model: ControlPanelModel
     @State private var analytics: RuntimeAnalyticsPayload?
     @State private var query = ""
     @State private var sort: AnalyticsSort = .count
+    @State private var autoRefresh = true
 
     private var running: Bool { model.status.loaded && model.status.healthy }
 
@@ -3536,10 +3619,14 @@ private struct AnalyticsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                PageHeader(
-                    title: L10n.text("Analytics"),
-                    detail: L10n.text("Tool call counts and latency distribution.")
-                )
+                HStack(alignment: .top, spacing: 10) {
+                    PageHeader(
+                        title: L10n.text("Analytics"),
+                        detail: L10n.text("Tool call counts and latency distribution.")
+                    )
+                    Spacer(minLength: 12)
+                    AutoRefreshToggle(enabled: $autoRefresh)
+                }
 
                 if let analytics {
                     metrics(analytics)
@@ -3558,18 +3645,19 @@ private struct AnalyticsView: View {
             .padding(.bottom, 32)
             .frame(maxWidth: 960, alignment: .leading)
         }
-        .task {
-            while !Task.isCancelled {
-                if running {
-                    let next = await model.service.runtimeAnalytics(configuration: model.status.configuration)
-                    if analytics == nil || next?.windowCalls != analytics?.windowCalls || next?.totalCalls != analytics?.totalCalls {
-                        analytics = next
-                    }
-                } else if analytics != nil {
-                    analytics = nil
-                }
-                try? await Task.sleep(nanoseconds: Self.refreshIntervalNanoseconds)
-            }
+        .task { await refreshAnalytics() }
+        .autoRefresh(enabled: autoRefresh) { await refreshAnalytics() }
+    }
+
+    /// 指标卡在数据没变时保持不动：自动刷新不能把用户正要看的数字换掉。
+    private func refreshAnalytics() async {
+        guard running else {
+            if analytics != nil { analytics = nil }
+            return
+        }
+        let next = await model.service.runtimeAnalytics(configuration: model.status.configuration)
+        if analytics == nil || next?.windowCalls != analytics?.windowCalls || next?.totalCalls != analytics?.totalCalls {
+            analytics = next
         }
     }
 
@@ -3613,9 +3701,7 @@ private struct AnalyticsView: View {
     private var chart: some View {
         CatalogCard(title: L10n.text("Tool calls")) {
             HStack(spacing: 10) {
-                TextField(L10n.text("Search tools"), text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 240)
+                SearchField(placeholder: L10n.text("Search tools"), text: $query)
                 Picker(L10n.text("Sort by"), selection: $sort) {
                     ForEach(AnalyticsSort.allCases) { option in
                         Text(option.title).tag(option)
@@ -3801,6 +3887,9 @@ private struct AnalyticsTableRow: View {
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(isEven ? Color.primary.opacity(0.035) : Color.clear)
         )
+        .contextMenu {
+            Button(L10n.text("Copy tool name")) { copyToPasteboard(stat.tool) }
+        }
     }
 }
 
@@ -4245,6 +4334,17 @@ private struct PublishedView: View {
     @ObservedObject var model: ControlPanelModel
     @State private var payload: RuntimeArtifactsPayload?
     @State private var loading = false
+    @State private var query = ""
+    @State private var autoRefresh = true
+    @State private var visibleCount = ListChunk.initial
+
+    private var filteredItems: [RuntimeArtifactItem] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return (payload?.artifacts ?? []).filter {
+            needle.isEmpty || $0.filename.lowercased().contains(needle) || $0.url.lowercased().contains(needle)
+        }
+    }
+    private var visibleItems: [RuntimeArtifactItem] { Array(filteredItems.prefix(visibleCount)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -4254,6 +4354,7 @@ private struct PublishedView: View {
                     detail: L10n.text("Files shared through file_publish.")
                 )
                 HStack(spacing: 10) {
+                    SearchField(placeholder: L10n.text("Search published files"), text: $query)
                     if let payload {
                         Text(L10n.format("%d files", payload.count))
                             .font(.system(size: 11))
@@ -4269,6 +4370,7 @@ private struct PublishedView: View {
                         }
                     }
                     Spacer()
+                    AutoRefreshToggle(enabled: $autoRefresh)
                     Button(L10n.text("Refresh")) { Task { await reload() } }
                         .disabled(loading)
                 }
@@ -4294,14 +4396,22 @@ private struct PublishedView: View {
                     .padding(.vertical, 10)
                     Divider()
                 }
-                let items = payload?.artifacts ?? []
+                let items = filteredItems
                 if items.isEmpty {
-                    CatalogUnavailable(reason: L10n.text("No published files."))
+                    CatalogUnavailable(reason: query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        ? L10n.text("No published files.")
+                        : L10n.text("No matching results."))
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(items) { item in
+                            ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
                                 PublishedRow(item: item)
+                                    .onAppear {
+                                        // 滚动到末行自动渲染下一批。
+                                        if index == visibleItems.count - 1 {
+                                            visibleCount += ListChunk.size
+                                        }
+                                    }
                                 Divider().padding(.leading, 24)
                             }
                         }
@@ -4311,6 +4421,8 @@ private struct PublishedView: View {
             }
         }
         .task { await reload() }
+        .autoRefresh(enabled: autoRefresh) { await reload() }
+        .onChange(of: query) { _ in visibleCount = ListChunk.initial }
     }
 
     private func reload() async {

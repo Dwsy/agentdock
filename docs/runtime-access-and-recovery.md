@@ -50,7 +50,7 @@
 
 ### 调用追踪读取
 
-`/internal/runtime/traces` 默认返回完整预览，`view=summary` 只返回列表摘要：去掉 `arguments`/`result` 与命令正文，只留命令摘要、退出状态与字节数。控制面板列表必须走摘要视图，选中记录后再用 `/internal/runtime/traces/detail?id=<id>` 回读单条完整记录（记录已超出保留窗口时返回 404 `TRACE_NOT_FOUND`）。
+`/internal/runtime/traces` 默认返回完整预览，`view=summary` 只返回列表摘要：去掉 `arguments`/`result` 与命令正文，只留命令摘要、退出状态与字节数。控制面板列表必须走摘要视图，选中记录后再用 `/internal/runtime/traces/detail?id=<id>` 回读单条完整记录（记录已超出保留窗口时返回 404 `TRACE_NOT_FOUND`）。预览被截断的记录另有旁路全文副本（脱敏后单侧上限 256 KiB，存于 `<trace root>/full/`），用 `?full=1` 按需回读；副本缺失时 `full_available=false`，UI 降级为预览。
 
 `exec_command`、`session_observe`、`session_act` 额外写入结构化的 `command` 字段（命令、cwd、运行时、超时、stdout/stderr、退出码）。所有正文在写入保留窗口前统一截断：通用 `arguments`/`result` 与命令/stdout/stderr 均为单侧 8 KiB，超过时追加 `…(truncated)` 并置位 `truncated`（结构化字段另有 `*_preview_truncated`）。脱敏正则只扫描保留窗口两倍的文本，避免 MB 级命令输出把工具返回路径拖慢到几十毫秒。
 

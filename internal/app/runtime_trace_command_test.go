@@ -84,7 +84,7 @@ func TestRuntimeTraceCapturesExecCommandPayload(t *testing.T) {
 	if len(body) > 32<<10 {
 		t.Fatalf("runtime traces response = %d bytes, want <= 32 KiB", len(body))
 	}
-	detailPayload, err := rt.RuntimeTraceDetail(record.ID)
+	detailPayload, err := rt.RuntimeTraceDetail(record.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestRuntimeTraceSummaryAndDetail(t *testing.T) {
 	}
 	t.Logf("summary list response=%d bytes", len(body))
 
-	detail, err := rt.RuntimeTraceDetail(summary.ID)
+	detail, err := rt.RuntimeTraceDetail(summary.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestRuntimeTraceSummaryAndDetail(t *testing.T) {
 		{name: "evicted id", id: 9999, code: "TRACE_NOT_FOUND"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := rt.RuntimeTraceDetail(test.id)
+			_, err := rt.RuntimeTraceDetail(test.id, false)
 			var toolErr *toolcore.ToolError
 			if !errors.As(err, &toolErr) || toolErr.Code != test.code {
 				t.Fatalf("error = %#v, want %s", err, test.code)

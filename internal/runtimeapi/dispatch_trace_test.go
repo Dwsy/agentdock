@@ -15,11 +15,13 @@ import (
 // 裸 runtimeStub 本身就是“旧实现”，必须明确报不支持而不是返回空记录。
 type traceDetailRuntimeStub struct {
 	runtimeStub
-	detailID uint64
+	detailID   uint64
+	detailFull bool
 }
 
-func (r *traceDetailRuntimeStub) RuntimeTraceDetail(id uint64) (app.Result, error) {
+func (r *traceDetailRuntimeStub) RuntimeTraceDetail(id uint64, full bool) (app.Result, error) {
 	r.detailID = id
+	r.detailFull = full
 	return app.Result{"ok": true, "record": map[string]any{"id": id}}, nil
 }
 
@@ -75,12 +77,27 @@ func TestDispatchTraceDetail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if stub.detailID != 42 || result["record"] == nil {
-			t.Fatalf("detail = %#v id = %d", result, stub.detailID)
+		if stub.detailID != 42 || stub.detailFull || result["record"] == nil {
+			t.Fatalf("detail = %#v id = %d full = %v", result, stub.detailID, stub.detailFull)
 		}
 	})
 
-	for _, query := range []url.Values{{}, {"id": {"0"}}, {"id": {"abc"}}, {"id": {"-3"}}} {
+	t.Run("passes full flag", func(t *testing.T) {
+		stub := &traceDetailRuntimeStub{}
+		_, err := Dispatch(context.Background(), stub, Request{
+			Method: http.MethodGet,
+			Path:   "/internal/runtime/traces/detail",
+			Query:  url.Values{"id": {"42"}, "full": {"1"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !stub.detailFull {
+			t.Fatal("full flag was not forwarded")
+		}
+	})
+
+	for _, query := range []url.Values{{}, {"id": {"0"}}, {"id": {"abc"}}, {"id": {"-3"}}, {"id": {"1"}, "full": {"raw"}}} {
 		t.Run("rejects "+query.Encode(), func(t *testing.T) {
 			_, err := Dispatch(context.Background(), &traceDetailRuntimeStub{}, Request{
 				Method: http.MethodGet,

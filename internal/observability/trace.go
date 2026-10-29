@@ -21,22 +21,30 @@ import (
 // TraceStore 默认关闭，开启后也只保留截断并脱敏的预览，避免把大文件、
 // 图片 base64 或凭据整份写进磁盘。
 type TraceStore struct {
-	mu       sync.RWMutex
-	mode     TraceMode
-	max      int
-	records  []TraceRecord
-	nextID   uint64
-	root     string
-	retain   time.Duration
-	pending  []TraceRecord
-	file     *os.File
-	writer   *bufio.Writer
-	day      string
-	closed   bool
-	stop     chan struct{}
-	done     chan struct{}
-	closeOne sync.Once
-	closeErr error
+	mu      sync.RWMutex
+	mode    TraceMode
+	max     int
+	records []TraceRecord
+	nextID  uint64
+	root    string
+	retain  time.Duration
+	pending []TraceRecord
+	file    *os.File
+	writer  *bufio.Writer
+	day     string
+	// pendingFull 保存预览会被截断记录的全文副本（已脱敏），由 flushLocked
+	// 与预览一起刷盘到 full/<day>.jsonl。全文不进内存环：环常驻 2000 条，
+	// 带正文会把常驻内存从 MB 级拉到 GB 级。
+	pendingFull      []TraceFullRecord
+	pendingFullBytes int
+	fullFile         *os.File
+	fullWriter       *bufio.Writer
+	fullDay          string
+	closed           bool
+	stop             chan struct{}
+	done             chan struct{}
+	closeOne         sync.Once
+	closeErr         error
 
 	flushEvery time.Duration
 	bufferSize int
@@ -229,6 +237,21 @@ func (s *TraceStore) DiskBytes() int64 {
 		}
 		total += info.Size()
 	}
+	// 全文旁路同样是磁盘占用，告警口径不能漏掉它。
+	fullEntries, err := os.ReadDir(s.fullDir())
+	if err != nil {
+		return total
+	}
+	for _, entry := range fullEntries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		total += info.Size()
+	}
 	return total
 }
 
@@ -250,6 +273,13 @@ func (s *TraceStore) Status() TraceStatus {
 func (s *TraceStore) Record(record TraceRecord) {
 	if s == nil {
 		return
+	}
+	// 全文副本必须在预览截断之前捕获；只给会被截断的记录写旁路，
+	// 小 payload 的预览本身就是全文。
+	var full *TraceFullRecord
+	if s.mode == TraceModeDisk && traceNeedsFullCopy(record) {
+		built := buildTraceFull(record)
+		full = &built
 	}
 	record.Arguments, record.Truncated = tracePreview(record.Arguments)
 	result, truncated := tracePreview(record.Result)
@@ -277,7 +307,13 @@ func (s *TraceStore) Record(record TraceRecord) {
 		return
 	}
 	s.pending = append(s.pending, record)
-	if len(s.pending) >= s.bufferSize {
+	if full != nil && s.pendingFullBytes < traceFullPendingBytes {
+		// ID 在锁内分配，全文旁路必须用同一条记录的 ID 才能按 detail 回读。
+		full.ID = record.ID
+		s.pendingFull = append(s.pendingFull, *full)
+		s.pendingFullBytes += len(full.Arguments) + len(full.Result) + len(full.Error)
+	}
+	if len(s.pending) >= s.bufferSize || s.pendingFullBytes >= traceFullPendingBytes {
 		s.flushLocked()
 	}
 }
@@ -300,8 +336,12 @@ func traceCommandPreview(value string, limit int) (string, bool) {
 
 func tracePreviewWith(value string, limit int, redact func(string) string) (string, bool) {
 	truncated := false
-	if len(value) > traceRedactionScanBytes {
-		value = value[:traceRedactionScanBytes]
+	// 扫描窗口是上限的两倍（留脱敏收缩余量），但不低于
+	// traceRedactionScanBytes：全文旁路用更大的上限时窗口必须跟着放大，
+	// 否则“全文”会被隐式钉在 16 KiB。
+	scan := max(traceRedactionScanBytes, 2*limit)
+	if len(value) > scan {
+		value = value[:scan]
 		truncated = true
 	}
 	value = redact(value)
@@ -457,6 +497,8 @@ func (s *TraceStore) Clear() (int, error) {
 	cleared := len(s.records)
 	s.records = nil
 	s.pending = nil
+	s.pendingFull = nil
+	s.pendingFullBytes = 0
 	if s.mode != TraceModeDisk {
 		return cleared, nil
 	}
@@ -469,6 +511,17 @@ func (s *TraceStore) Clear() (int, error) {
 		s.file = nil
 	}
 	s.day = ""
+	if s.fullWriter != nil {
+		_ = s.fullWriter.Flush()
+		s.fullWriter = nil
+	}
+	if s.fullFile != nil {
+		_ = s.fullFile.Close()
+		s.fullFile = nil
+	}
+	s.fullDay = ""
+	// 全文旁路与预览同生命周期：清空保留窗口时不能留下可按 ID 回读的正文。
+	s.cleanFullFiles("")
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -616,6 +669,10 @@ func (s *TraceStore) Close() error {
 			s.closeErr = s.file.Close()
 			s.file = nil
 		}
+		if s.fullFile != nil {
+			_ = s.fullFile.Close()
+			s.fullFile = nil
+		}
 	})
 	return s.closeErr
 }
@@ -642,6 +699,11 @@ func (s *TraceStore) flushLoop() {
 
 // flushLocked 需要持有写锁；磁盘错误只终止本次写入，不能让 trace 影响服务。
 func (s *TraceStore) flushLocked() {
+	s.flushPreviewsLocked()
+	s.flushFullLocked()
+}
+
+func (s *TraceStore) flushPreviewsLocked() {
 	if len(s.pending) == 0 {
 		return
 	}
@@ -666,6 +728,82 @@ func (s *TraceStore) flushLocked() {
 	}
 	s.pending = nil
 	_ = s.writer.Flush()
+}
+
+// flushFullLocked 把全文旁路写进 full/<day>.jsonl；失败只丢本次待写队列，
+// 预览照常保留，UI 会降级为“仅预览”。
+func (s *TraceStore) flushFullLocked() {
+	if len(s.pendingFull) == 0 {
+		return
+	}
+	if err := s.ensureFullWriter(); err != nil {
+		s.pendingFull = nil
+		s.pendingFullBytes = 0
+		return
+	}
+	for _, record := range s.pendingFull {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			continue
+		}
+		if _, err := s.fullWriter.Write(encoded); err != nil {
+			s.pendingFull = nil
+			s.pendingFullBytes = 0
+			_ = s.fullWriter.Flush()
+			return
+		}
+		if err := s.fullWriter.WriteByte('\n'); err != nil {
+			s.pendingFull = nil
+			s.pendingFullBytes = 0
+			return
+		}
+	}
+	s.pendingFull = nil
+	s.pendingFullBytes = 0
+	_ = s.fullWriter.Flush()
+}
+
+func (s *TraceStore) ensureFullWriter() error {
+	day := traceDay(time.Now())
+	if s.fullFile != nil && s.fullDay == day {
+		return nil
+	}
+	if s.fullWriter != nil {
+		_ = s.fullWriter.Flush()
+	}
+	if s.fullFile != nil {
+		_ = s.fullFile.Close()
+		s.fullFile = nil
+	}
+	if err := os.MkdirAll(s.fullDir(), 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(s.fullDir(), day+".jsonl")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	s.fullFile = file
+	s.fullWriter = bufio.NewWriterSize(file, 32<<10)
+	s.fullDay = day
+	return nil
+}
+
+// cleanFullFiles 删除 full/ 下早于 cutoff 的保留文件；
+// cutoff 为空表示全部删除（清空保留窗口时用）。
+func (s *TraceStore) cleanFullFiles(cutoff string) {
+	entries, err := os.ReadDir(s.fullDir())
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		if cutoff == "" || strings.TrimSuffix(entry.Name(), ".jsonl") < cutoff {
+			_ = os.Remove(filepath.Join(s.fullDir(), entry.Name()))
+		}
+	}
 }
 
 func (s *TraceStore) ensureWriter() error {
@@ -755,6 +893,7 @@ func (s *TraceStore) cleanupExpired() {
 			_ = os.Remove(filepath.Join(s.root, entry.Name()))
 		}
 	}
+	s.cleanFullFiles(cutoff)
 }
 
 func traceDay(t time.Time) string { return t.Format("2006-01-02") }

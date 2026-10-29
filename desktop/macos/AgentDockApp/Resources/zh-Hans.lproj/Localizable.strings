@@ -743,3 +743,15 @@
 "Stderr" = "标准错误";
 "output truncated" = "输出已截断";
 "Load %d more lines" = "再加载 %d 行";
+"Clear search" = "清空搜索";
+"Pause auto refresh" = "暂停自动刷新";
+"Resume auto refresh" = "恢复自动刷新";
+"Load full text" = "加载全文";
+"Full text is unavailable. Showing the 8 KiB preview." = "全文不可用，仅显示 8 KiB 预览。";
+"Full text is truncated to 256 KiB per side." = "全文超过 256 KiB/侧，已截断。";
+"Showing full text." = "当前显示全文（已脱敏）。";
+"Search published files" = "搜索已发布文件";
+"Search tool or source" = "搜索工具或来源";
+"No matching results." = "没有匹配的结果。";
+"Copy tool name" = "复制工具名";
+"Copy trace ID" = "复制 trace ID";

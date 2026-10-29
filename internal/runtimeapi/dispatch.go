@@ -210,7 +210,15 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		if parseErr != nil || id == 0 {
 			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace id must be a positive integer", Category: "validation"}
 		}
-		result, err := detailRuntime.RuntimeTraceDetail(id)
+		full := false
+		switch value := strings.ToLower(strings.TrimSpace(request.queryValue("full"))); value {
+		case "", "0", "false":
+		case "1", "true":
+			full = true
+		default:
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace full must be 1 or 0", Category: "validation"}
+		}
+		result, err := detailRuntime.RuntimeTraceDetail(id, full)
 		return map[string]any(result), err
 	case path == "/internal/runtime/traces":
 		traceRuntime, ok := runtime.(TraceRuntime)

@@ -85,7 +85,7 @@ func TestRuntimeTaskActivityAggregatesCallsAndFileChanges(t *testing.T) {
 		t.Fatalf("file_changes = %#v", result)
 	}
 	change := changes[0]
-	if change.Tool != "file_edit" || change.Path == "" || change.Action != "replace" || change.Diff == "" {
+	if change.Tool != "file_edit" || change.Path == "" || change.Action != "edit" || change.Diff == "" {
 		t.Fatalf("change projection = %#v", change)
 	}
 

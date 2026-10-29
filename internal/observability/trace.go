@@ -91,30 +91,37 @@ type TraceOptions struct {
 // Diff 是工具返回的 unified diff 预览（再次截断），用于控制面板的历史预览；
 // 它不替代文件系统快照，也不保证能重放变更。
 type FileChange struct {
-	Path       string `json:"path"`
-	Action     string `json:"action"`
-	Insertions int    `json:"insertions,omitempty"`
-	Deletions  int    `json:"deletions,omitempty"`
-	Diff       string `json:"diff,omitempty"`
-	Truncated  bool   `json:"truncated,omitempty"`
+	Path   string `json:"path"`
+	Action string `json:"action"`
+	// MoveTo 是 move 的目标路径；其他动作为空。
+	MoveTo string `json:"move_to,omitempty"`
+	// ProjectRoot 是路径向上探测到的项目根（.git/go.mod 等标记），
+	// 供文件历史按项目分组；探测失败时是文件的父目录。
+	ProjectRoot string `json:"project_root,omitempty"`
+	Insertions  int    `json:"insertions,omitempty"`
+	Deletions   int    `json:"deletions,omitempty"`
+	Diff        string `json:"diff,omitempty"`
+	Truncated   bool   `json:"truncated,omitempty"`
 }
 
 // FileChangeEntry 是文件历史视图的扁平投影：一次调用可能影响多个文件
 // （patch/move），因此按文件拆成条目，但保留同一个 trace id 与时间。
 type FileChangeEntry struct {
-	ID         uint64    `json:"id"`
-	TraceID    string    `json:"trace_id,omitempty"`
-	Tool       string    `json:"tool"`
-	Source     string    `json:"source"`
-	UserAgent  string    `json:"user_agent,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	Success    bool      `json:"success"`
-	Path       string    `json:"path"`
-	Action     string    `json:"action"`
-	Insertions int       `json:"insertions,omitempty"`
-	Deletions  int       `json:"deletions,omitempty"`
-	Diff       string    `json:"diff,omitempty"`
-	Truncated  bool      `json:"truncated,omitempty"`
+	ID          uint64    `json:"id"`
+	TraceID     string    `json:"trace_id,omitempty"`
+	Tool        string    `json:"tool"`
+	Source      string    `json:"source"`
+	UserAgent   string    `json:"user_agent,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	Success     bool      `json:"success"`
+	Path        string    `json:"path"`
+	Action      string    `json:"action"`
+	MoveTo      string    `json:"move_to,omitempty"`
+	ProjectRoot string    `json:"project_root,omitempty"`
+	Insertions  int       `json:"insertions,omitempty"`
+	Deletions   int       `json:"deletions,omitempty"`
+	Diff        string    `json:"diff,omitempty"`
+	Truncated   bool      `json:"truncated,omitempty"`
 }
 
 // TraceRecord 是一条可读的工具调用证据。Arguments/Result 是截断后的 JSON
@@ -613,13 +620,14 @@ func (s *TraceStore) FileChanges(query string, limit int) []FileChangeEntry {
 		record := s.records[i]
 		for j := len(record.FileChanges) - 1; j >= 0; j-- {
 			change := record.FileChanges[j]
-			if needle != "" && !strings.Contains(strings.ToLower(change.Path), needle) {
+			if needle != "" && !strings.Contains(strings.ToLower(change.Path+"\n"+change.MoveTo+"\n"+change.Action+"\n"+change.Diff), needle) {
 				continue
 			}
 			out = append(out, FileChangeEntry{
 				ID: record.ID, TraceID: record.TraceID, Tool: record.Tool, Source: record.Source,
 				StartedAt: record.StartedAt, Success: record.Success,
 				Path: change.Path, Action: change.Action,
+				MoveTo: change.MoveTo, ProjectRoot: change.ProjectRoot,
 				Insertions: change.Insertions, Deletions: change.Deletions,
 				Diff: change.Diff, Truncated: change.Truncated,
 			})

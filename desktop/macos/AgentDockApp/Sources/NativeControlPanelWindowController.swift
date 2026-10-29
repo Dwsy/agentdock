@@ -3930,6 +3930,20 @@ private final class FileTreeBuilder {
                 if left.isDirectory != right.isDirectory { return left.isDirectory }
                 return left.name.localizedStandardCompare(right.name) == .orderedAscending
             }
+        // 压缩单子链目录（VS Code compact folders）：`src/main/java` 一行，
+        // 展开即达链末端，不再逐层点开。
+        if isDirectory, sorted.count == 1, sorted[0].isDirectory {
+            let only = sorted[0]
+            return FileTreeNode(
+                id: only.id,
+                name: "\(name)/\(only.name)",
+                path: only.path,
+                isDirectory: true,
+                changeCount: changeCount,
+                latest: latest,
+                children: only.children
+            )
+        }
         return FileTreeNode(
             id: path,
             name: name,
@@ -3942,58 +3956,110 @@ private final class FileTreeBuilder {
     }
 }
 
-private enum FileTree {
-    /// 去掉所有路径的公共目录前缀，让树从一个有意义的项目根开始。
-    static func build(_ entries: [RuntimeFileChangeEntry]) -> (root: String, nodes: [FileTreeNode]) {
-        guard !entries.isEmpty else { return ("", []) }
-        let components = entries.map { ($0.path as NSString).pathComponents }
-        var common = components.first ?? []
-        for parts in components.dropFirst() {
-            var index = 0
-            while index < common.count, index < parts.count, common[index] == parts[index] {
-                index += 1
-            }
-            common = Array(common.prefix(index))
-        }
-        // 公共部分是文件本身时退回父目录，避免根节点变成一个文件名。
-        if common.count == components.first?.count, components.count == 1 || common.last?.contains(".") == true {
-            common = Array(common.dropLast())
-        }
-        let root: String
-        if common.isEmpty {
-            root = "/"
-        } else if common.first == "/" {
-            // pathComponents 把绝对路径拆出前导 "/"，直接 join 会产生 "//a/b"。
-            root = "/" + common.dropFirst().joined(separator: "/")
-        } else {
-            root = common.joined(separator: "/")
-        }
+/// 一个项目根（.git/go.mod 等标记目录，缺失时是文件父目录）下的变更集合。
+private struct FileHistoryProject: Identifiable {
+    let id: String
+    let name: String
+    let root: String
+    let changeCount: Int
+    let latest: String?
+    let nodes: [FileTreeNode]
+}
 
-        let tree = FileTreeBuilder(name: root, path: root, isDirectory: true)
+/// 树的扁平渲染行。用“行 + 缩进 + 手动展开集”而不是嵌套 DisclosureGroup：
+/// 保留原生 List 的滚动/点击语义，同时支持压缩链与搜索时自动展开。
+private struct FileTreeRowItem: Identifiable {
+    let id: String
+    let depth: Int
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let hasChildren: Bool
+    let isExpanded: Bool
+    let changeCount: Int
+}
+
+private enum FileHistoryTree {
+    /// 按项目根分组建树：项目根由后端探测（file_edit 历史自带 project_root）；
+    /// 组内路径转相对后插入，单子链目录在 freeze 时压缩。
+    static func build(_ entries: [RuntimeFileChangeEntry]) -> [FileHistoryProject] {
+        var groups: [String: [RuntimeFileChangeEntry]] = [:]
         for entry in entries {
-            let all = (entry.path as NSString).pathComponents
-            let relative = all.count > common.count ? Array(all.dropFirst(common.count)) : [all.last ?? entry.path]
-            var node = tree
-            tree.changeCount += 1
-            if tree.latest == nil || entry.startedAt > (tree.latest ?? "") { tree.latest = entry.startedAt }
-            for (index, part) in relative.enumerated() {
-                let isLeaf = index == relative.count - 1
-                let path = (node.path == "/" ? "" : node.path) + "/" + part
-                if let existing = node.children[part] {
-                    node = existing
-                } else {
-                    let child = FileTreeBuilder(name: part, path: path, isDirectory: !isLeaf)
-                    node.children[part] = child
-                    node = child
+            let root = entry.projectRoot.flatMap { $0.isEmpty ? nil : $0 }
+                ?? (entry.path as NSString).deletingLastPathComponent
+            groups[root, default: []].append(entry)
+        }
+        return groups.map { root, groupEntries in
+            let builder = FileTreeBuilder(name: root, path: root, isDirectory: true)
+            for entry in groupEntries {
+                let relative = relativeComponents(path: entry.path, root: root)
+                var node = builder
+                builder.changeCount += 1
+                if builder.latest == nil || entry.startedAt > (builder.latest ?? "") { builder.latest = entry.startedAt }
+                for (index, part) in relative.enumerated() {
+                    let isLeaf = index == relative.count - 1
+                    let path = node.path + "/" + part
+                    if let existing = node.children[part] {
+                        node = existing
+                    } else {
+                        let child = FileTreeBuilder(name: part, path: path, isDirectory: !isLeaf)
+                        node.children[part] = child
+                        node = child
+                    }
+                    node.changeCount += 1
+                    if node.latest == nil || entry.startedAt > (node.latest ?? "") { node.latest = entry.startedAt }
                 }
-                node.changeCount += 1
-                if node.latest == nil || entry.startedAt > (node.latest ?? "") { node.latest = entry.startedAt }
+            }
+            let lastComponent = (root as NSString).lastPathComponent
+            return FileHistoryProject(
+                id: root,
+                name: lastComponent.isEmpty ? root : lastComponent,
+                root: root,
+                changeCount: groupEntries.count,
+                latest: groupEntries.map(\.startedAt).max(),
+                nodes: builder.freeze().children ?? []
+            )
+        }
+        .sorted { ($0.latest ?? "") > ($1.latest ?? "") }
+    }
+
+    /// expandAll 让搜索时自动展开全部命中分支，不用手动逐层点。
+    static func rows(projects: [FileHistoryProject], expanded: Set<String>, expandAll: Bool) -> [FileTreeRowItem] {
+        var rows: [FileTreeRowItem] = []
+        for project in projects {
+            let projectExpanded = expandAll || expanded.contains(project.id)
+            rows.append(FileTreeRowItem(
+                id: project.id, depth: 0, name: project.name, path: project.root,
+                isDirectory: true, hasChildren: !project.nodes.isEmpty, isExpanded: projectExpanded,
+                changeCount: project.changeCount
+            ))
+            guard projectExpanded else { continue }
+            appendRows(project.nodes, depth: 1, expanded: expanded, expandAll: expandAll, into: &rows)
+        }
+        return rows
+    }
+
+    private static func appendRows(_ nodes: [FileTreeNode], depth: Int, expanded: Set<String>, expandAll: Bool, into rows: inout [FileTreeRowItem]) {
+        for node in nodes {
+            let nodeExpanded = expandAll || expanded.contains(node.id)
+            let children = node.children ?? []
+            rows.append(FileTreeRowItem(
+                id: node.id, depth: depth, name: node.name, path: node.path,
+                isDirectory: node.isDirectory, hasChildren: !children.isEmpty, isExpanded: nodeExpanded,
+                changeCount: node.changeCount
+            ))
+            if node.isDirectory, nodeExpanded {
+                appendRows(children, depth: depth + 1, expanded: expanded, expandAll: expandAll, into: &rows)
             }
         }
-        return (root, tree.children.values.map { $0.freeze() }.sorted { left, right in
-            if left.isDirectory != right.isDirectory { return left.isDirectory }
-            return left.name.localizedStandardCompare(right.name) == .orderedAscending
-        })
+    }
+
+    /// 组内相对路径组件；不在根下的路径退回文件名，避免整棵绝对路径树。
+    private static func relativeComponents(path: String, root: String) -> [String] {
+        if path.hasPrefix(root + "/") {
+            return path.dropFirst(root.count + 1).split(separator: "/").map(String.init)
+        }
+        return [(path as NSString).lastPathComponent]
     }
 }
 
@@ -4004,16 +4070,30 @@ private struct FilesView: View {
     @State private var selectedPath: String?
     @State private var selectedChangeID: String?
     @State private var loading = false
+    @State private var autoRefresh = true
+    @State private var expanded: Set<String> = []
 
     private var entries: [RuntimeFileChangeEntry] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return (payload?.changes ?? []).filter {
-            needle.isEmpty || $0.path.lowercased().contains(needle)
+        guard !needle.isEmpty else { return payload?.changes ?? [] }
+        // 搜索覆盖路径、动作、diff 内容与移动目标：历史是用来查改动的，
+        // 只搜路径会把“哪个动作改了什么”挡在门外。
+        return (payload?.changes ?? []).filter { entry in
+            entry.path.lowercased().contains(needle)
+                || (entry.moveTo ?? "").lowercased().contains(needle)
+                || entry.action.lowercased().contains(needle)
+                || (entry.diff ?? "").lowercased().contains(needle)
         }
     }
 
-    private var tree: (root: String, nodes: [FileTreeNode]) {
-        FileTree.build(entries)
+    private var projects: [FileHistoryProject] { FileHistoryTree.build(entries) }
+
+    private var rows: [FileTreeRowItem] {
+        FileHistoryTree.rows(projects: projects, expanded: expanded, expandAll: isFiltering)
+    }
+
+    private var isFiltering: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var selectedEntries: [RuntimeFileChangeEntry] {
@@ -4033,9 +4113,7 @@ private struct FilesView: View {
                     detail: L10n.text("Created and edited files recorded from tool calls.")
                 )
                 HStack(spacing: 10) {
-                    TextField(L10n.text("Search paths"), text: $query)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 300)
+                    SearchField(placeholder: L10n.text("Search path, action, or diff"), text: $query)
                     Spacer()
                     if let payload {
                         Text(L10n.format("%d changes · %@", payload.count, payload.effectiveMode))
@@ -4051,6 +4129,7 @@ private struct FilesView: View {
                             .truncationMode(.middle)
                             .help(root)
                     }
+                    AutoRefreshToggle(enabled: $autoRefresh)
                     Button(L10n.text("Refresh")) { Task { await reload() } }
                         .disabled(loading)
                 }
@@ -4071,23 +4150,17 @@ private struct FilesView: View {
                 CatalogUnavailable(reason: L10n.text("No file changes recorded yet. History starts when trace capture is enabled."))
             } else {
                 HStack(spacing: 0) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(tree.root)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                        Divider()
-                        List(selection: $selectedPath) {
-                            OutlineGroup(tree.nodes, children: \.children) { node in
-                                FileTreeRow(node: node)
-                                    .tag(node.path)
-                            }
+                    List {
+                        ForEach(rows) { row in
+                            FileTreeRow(
+                                row: row,
+                                isSelected: !row.isDirectory && row.path == selectedPath,
+                                onSelect: { select(row) }
+                            )
                         }
-                        .listStyle(.inset)
                     }
+                    // .sidebar 会把内容区渲染成侧栏灰底，这里只是分栏列表。
+                    .listStyle(.inset)
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
 
                     Divider()
@@ -4098,14 +4171,20 @@ private struct FilesView: View {
             }
         }
         .task { await reload() }
+        .autoRefresh(enabled: autoRefresh) { await reload() }
     }
 
     @ViewBuilder private var detailPane: some View {
-        if let node = treeNode(for: selectedPath) {
+        if !selectedEntries.isEmpty {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(node.name)
-                        .font(.system(size: 16, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Text(((selectedPath ?? "") as NSString).lastPathComponent)
+                            .font(.system(size: 16, weight: .semibold))
+                        if let selectedPath {
+                            CopyButton(text: selectedPath)
+                        }
+                    }
                     Text(selectedPath ?? "")
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -4116,22 +4195,23 @@ private struct FilesView: View {
 
                 Divider()
 
-                let history = selectedEntries
+                // 历史时间线：按时间倒序列出全部变更，选中即看 diff，
+                // 不需要再去工具调用记录里找对应条目。
+                let history = selectedEntries.sorted { $0.startedAt > $1.startedAt }
                 if history.count > 1 {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
                             ForEach(history) { entry in
-                                Button {
-                                    selectedChangeID = entry.id
-                                } label: {
-                                    FileChangeChip(entry: entry, selected: entry.id == selectedEntry?.id)
-                                }
-                                .buttonStyle(.plain)
+                                FileHistoryRow(
+                                    entry: entry,
+                                    selected: entry.id == selectedEntry?.id,
+                                    onSelect: { selectedChangeID = entry.id }
+                                )
+                                Divider().padding(.horizontal, 12)
                             }
                         }
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 8)
                     }
+                    .frame(maxHeight: 190)
                     Divider()
                 }
 
@@ -4156,6 +4236,14 @@ private struct FilesView: View {
                 HStack(spacing: 10) {
                     Text(fileActionTitle(entry.action, fallback: entry.tool))
                         .font(.system(size: 11, weight: .medium))
+                    if entry.action == "move", let moveTo = entry.moveTo, !moveTo.isEmpty {
+                        Text("→ \(moveTo)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(moveTo)
+                    }
                     Text("+\(entry.insertions ?? 0)")
                         .foregroundStyle(.green)
                     Text("-\(entry.deletions ?? 0)")
@@ -4202,16 +4290,19 @@ private struct FilesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private func treeNode(for path: String?) -> FileTreeNode? {
-        guard let path else { return nil }
-        func find(_ nodes: [FileTreeNode]) -> FileTreeNode? {
-            for node in nodes {
-                if node.path == path { return node }
-                if let children = node.children, let hit = find(children) { return hit }
-            }
-            return nil
+    /// 目录/项目行点按切换展开；文件行点按选中并展示历史。
+    private func select(_ row: FileTreeRowItem) {
+        guard row.isDirectory else {
+            selectedPath = row.path
+            selectedChangeID = nil
+            return
         }
-        return find(tree.nodes)
+        guard row.hasChildren else { return }
+        if expanded.contains(row.id) {
+            expanded.remove(row.id)
+        } else {
+            expanded.insert(row.id)
+        }
     }
 
     private func reload() async {
@@ -4225,11 +4316,12 @@ private struct FilesView: View {
     }
 }
 
+/// 历史动词已归一到 create/edit/delete/move；保留旧词兜底，
+/// 兼容旧 Core 把原始动词直接回传的情况。
 private func fileActionTitle(_ action: String, fallback: String) -> String {
     switch action {
-    case "add": return L10n.text("Created")
-    case "replace": return L10n.text("Edited")
-    case "patch": return L10n.text("Patched")
+    case "create", "add": return L10n.text("Created")
+    case "edit", "replace", "patch", "update": return L10n.text("Edited")
     case "delete": return L10n.text("Deleted")
     case "move": return L10n.text("Moved")
     case "": return fallback
@@ -4238,44 +4330,91 @@ private func fileActionTitle(_ action: String, fallback: String) -> String {
 }
 
 private struct FileTreeRow: View {
-    let node: FileTreeNode
+    let row: FileTreeRowItem
+    let isSelected: Bool
+    let onSelect: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: node.isDirectory ? "folder" : "doc.text")
-                .font(.system(size: 11))
-                .foregroundStyle(node.isDirectory ? Color.secondary : Color.accentColor)
-            Text(node.name)
-                .font(.system(size: 12))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            if node.changeCount > 0 {
-                Text("\(node.changeCount)")
+        Button(action: onSelect) {
+            HStack(spacing: 6) {
+                Image(systemName: row.hasChildren ? (row.isExpanded ? "chevron.down" : "chevron.right") : "doc.text")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 10)
+                    .opacity(row.hasChildren ? 1 : 0)
+                Image(systemName: row.isDirectory ? "folder" : "doc.text")
+                    .font(.system(size: 11))
+                    .foregroundStyle(row.isDirectory ? Color.secondary : Color.accentColor)
+                Text(row.name)
+                    .font(row.isDirectory ? .system(size: 12) : .system(size: 11.5, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Text("\(row.changeCount)")
                     .font(.system(size: 10).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
+            .padding(.leading, CGFloat(row.depth) * 12)
+            .contentShape(Rectangle())
+            .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         }
+        .buttonStyle(.plain)
+        .help(row.path)
     }
 }
 
-private struct FileChangeChip: View {
+private struct FileHistoryRow: View {
     let entry: RuntimeFileChangeEntry
     let selected: Bool
+    let onSelect: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text(RuntimeTimestamp.minute(entry.startedAt))
-                .font(.system(size: 10.5).monospacedDigit())
-            Text("+\(entry.insertions ?? 0)")
-                .foregroundStyle(.green)
-            Text("-\(entry.deletions ?? 0)")
-                .foregroundStyle(.red)
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Text(fileActionTitle(entry.action, fallback: entry.tool))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(actionColor.opacity(0.14))
+                    .foregroundStyle(actionColor)
+                    .clipShape(Capsule())
+                if entry.action == "move", let moveTo = entry.moveTo, !moveTo.isEmpty {
+                    Text("→ \((moveTo as NSString).lastPathComponent)")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(moveTo)
+                }
+                Text("+\(entry.insertions ?? 0)")
+                    .foregroundStyle(.green)
+                Text("-\(entry.deletions ?? 0)")
+                    .foregroundStyle(.red)
+                if entry.truncated == true {
+                    Text(L10n.text("truncated"))
+                        .foregroundStyle(.orange)
+                }
+                Spacer(minLength: 8)
+                Text(RuntimeTimestamp.minute(entry.startedAt))
+                    .foregroundStyle(.secondary)
+                    .help(RuntimeTimestamp.precise(entry.startedAt))
+            }
+            .font(.system(size: 10.5).monospacedDigit())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+            .background(selected ? Color.accentColor.opacity(0.12) : Color.clear)
         }
-        .font(.system(size: 10.5))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .buttonStyle(.plain)
+    }
+
+    private var actionColor: Color {
+        switch entry.action {
+        case "create": return .green
+        case "delete": return .red
+        case "move": return .orange
+        default: return .accentColor
+        }
     }
 }
 

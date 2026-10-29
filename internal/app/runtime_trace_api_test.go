@@ -172,7 +172,7 @@ func TestRuntimeFileChangesCaptureEdits(t *testing.T) {
 		t.Fatalf("changes = %#v", changes)
 	}
 	change := changes[0]
-	if change.Path != resolvedTarget || change.Action != "replace" {
+	if change.Path != resolvedTarget || change.Action != "edit" {
 		t.Fatalf("change = %#v", change)
 	}
 	if change.Insertions != 1 || change.Deletions != 1 {

@@ -480,6 +480,8 @@ struct RuntimeFileChangeEntry: Decodable, Identifiable {
     let success: Bool
     let path: String
     let action: String
+    let moveTo: String?
+    let projectRoot: String?
     let insertions: Int?
     let deletions: Int?
     let diff: String?
@@ -490,6 +492,8 @@ struct RuntimeFileChangeEntry: Decodable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case tool, source, success, path, action, insertions, deletions, diff, truncated
+        case moveTo = "move_to"
+        case projectRoot = "project_root"
         case rawID = "id"
         case traceID = "trace_id"
         case startedAt = "started_at"

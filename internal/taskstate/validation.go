@@ -260,6 +260,12 @@ func validateTextLimit(label, value string, maxBytes int) error {
 	return nil
 }
 
+// ValidateTaskID 暴露 ID 格式校验给写 API 做入参预检：
+// 格式错误必须报 400/校验失败，不能在状态机里被误归类成非法迁移。
+func ValidateTaskID(id string) error {
+	return validateID(id)
+}
+
 func validateID(id string) error {
 	if !strings.HasPrefix(id, "tsk_") || len(id) != 20 {
 		return errors.New("invalid task id")

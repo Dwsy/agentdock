@@ -60,8 +60,39 @@ type ArtifactRuntime interface {
 	RuntimeArtifacts(context.Context) (app.Result, error)
 }
 
+// ArtifactManageRuntime 是发布物写操作能力：撤销与延期。
+// 与只读的 ArtifactRuntime 分开，让旧实现明确不支持写操作，
+// 而不是被迫实现空方法把删除解释成空操作。
+type ArtifactManageRuntime interface {
+	RuntimeArtifactRevoke(id string) (app.Result, error)
+	RuntimeArtifactExtend(id string, hours int) (app.Result, error)
+}
+
+// TraceExportRuntime 是 trace 导出能力：按与查询相同的过滤语义输出
+// JSON/CSV 文本，附带内容类型与建议文件名。
+type TraceExportRuntime interface {
+	RuntimeTracesExport(format, query, tool, source, status string, limit int) (body []byte, contentType string, filename string, err error)
+}
+
+// TraceClearRuntime 是 trace 清空能力：清内存索引与磁盘保留文件。
+type TraceClearRuntime interface {
+	RuntimeTracesClear() (app.Result, error)
+}
+
 type MCPOAuthRuntime interface {
 	RuntimeMCPOAuthCallback(context.Context, oauthclient.CallbackResult) error
+}
+
+// TaskActivityRuntime 是任务活动聚合能力：从 trace 投影单个任务的调用与文件变更。
+// trace 关闭时实现仍返回 mode=off，不视为错误。
+type TaskActivityRuntime interface {
+	RuntimeTaskActivity(id string) (app.Result, error)
+}
+
+// TaskActionRuntime 是任务写操作能力。正文保持为原始 JSON，与
+// ResourceLibraryRuntime 同理由：避免 app 为了实现接口反过来导入 runtimeapi。
+type TaskActionRuntime interface {
+	RuntimeTaskAction(id string, body []byte) (app.Result, error)
 }
 
 // NexusOAuthCallbackRuntime 由节点 Bridge 在握手后提供 Nexus 公网 callback origin。

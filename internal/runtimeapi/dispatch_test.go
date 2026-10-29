@@ -106,6 +106,23 @@ func (r *diagnosticsRuntimeStub) RuntimeDiagnostics() app.Result {
 	return app.Result{"recent_calls": []any{"call"}}
 }
 
+type taskRuntimeStub struct {
+	runtimeStub
+	actionID     string
+	actionBody   []byte
+	activityTask string
+}
+
+func (r *taskRuntimeStub) RuntimeTaskAction(id string, body []byte) (app.Result, error) {
+	r.actionID, r.actionBody = id, body
+	return app.Result{"ok": true, "source": "agentdock-api", "action": "checkpoint", "task_id": id}, nil
+}
+
+func (r *taskRuntimeStub) RuntimeTaskActivity(id string) (app.Result, error) {
+	r.activityTask = id
+	return app.Result{"ok": true, "task_id": id, "calls": []any{}, "call_count": 0}, nil
+}
+
 func TestMethodContract(t *testing.T) {
 	tests := []struct {
 		method string
@@ -119,6 +136,13 @@ func TestMethodContract(t *testing.T) {
 		{"POST", "/internal/runtime/capabilities", "GET, POST", true},
 		{"DELETE", "/internal/runtime/tasks/task-1", "GET, DELETE", true},
 		{"POST", "/internal/runtime/tasks/task-1", "GET, DELETE", false},
+		{"GET", "/internal/runtime/tasks/task-1/activity", "GET", true},
+		{"POST", "/internal/runtime/tasks/task-1/activity", "GET", false},
+		{"DELETE", "/internal/runtime/tasks/task-1/activity", "GET", false},
+		{"POST", "/internal/runtime/tasks/task-1/actions", "POST", true},
+		{"GET", "/internal/runtime/tasks/task-1/actions", "POST", false},
+		{"DELETE", "/internal/runtime/tasks/task-1/actions", "POST", false},
+		{"POST", "/internal/runtime/tasks/task-1/extra", "GET", false},
 		{"GET", "/internal/runtime/evolve", "POST", true},
 		{"GET", "/internal/runtime/resource-library", "GET, POST", true},
 		{"POST", "/internal/runtime/resource-library", "GET, POST", true},
@@ -409,6 +433,66 @@ func TestDispatchFileChanges(t *testing.T) {
 	var toolErr *app.ToolError
 	if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" {
 		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestDispatchTaskActivityRoutesAndGuards(t *testing.T) {
+	stub := &taskRuntimeStub{}
+	result, err := Dispatch(context.Background(), stub, Request{
+		Method: "GET",
+		Path:   "/internal/runtime/tasks/tsk_1/activity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.activityTask != "tsk_1" || result["task_id"] != "tsk_1" {
+		t.Fatalf("activity routing = task %q result %#v", stub.activityTask, result)
+	}
+
+	// 无能力时失败关闭，不能把“未实现”解释成空活动。
+	_, err = Dispatch(context.Background(), &runtimeStub{}, Request{
+		Method: "GET",
+		Path:   "/internal/runtime/tasks/tsk_1/activity",
+	})
+	var toolErr *app.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "TASK_ACTIVITY_UNSUPPORTED" || toolErr.Category != "not_found" {
+		t.Fatalf("unsupported activity error = %#v", err)
+	}
+}
+
+func TestDispatchTaskActionsRoutesAndGuards(t *testing.T) {
+	stub := &taskRuntimeStub{}
+	result, err := Dispatch(context.Background(), stub, Request{
+		Method: "POST",
+		Path:   "/internal/runtime/tasks/tsk_1/actions",
+		Body:   []byte(`{"action":"checkpoint","completed_step_ids":["inspect"]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.actionID != "tsk_1" || string(stub.actionBody) != `{"action":"checkpoint","completed_step_ids":["inspect"]}` {
+		t.Fatalf("action routing = task %q body %q", stub.actionID, stub.actionBody)
+	}
+	if result["action"] != "checkpoint" {
+		t.Fatalf("action result = %#v", result)
+	}
+
+	_, err = Dispatch(context.Background(), &runtimeStub{}, Request{
+		Method: "POST",
+		Path:   "/internal/runtime/tasks/tsk_1/actions",
+		Body:   []byte(`{"action":"delete"}`),
+	})
+	var toolErr *app.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "TASK_ACTIONS_UNSUPPORTED" || toolErr.Category != "not_found" {
+		t.Fatalf("unsupported actions error = %#v", err)
+	}
+
+	// 写方法必须进方法守卫：GET/DELETE 不能落到写操作路由。
+	if MethodAllowed("GET", "/internal/runtime/tasks/tsk_1/actions") || MethodAllowed("DELETE", "/internal/runtime/tasks/tsk_1/actions") {
+		t.Fatal("task actions route must only allow POST")
+	}
+	if MethodAllowed("POST", "/internal/runtime/tasks/tsk_1/activity") || MethodAllowed("DELETE", "/internal/runtime/tasks/tsk_1/activity") {
+		t.Fatal("task activity route must only allow GET")
 	}
 }
 

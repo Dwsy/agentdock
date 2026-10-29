@@ -17,6 +17,7 @@ type ExecutionRecord struct {
 	Tool          string        `json:"tool"`
 	Source        Source        `json:"source"`
 	UserAgent     string        `json:"user_agent,omitempty"`
+	TaskID        string        `json:"task_id,omitempty"`
 	TraceID       string        `json:"trace_id,omitempty"`
 	SpanID        string        `json:"span_id,omitempty"`
 	StartedAt     time.Time     `json:"started_at"`
@@ -102,6 +103,7 @@ func (r *Recorder) EndTool(
 	errorCode string,
 	errorCategory string,
 	userAgent string,
+	taskID string,
 	traceID string,
 	spanID string,
 	stages []StageRecord,
@@ -137,6 +139,7 @@ func (r *Recorder) EndTool(
 		Tool:          tool,
 		Source:        normalizedSource(source),
 		UserAgent:     normalizeUserAgent(userAgent),
+		TaskID:        normalizeTaskID(taskID),
 		StartedAt:     startedAt.UTC(),
 		DurationMS:    durationMilliseconds(duration),
 		Success:       success,

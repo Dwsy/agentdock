@@ -121,6 +121,50 @@ func TestTraceStoreDiskPersistsAndReloads(t *testing.T) {
 	}
 }
 
+func TestTraceStoreTaskIDPersistsAndSearchable(t *testing.T) {
+	root := t.TempDir()
+	options := TraceOptions{
+		Mode:          TraceModeDisk,
+		Root:          root,
+		Retention:     24 * time.Hour,
+		BufferSize:    1,
+		FlushInterval: 20 * time.Millisecond,
+		MaxRecords:    100,
+	}
+	store, err := NewTraceStore(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Record(TraceRecord{
+		Tool: "read_file", Source: "mcp", Success: true, TaskID: "tsk_0123456789abcdef", StartedAt: time.Now(),
+	})
+	store.Record(TraceRecord{Tool: "read_file", Source: "mcp", Success: true, StartedAt: time.Now()})
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewTraceStore(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reloaded.Close() })
+	records := reloaded.Query(TraceQuery{})
+	if len(records) != 2 || records[1].TaskID != "tsk_0123456789abcdef" {
+		t.Fatalf("reloaded task ids = %#v", records)
+	}
+	// 任务 ID 必须参与自由文本搜索，否则磁盘证据无法从 UI 找回。
+	if got := reloaded.Query(TraceQuery{Query: "tsk_0123456789abcdef"}); len(got) != 1 || got[0].TaskID != "tsk_0123456789abcdef" {
+		t.Fatalf("task id search = %#v", got)
+	}
+	// 活动聚合必须精确匹配：无 task_id 的记录不能被空 ID 查询混入。
+	if got := reloaded.TaskRecords("tsk_0123456789abcdef"); len(got) != 1 || got[0].TaskID != "tsk_0123456789abcdef" {
+		t.Fatalf("task records = %#v", got)
+	}
+	if got := reloaded.TaskRecords(""); len(got) != 0 {
+		t.Fatalf("empty task id matched records = %#v", got)
+	}
+}
+
 func TestTraceStoreCleanupRemovesExpiredFiles(t *testing.T) {
 	root := t.TempDir()
 	stale := filepath.Join(root, "2020-01-01.jsonl")

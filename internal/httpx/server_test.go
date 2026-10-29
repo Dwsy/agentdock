@@ -355,6 +355,10 @@ func TestRuntimeAPIMethodContract(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/runtime/status", status: http.StatusMethodNotAllowed, allow: "GET"},
 		{method: http.MethodPost, path: "/internal/runtime/tasks/tsk_1234567890abcdef", status: http.StatusMethodNotAllowed, allow: "GET, DELETE"},
 		{method: http.MethodDelete, path: "/internal/runtime/tasks", status: http.StatusMethodNotAllowed, allow: "GET"},
+		{method: http.MethodGet, path: "/internal/runtime/tasks/tsk_1234567890abcdef/activity", status: http.StatusOK},
+		{method: http.MethodPost, path: "/internal/runtime/tasks/tsk_1234567890abcdef/activity", status: http.StatusMethodNotAllowed, allow: "GET"},
+		{method: http.MethodGet, path: "/internal/runtime/tasks/tsk_1234567890abcdef/actions", status: http.StatusMethodNotAllowed, allow: "POST"},
+		{method: http.MethodDelete, path: "/internal/runtime/tasks/tsk_1234567890abcdef/actions", status: http.StatusMethodNotAllowed, allow: "POST"},
 		{method: http.MethodDelete, path: "/internal/runtime/capabilities", status: http.StatusMethodNotAllowed, allow: "GET, POST"},
 	}
 	for _, test := range tests {
@@ -667,6 +671,97 @@ func TestServeHTTPStopsCleanlyWhenContextIsCanceled(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("serveHTTP did not stop after context cancellation")
+	}
+}
+
+func TestRuntimeAPITaskWriteActionsLifecycle(t *testing.T) {
+	cfg := testConfig(t)
+	runtime, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	handler := runtimeAPIHandler(runtime, cfg, auth.NewOAuthStore())
+
+	created, err := runtime.Call(context.Background(), "task_manage", map[string]any{
+		"action":                "create",
+		"title":                 "Actions lifecycle",
+		"goal":                  "Verify the task write actions endpoint",
+		"steps":                 []map[string]any{{"id": "inspect", "title": "Inspect"}, {"id": "verify", "title": "Verify"}},
+		"completion_conditions": []string{"lifecycle verified"},
+	})
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	taskID, _ := created["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("created task missing id: %#v", created)
+	}
+
+	postAction := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/tasks/"+taskID+"/actions", strings.NewReader(body)))
+		return recorder
+	}
+
+	recorder := postAction(`{"action":"checkpoint","completed_step_ids":["inspect"],"current_step_id":"verify"}`)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"action":"checkpoint"`) {
+		t.Fatalf("checkpoint status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	// 非法状态迁移返回 409，错误体走既有错误通道：{"ok":false,"code":"INVALID_STATUS","error":"..."}。
+	recorder = postAction(`{"action":"checkpoint","current_step_id":"inspect"}`)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("illegal transition status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var conflict struct {
+		OK    bool   `json:"ok"`
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if conflict.OK || conflict.Code != "INVALID_STATUS" || conflict.Error == "" {
+		t.Fatalf("error body = %#v", conflict)
+	}
+
+	// 未过 final_review 的 complete 同样是非法迁移。
+	recorder = postAction(`{"action":"complete"}`)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"INVALID_STATUS"`) {
+		t.Fatalf("premature complete status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	if _, err := runtime.Call(context.Background(), "task_manage", map[string]any{
+		"action": "checkpoint", "task_id": taskID, "completed_step_ids": []string{"verify"}, "summary": "both steps done",
+	}); err != nil {
+		t.Fatalf("finish steps: %v", err)
+	}
+	if _, err := runtime.Call(context.Background(), "task_manage", map[string]any{
+		"action": "final_review", "task_id": taskID, "status": "pass", "summary": "verified", "verified": []string{"lifecycle"},
+	}); err != nil {
+		t.Fatalf("final review: %v", err)
+	}
+	recorder = postAction(`{"action":"complete"}`)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"completed"`) {
+		t.Fatalf("complete status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = postAction(`{"action":"delete"}`)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"action":"delete"`) {
+		t.Fatalf("delete status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	lookup := httptest.NewRecorder()
+	handler.ServeHTTP(lookup, newLocalRuntimeRequest(http.MethodGet, "/internal/runtime/tasks/"+taskID, nil))
+	if lookup.Code != http.StatusNotFound {
+		t.Fatalf("deleted task lookup status = %d body=%s", lookup.Code, lookup.Body.String())
+	}
+
+	// trace 未开启时活动端点返回 mode=off 与空数组，而不是错误。
+	activity := httptest.NewRecorder()
+	handler.ServeHTTP(activity, newLocalRuntimeRequest(http.MethodGet, "/internal/runtime/tasks/"+taskID+"/activity", nil))
+	if activity.Code != http.StatusOK || !strings.Contains(activity.Body.String(), `"mode":"off"`) {
+		t.Fatalf("activity status = %d body=%s", activity.Code, activity.Body.String())
 	}
 }
 

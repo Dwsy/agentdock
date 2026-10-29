@@ -35,6 +35,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	}
 	source := observability.SourceFromContext(ctx)
 	userAgent := observability.UserAgentFromContext(ctx)
+	taskID := observability.TaskIDFromContext(ctx)
 	duration := time.Since(startedAt)
 	stages := observability.CloseExecution(ctx)
 	traceID, spanID := observability.TraceIdentifiers(parentCtx, ctx)
@@ -55,7 +56,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 		}
 	}
 	if r != nil && r.observer != nil {
-		r.observer.EndTool(toolName, source, startedAt, duration, success, errorCode, errorCategory, userAgent, traceID, spanID, stages)
+		r.observer.EndTool(toolName, source, startedAt, duration, success, errorCode, errorCategory, userAgent, taskID, traceID, spanID, stages)
 	}
 	// trace 是独立开关：默认关闭时 r.traces 为 nil，不产生任何序列化开销。
 	if r != nil && r.traces != nil {
@@ -63,6 +64,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			Tool:          toolName,
 			Source:        string(source),
 			UserAgent:     userAgent,
+			TaskID:        taskID,
 			StartedAt:     startedAt.UTC(),
 			DurationMS:    float64(duration) / float64(time.Millisecond),
 			Success:       success,
@@ -82,6 +84,9 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 		"user_agent", userAgent,
 		"duration_ms", float64(duration) / float64(time.Millisecond),
 		"ok", success,
+	}
+	if taskID != "" {
+		attributes = append(attributes, "task_id", taskID)
 	}
 	if errorCode != "" {
 		attributes = append(attributes, "error_code", errorCode, "error_category", errorCategory)

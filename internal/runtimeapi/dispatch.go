@@ -18,19 +18,55 @@ import (
 func MethodAllowed(method, path string) bool {
 	method = strings.ToUpper(strings.TrimSpace(method))
 	cleanPath := strings.TrimSuffix(strings.TrimSpace(path), "/")
+	if _, sub, ok := runtimeTaskPath(cleanPath); ok {
+		// 任务子资源各自只有一种读/写语义，方法守卫必须按子资源收紧，
+		// 不能沿用“GET 一律放行”的兜底。
+		switch sub {
+		case "actions":
+			return method == http.MethodPost
+		case "activity":
+			return method == http.MethodGet
+		default:
+			return method == http.MethodGet || method == http.MethodDelete
+		}
+	}
+	if _, sub, ok := runtimeArtifactPath(cleanPath); ok {
+		// 发布物子资源是写操作路由：撤销是 DELETE，延期是 POST，
+		// 不允许 GET 兑底放行。
+		if sub == "extend" {
+			return method == http.MethodPost
+		}
+		return method == http.MethodDelete
+	}
+	if cleanPath == "/internal/runtime/traces" {
+		// 查询是 GET，清空是 DELETE；两条语义共用一条路由。
+		return method == http.MethodGet || method == http.MethodDelete
+	}
 	if method == http.MethodGet {
 		return true
-	}
-	if method == http.MethodDelete {
-		_, ok := runtimeTaskID(cleanPath)
-		return ok
 	}
 	return method == http.MethodPost && (cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/evolve" || cleanPath == ResourceLibraryPath)
 }
 
 func AllowHeader(path string) string {
 	cleanPath := strings.TrimSuffix(strings.TrimSpace(path), "/")
-	if _, ok := runtimeTaskID(cleanPath); ok {
+	if _, sub, ok := runtimeTaskPath(cleanPath); ok {
+		switch sub {
+		case "actions":
+			return "POST"
+		case "activity":
+			return "GET"
+		default:
+			return "GET, DELETE"
+		}
+	}
+	if _, sub, ok := runtimeArtifactPath(cleanPath); ok {
+		if sub == "extend" {
+			return "POST"
+		}
+		return "DELETE"
+	}
+	if cleanPath == "/internal/runtime/traces" {
 		return "GET, DELETE"
 	}
 	if cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" {
@@ -45,6 +81,18 @@ func AllowHeader(path string) string {
 	return "GET"
 }
 
+// IsTaskActionsPath 判断路径是否为任务写操作路由；HTTP 入口据此决定是否读请求体。
+func IsTaskActionsPath(path string) bool {
+	_, sub, ok := runtimeTaskPath(strings.TrimSuffix(strings.TrimSpace(path), "/"))
+	return ok && sub == "actions"
+}
+
+// IsArtifactExtendPath 判断路径是否为发布物延期写操作路由；HTTP 入口据此决定是否读请求体。
+func IsArtifactExtendPath(path string) bool {
+	_, sub, ok := runtimeArtifactPath(strings.TrimSuffix(strings.TrimSpace(path), "/"))
+	return ok && sub == "extend"
+}
+
 // Dispatch 只负责 Runtime API 的路由、参数校验与应用能力调用，不感知 HTTP request/response。
 func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string]any, error) {
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
@@ -53,7 +101,8 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		return nil, &app.ToolError{Code: "NOT_FOUND", Message: "runtime API route not found", Category: "not_found"}
 	}
 
-	taskID, isTaskPath := runtimeTaskID(path)
+	taskID, taskSub, isTaskPath := runtimeTaskPath(path)
+	artifactID, artifactSub, isArtifactPath := runtimeArtifactPath(path)
 	switch {
 	case path == "/internal/runtime/status":
 		return map[string]any(runtime.RuntimeStatus()), nil
@@ -79,6 +128,52 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		}
 		result, err := catalog.RuntimeCatalog(ctx)
 		return map[string]any(result), err
+	case path == "/internal/runtime/traces" && method == http.MethodDelete:
+		clearRuntime, ok := runtime.(TraceClearRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TRACES_CLEAR_UNSUPPORTED", Message: "runtime does not support clearing trace records", Category: "not_found",
+			}
+		}
+		result, err := clearRuntime.RuntimeTracesClear()
+		return map[string]any(result), err
+	case path == "/internal/runtime/traces/export":
+		exportRuntime, ok := runtime.(TraceExportRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TRACES_EXPORT_UNSUPPORTED", Message: "runtime does not support trace export", Category: "not_found",
+			}
+		}
+		format := strings.ToLower(strings.TrimSpace(request.queryValue("format")))
+		if format == "" {
+			format = "json"
+		}
+		if format != "json" && format != "csv" {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace export format must be json or csv", Category: "validation"}
+		}
+		limit := 0
+		if raw := strings.TrimSpace(request.queryValue("limit")); raw != "" {
+			parsed, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || parsed < 0 {
+				return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace export limit must be a non-negative integer", Category: "validation"}
+			}
+			limit = parsed
+		}
+		body, contentType, filename, err := exportRuntime.RuntimeTracesExport(
+			format,
+			request.queryValue("q"),
+			request.queryValue("tool"),
+			request.queryValue("source"),
+			request.queryValue("status"),
+			limit,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ok": true, "source": app.RuntimeAPISource, "action": "export",
+			"format": format, "content_type": contentType, "filename": filename, "body": string(body),
+		}, nil
 	case path == "/internal/runtime/traces":
 		traceRuntime, ok := runtime.(TraceRuntime)
 		if !ok {
@@ -110,6 +205,28 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			}
 		}
 		result, err := artifacts.RuntimeArtifacts(ctx)
+		return map[string]any(result), err
+	case isArtifactPath && artifactSub == "extend":
+		manage, ok := runtime.(ArtifactManageRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "ARTIFACT_MANAGE_UNSUPPORTED", Message: "runtime does not support artifact revocation or extension", Category: "not_found",
+			}
+		}
+		hours, err := decodeArtifactExtendRequest(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		result, err := manage.RuntimeArtifactExtend(artifactID, hours)
+		return map[string]any(result), err
+	case isArtifactPath:
+		manage, ok := runtime.(ArtifactManageRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "ARTIFACT_MANAGE_UNSUPPORTED", Message: "runtime does not support artifact revocation or extension", Category: "not_found",
+			}
+		}
+		result, err := manage.RuntimeArtifactRevoke(artifactID)
 		return map[string]any(result), err
 	case path == "/internal/runtime/file-changes":
 		fileChanges, ok := runtime.(FileChangeRuntime)
@@ -223,6 +340,24 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			return nil, err
 		}
 		result, err := runtime.RuntimeTasks(request.queryValue("status"), limit)
+		return map[string]any(result), err
+	case isTaskPath && taskSub == "activity":
+		activity, ok := runtime.(TaskActivityRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TASK_ACTIVITY_UNSUPPORTED", Message: "runtime does not support task activity", Category: "not_found",
+			}
+		}
+		result, err := activity.RuntimeTaskActivity(taskID)
+		return map[string]any(result), err
+	case isTaskPath && taskSub == "actions":
+		actionRuntime, ok := runtime.(TaskActionRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TASK_ACTIONS_UNSUPPORTED", Message: "runtime does not support task actions", Category: "not_found",
+			}
+		}
+		result, err := actionRuntime.RuntimeTaskAction(taskID, request.Body)
 		return map[string]any(result), err
 	case isTaskPath && method == http.MethodDelete:
 		result, err := runtime.RuntimeTaskDelete(taskID)
@@ -411,16 +546,27 @@ func runtimeMCPName(path string) (string, bool) {
 	return name, true
 }
 
-func runtimeTaskID(path string) (string, bool) {
+func runtimeTaskPath(path string) (id, sub string, ok bool) {
 	const prefix = "/internal/runtime/tasks/"
 	if !strings.HasPrefix(path, prefix) {
-		return "", false
+		return "", "", false
 	}
-	id := strings.TrimPrefix(path, prefix)
-	if strings.TrimSpace(id) == "" || strings.Contains(id, "/") {
-		return "", false
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	id = strings.TrimSpace(parts[0])
+	if id == "" {
+		return "", "", false
 	}
-	return id, true
+	switch {
+	case len(parts) == 1:
+		return id, "", true
+	case len(parts) == 2 && parts[1] == "activity":
+		return id, "activity", true
+	case len(parts) == 2 && parts[1] == "actions":
+		return id, "actions", true
+	default:
+		// 子资源只允许固定枚举，任务 ID 不能吞掉额外路径段。
+		return "", "", false
+	}
 }
 
 func parseRuntimeTaskLimit(raw string) (int, error) {
@@ -435,4 +581,50 @@ func parseRuntimeTaskLimit(raw string) (int, error) {
 		}
 	}
 	return limit, nil
+}
+
+// runtimeArtifactPath 解析发布物子资源路由。子资源只允许固定枚举（撤销为
+// 空、延期为 extend），ID 不能吞掉额外路径段，也不能携带穿越型标识。
+func runtimeArtifactPath(path string) (id, sub string, ok bool) {
+	const prefix = "/internal/runtime/artifacts/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	id = strings.TrimSpace(parts[0])
+	if id == "" {
+		return "", "", false
+	}
+	switch {
+	case len(parts) == 1:
+		return id, "", true
+	case len(parts) == 2 && parts[1] == "extend":
+		return id, "extend", true
+	default:
+		return "", "", false
+	}
+}
+
+// decodeArtifactExtendRequest 解析延期正文 {"hours":N}。hours 缺失或正文
+// 不是单个合法 JSON 值都返回 INVALID_ARGUMENT；取值范围由应用层校验。
+func decodeArtifactExtendRequest(body []byte) (int, error) {
+	if len(body) > 64*1024 {
+		return 0, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "artifact extend body is too large", Category: "validation"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var request struct {
+		Hours *int `json:"hours"`
+	}
+	if err := decoder.Decode(&request); err != nil {
+		return 0, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "invalid artifact extend body", Category: "validation"}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return 0, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "request body must contain exactly one JSON value", Category: "validation"}
+	}
+	if request.Hours == nil {
+		return 0, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "artifact extend hours is required", Category: "validation"}
+	}
+	return *request.Hours, nil
 }

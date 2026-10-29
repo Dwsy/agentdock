@@ -58,13 +58,23 @@ func mcpEndpointHandler(server *mcp.Server, cfg config.Config, oauthStore *auth.
 		if r.Method == http.MethodPost && !prepareMCPRequestBody(w, r) {
 			return
 		}
-		ctx := extractMCPTraceContext(r.Context(), r.Header)
-		// UA 是调用来源的一部分：桌面端、ChatGPT、Claude 或脚本会给出不同值，
-		// 记录到 trace/调用记录后可在 UI 直接区分来源。
-		ctx = observability.WithUserAgent(ctx, r.Header.Get("User-Agent"))
+		ctx := mcpCallContext(r.Context(), r.Header)
 		ctx = requestmeta.WithBaseURL(ctx, requestPublicBaseURL(cfg, r))
 		transport.ServeHTTP(w, r.WithContext(ctx))
 	}
+}
+
+// mcpCallContext 组装工具调用的观测上下文：远程 trace 父级、UA 与任务关联。
+// 任务关联头与 UA 同层注入，保证同一请求里两种识别信息走同一套归一化。
+func mcpCallContext(ctx context.Context, header http.Header) context.Context {
+	ctx = extractMCPTraceContext(ctx, header)
+	// UA 是调用来源的一部分：桌面端、ChatGPT、Claude 或脚本会给出不同值，
+	// 记录到 trace/调用记录后可在 UI 直接区分来源。
+	ctx = observability.WithUserAgent(ctx, header.Get("User-Agent"))
+	// X-AgentDock-Task 把本次工具调用挂到任务上：任务↔调用↔文件变更的关联
+	// 只依赖这个键，空值由 observability 归一化后决定不记录。
+	ctx = observability.WithTaskID(ctx, header.Get("X-AgentDock-Task"))
+	return ctx
 }
 func prepareMCPRequestBody(w http.ResponseWriter, r *http.Request) bool {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))

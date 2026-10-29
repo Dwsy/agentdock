@@ -210,6 +210,7 @@ func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	uaCtx := observability.WithUserAgent(context.Background(), "ChatGPT/1.0 (+macOS)")
+	uaCtx = observability.WithTaskID(uaCtx, "tsk_0123456789abcdef")
 	if _, err := rt.Call(uaCtx, "agentdock_context", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +225,7 @@ func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
 		},
 		"traces": {
 			result: mustTraces(t, rt),
-			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`, `"user_agent"`},
+			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`, `"user_agent"`, `"task_id"`},
 		},
 		"file-changes": {
 			result: mustFileChanges(t, rt),
@@ -312,5 +313,46 @@ func TestRuntimeCapturesUserAgent(t *testing.T) {
 	traces := result["records"].([]observability.TraceRecord)
 	if len(traces) != 1 || traces[0].UserAgent != "ChatGPT/1.0 (+macOS)" {
 		t.Fatalf("traces = %#v", traces)
+	}
+}
+
+func TestRuntimeCapturesTaskID(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	ctx := observability.WithTaskID(context.Background(), "tsk_0123456789abcdef")
+	if _, err := rt.Call(ctx, "agentdock_context", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	records := rt.observer.Snapshot().RecentCalls
+	if len(records) != 1 || records[0].TaskID != "tsk_0123456789abcdef" {
+		t.Fatalf("analytics recent calls = %#v", records)
+	}
+
+	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces := result["records"].([]observability.TraceRecord)
+	if len(traces) != 1 || traces[0].TaskID != "tsk_0123456789abcdef" {
+		t.Fatalf("traces = %#v", traces)
+	}
+}
+
+func TestRuntimeWithoutTaskIDKeepsRecordClean(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	if _, err := rt.Call(context.Background(), "agentdock_context", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	records := rt.observer.Snapshot().RecentCalls
+	if len(records) != 1 || records[0].TaskID != "" {
+		t.Fatalf("analytics recent calls = %#v", records)
+	}
+	encoded, err := json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"task_id"`) {
+		t.Fatalf("empty task id leaked into JSON: %s", encoded)
 	}
 }

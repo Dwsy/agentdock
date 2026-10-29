@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestUserAgentContextNormalizes(t *testing.T) {
@@ -41,6 +42,49 @@ func TestUserAgentContextKeepsValidUTF8Boundary(t *testing.T) {
 	got := UserAgentFromContext(ctx)
 	if len(got) > maxUserAgentBytes || !isValidUTF8(got) {
 		t.Fatalf("truncation broke UTF-8: len=%d", len(got))
+	}
+}
+
+func TestTaskIDContextNormalization(t *testing.T) {
+	longASCII := strings.Repeat("a", 200)
+	// 43 个三字节字符横跨 128 字节边界，截断必须退回到完整字符。
+	longRunes := strings.Repeat("调", 43)
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "keeps value", in: "tsk_0123456789abcdef", want: "tsk_0123456789abcdef"},
+		{name: "trims whitespace", in: "  tsk_0123456789abcdef\t", want: "tsk_0123456789abcdef"},
+		{name: "strips control characters", in: "ts\x00k_1\n2\t3\x7f", want: "tsk_123"},
+		{name: "blank is not recorded", in: " \t\n ", want: ""},
+		{name: "empty is not recorded", in: "", want: ""},
+		{name: "truncates to max bytes", in: longASCII, want: longASCII[:maxTaskIDBytes]},
+		{name: "keeps utf8 boundary", in: longRunes, want: strings.Repeat("调", 42)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := WithTaskID(context.Background(), test.in)
+			got := TaskIDFromContext(ctx)
+			if got != test.want {
+				t.Fatalf("TaskIDFromContext() = %q, want %q", got, test.want)
+			}
+			if len(got) > maxTaskIDBytes {
+				t.Fatalf("task id length = %d, want <= %d", len(got), maxTaskIDBytes)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("truncation broke UTF-8: %q", got)
+			}
+		})
+	}
+}
+
+func TestTaskIDContextHandlesNilContext(t *testing.T) {
+	if got := TaskIDFromContext(nil); got != "" {
+		t.Fatalf("nil context task id = %q", got)
+	}
+	if got := TaskIDFromContext(WithTaskID(nil, "tsk_0123456789abcdef")); got != "tsk_0123456789abcdef" {
+		t.Fatalf("nil ctx WithTaskID = %q", got)
 	}
 }
 

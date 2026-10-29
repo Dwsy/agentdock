@@ -17,7 +17,7 @@ func TestRecentCallsAndDiagnosticsProjectionStayZeroPayload(t *testing.T) {
 		25*time.Millisecond,
 		false,
 		"COMMAND_FAILED",
-		"runtime", "",
+		"runtime", "", "",
 		"4bf92f3577b34da6a3ce929d0e0e4736",
 		"00f067aa0ba902b7",
 		[]StageRecord{{Name: StageCommandStart, StartedOffsetMS: 2, DurationMS: 3, Success: true}},
@@ -51,7 +51,7 @@ func TestRecentCallsReturnsIndependentStageCopy(t *testing.T) {
 	recorder := NewRecorder(2)
 	recorder.BeginTool()
 	recorder.EndTool(
-		"tool", SourceMCP, time.Now(), time.Millisecond, true, "", "", "", "", "",
+		"tool", SourceMCP, time.Now(), time.Millisecond, true, "", "", "", "", "", "",
 		[]StageRecord{{Name: StageMCPRefresh, DurationMS: 1, Success: true}},
 	)
 	first := recorder.RecentCalls()

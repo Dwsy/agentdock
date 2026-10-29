@@ -24,8 +24,10 @@ func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg conf
 	mux.HandleFunc("/internal/runtime/diagnostics", h)
 	mux.HandleFunc("/internal/runtime/catalog", h)
 	mux.HandleFunc("/internal/runtime/traces", h)
+	mux.HandleFunc("/internal/runtime/traces/export", h)
 	mux.HandleFunc("/internal/runtime/file-changes", h)
 	mux.HandleFunc("/internal/runtime/artifacts", h)
+	mux.HandleFunc("/internal/runtime/artifacts/", h)
 	mux.HandleFunc("/internal/runtime/capabilities", h)
 	mux.HandleFunc("/internal/runtime/skills", h)
 	mux.HandleFunc("/internal/runtime/skills/", h)
@@ -89,7 +91,7 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 
 func runtimeRequestBody(r *http.Request) ([]byte, error) {
 	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
-	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != runtimeapi.ResourceLibraryPath) {
+	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
 		return nil, nil
 	}
 	return io.ReadAll(io.LimitReader(r.Body, 64*1024+1))
@@ -104,6 +106,10 @@ func writeRuntimeAPIHandlerError(w http.ResponseWriter, err error) {
 			status = http.StatusBadRequest
 		case "not_found":
 			status = http.StatusNotFound
+		case "conflict":
+			// 非法状态迁移与并发写冲突都是“与当前状态不一致”：
+			// 409 让客户端知道刷新任务状态后才能重试。
+			status = http.StatusConflict
 		}
 		writeRuntimeAPIError(w, status, toolErr.Code, toolErr.Message)
 		return

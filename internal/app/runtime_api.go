@@ -13,6 +13,10 @@ import (
 
 const runtimeAPISource = "agentdock-api"
 
+// RuntimeAPISource 导出给传输层：runtimeapi 需要在自己包装的响应里
+// 填同一个 source 值，避免两处硬编码字符串漂移。
+const RuntimeAPISource = runtimeAPISource
+
 func (r *Runtime) RuntimeStatus() Result {
 	tools := r.ToolNames()
 	return Result{
@@ -141,6 +145,12 @@ func (r *Runtime) RuntimeTask(id string) (Result, error) {
 
 func (r *Runtime) RuntimeTaskDelete(id string) (Result, error) {
 	return r.taskTools.RuntimeTaskDelete(id)
+}
+
+// RuntimeTaskAction 转发任务写操作到任务服务：状态机与校验只在 taskstate
+// 存在一份，这里不重新解释 action 语义。
+func (r *Runtime) RuntimeTaskAction(id string, body []byte) (Result, error) {
+	return r.taskTools.RuntimeTaskAction(id, body)
 }
 
 func (r *Runtime) RuntimeCapabilities(ctx context.Context, refresh bool) (Result, error) {

@@ -54,6 +54,9 @@ const (
 	TracePreviewBytes = 8 << 10
 	traceQueryLimit   = 500
 	traceDefaultLimit = 100
+	// traceExportLimit 是导出的默认条数：导出要覆盖完整保留窗口，
+	// 不能沿用 UI 首屏的 traceQueryLimit 上限。
+	traceExportLimit = 2000
 )
 
 type TraceOptions struct {
@@ -102,6 +105,7 @@ type TraceRecord struct {
 	Tool          string    `json:"tool"`
 	Source        string    `json:"source"`
 	UserAgent     string    `json:"user_agent,omitempty"`
+	TaskID        string    `json:"task_id,omitempty"`
 	StartedAt     time.Time `json:"started_at"`
 	DurationMS    float64   `json:"duration_ms"`
 	Success       bool      `json:"success"`
@@ -270,36 +274,43 @@ func (s *TraceStore) Query(query TraceQuery) []TraceRecord {
 	if limit > traceQueryLimit {
 		limit = traceQueryLimit
 	}
+	return s.filterRecords(query, limit, true)
+}
+
+// ExportRecords 按与 Query 相同的过滤语义导出记录（新到旧），但 limit
+// 默认 traceExportLimit 且不设查询上限：导出要覆盖完整保留窗口。
+// 返回值永远非 nil，方便调用方直接序列化成 JSON 数组。
+func (s *TraceStore) ExportRecords(query TraceQuery) []TraceRecord {
+	if s == nil {
+		return []TraceRecord{}
+	}
+	limit := query.Limit
+	if limit <= 0 {
+		limit = traceExportLimit
+	}
+	return s.filterRecords(query, limit, false)
+}
+
+// filterRecords 承载 Query/ExportRecords 共用的过滤循环。invalidStatusNil
+// 保持 Query 的既有语义：非法 status 过滤返回 nil；导出返回空数组。
+func (s *TraceStore) filterRecords(query TraceQuery, limit int, invalidStatusNil bool) []TraceRecord {
 	needle := strings.ToLower(strings.TrimSpace(query.Query))
 	toolFilter := strings.TrimSpace(query.Tool)
 	sourceFilter := strings.TrimSpace(query.Source)
 	statusFilter := strings.ToLower(strings.TrimSpace(query.Status))
+	if !validTraceStatusFilter(statusFilter) {
+		if invalidStatusNil {
+			return nil
+		}
+		return []TraceRecord{}
+	}
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]TraceRecord, 0, min(limit, len(s.records)))
 	for i := len(s.records) - 1; i >= 0; i-- {
 		record := s.records[i]
-		if toolFilter != "" && record.Tool != toolFilter {
-			continue
-		}
-		if sourceFilter != "" && string(record.Source) != sourceFilter {
-			continue
-		}
-		switch statusFilter {
-		case "", "all":
-		case "success":
-			if !record.Success {
-				continue
-			}
-		case "error":
-			if record.Success {
-				continue
-			}
-		default:
-			return nil
-		}
-		if needle != "" && !traceMatches(record, needle) {
+		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter) {
 			continue
 		}
 		out = append(out, record)
@@ -310,14 +321,110 @@ func (s *TraceStore) Query(query TraceQuery) []TraceRecord {
 	return out
 }
 
+func validTraceStatusFilter(statusFilter string) bool {
+	switch statusFilter {
+	case "", "all", "success", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func traceRecordMatches(record TraceRecord, needle, toolFilter, sourceFilter, statusFilter string) bool {
+	if toolFilter != "" && record.Tool != toolFilter {
+		return false
+	}
+	if sourceFilter != "" && string(record.Source) != sourceFilter {
+		return false
+	}
+	switch statusFilter {
+	case "success":
+		if !record.Success {
+			return false
+		}
+	case "error":
+		if record.Success {
+			return false
+		}
+	}
+	return needle == "" || traceMatches(record, needle)
+}
+
+// Clear 清空保留窗口：memory 只清内存索引；disk 再删除全部保留 JSONL 文件
+// 并重置写句柄，让后续记录写进新文件而不是已删除的 inode。返回清除条数，
+// 并发安全沿用既有互斥锁。
+func (s *TraceStore) Clear() (int, error) {
+	if s == nil {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cleared := len(s.records)
+	s.records = nil
+	s.pending = nil
+	if s.mode != TraceModeDisk {
+		return cleared, nil
+	}
+	if s.writer != nil {
+		_ = s.writer.Flush()
+		s.writer = nil
+	}
+	if s.file != nil {
+		_ = s.file.Close()
+		s.file = nil
+	}
+	s.day = ""
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cleared, nil
+		}
+		return cleared, fmt.Errorf("read trace root: %w", err)
+	}
+	var clearErrs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.root, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			clearErrs = append(clearErrs, fmt.Errorf("remove trace file %s: %w", entry.Name(), err))
+		}
+	}
+	return cleared, errors.Join(clearErrs...)
+}
+
 func traceMatches(record TraceRecord, needle string) bool {
-	fields := []string{record.Tool, string(record.Source), record.UserAgent, record.ErrorCode, record.Error, record.Arguments, record.Result, record.TraceID}
+	fields := []string{record.Tool, string(record.Source), record.UserAgent, record.TaskID, record.ErrorCode, record.Error, record.Arguments, record.Result, record.TraceID}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), needle) {
 			return true
 		}
 	}
 	return false
+}
+
+// TaskRecords 返回指定 task_id 的调用记录（新到旧），供任务活动聚合。
+// 这里必须精确匹配任务 ID：自由文本 Query 是子串搜索，会把碰巧包含
+// 同名子串的其他调用混进任务活动里。
+func (s *TraceStore) TaskRecords(taskID string) []TraceRecord {
+	if s == nil {
+		return nil
+	}
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return []TraceRecord{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]TraceRecord, 0)
+	for i := len(s.records) - 1; i >= 0; i-- {
+		record := s.records[i]
+		if record.TaskID != taskID {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out
 }
 
 // FileChanges 返回当前保留窗口内的文件变更条目（新到旧）。

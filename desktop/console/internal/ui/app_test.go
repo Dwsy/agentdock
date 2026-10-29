@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"github.com/uvwt/agentdock/desktop/console/internal/runtimeapi"
+	"github.com/uvwt/agentdock/desktop/console/internal/ui/kit"
 )
 
 // stubBackend 是 runtimeapi.Backend 的测试桩：返回固定数据或固定错误，
@@ -468,5 +470,86 @@ func TestDefaultPageIsOverview(t *testing.T) {
 	}
 	if got := app.pageTitle(); !strings.Contains(got, "概览") {
 		t.Errorf("page title = %q, want 概览", got)
+	}
+}
+
+// ---------- 顶栏实时指示灯语义 ----------
+
+// sseFailBackend 在 stubBackend 上实现 EventsOpener：OpenEvents 恒失败，
+// 模拟旧 Core（无 /internal/runtime/events）——SSE 永远连不上、走轮询兜底。
+type sseFailBackend struct {
+	stubBackend
+}
+
+func (s *sseFailBackend) OpenEvents(context.Context) (runtimeapi.Events, error) {
+	return nil, errors.New("sse endpoint missing")
+}
+
+// TestRealtimeIndicatorSemantics 固化顶栏指示灯语义：
+// SSE 已连接="实时"（accent）；断开/未接入但轮询兜底有数据="轮询"（neutral）；
+// 完全拿不到数据且在重连="重连中…"（warning）。
+func TestRealtimeIndicatorSemantics(t *testing.T) {
+	open := func(context.Context) (runtimeapi.Events, error) {
+		return nil, errors.New("sse down")
+	}
+	check := func(name string, a *App, want string, wantTone kit.Tone) {
+		t.Helper()
+		label, tone := a.realtimeIndicator()
+		if label != want || tone != wantTone {
+			t.Errorf("%s: indicator = (%q, %v), want (%q, %v)", name, label, tone, want, wantTone)
+		}
+	}
+
+	a := New(&stubBackend{}) // 未接入 SSE：纯轮询后端
+	check("no sse", a, "轮询", kit.ToneNeutral)
+	a.Close()
+
+	a = New(&stubBackend{}) // SSE 已连接
+	a.openEvents = open
+	a.setRealtime(true)
+	check("sse connected", a, "实时", kit.ToneAccent)
+	a.Close()
+
+	a = New(&stubBackend{}) // SSE 断开但轮询兜底拿到数据（旧 Core）
+	a.openEvents = open
+	a.setRealtime(false)
+	a.done(pageOverview, func() {}, nil)
+	check("polling fallback", a, "轮询", kit.ToneNeutral)
+	a.Close()
+
+	a = New(&stubBackend{}) // 完全拿不到数据且在重连
+	a.openEvents = open
+	a.setRealtime(false)
+	a.done(pageOverview, func() {}, errors.New("backend down"))
+	check("starved", a, "重连中…", kit.ToneWarning)
+	a.Close()
+}
+
+// TestRealtimeIndicatorPollingFallback 旧 Core（SSE 连不上）但轮询有数据时，
+// 顶栏显示"轮询"而不是吓人的"重连中…"（截图症状 5 的回归）。
+func TestRealtimeIndicatorPollingFallback(t *testing.T) {
+	status, overview, analytics := testOverviewData()
+	_, tt, notified := newTestApp(t, &sseFailBackend{stubBackend: stubBackend{
+		status: status, overview: overview, analytics: analytics,
+	}})
+	waitNotify(t, notified, "overview fetch")
+	tt.Frame()
+
+	if !tt.HasText("轮询") {
+		t.Error("indicator should show 轮询 when the polling fallback gets data")
+	}
+	if tt.HasText("重连中") {
+		t.Error("indicator must not show 重连中… while the polling fallback gets data")
+	}
+}
+
+// TestRealtimeIndicatorStarved 完全拿不到数据时才显示"重连中…"。
+func TestRealtimeIndicatorStarved(t *testing.T) {
+	_, tt, notified := newTestApp(t, &sseFailBackend{stubBackend: stubBackend{failures: 3}})
+	waitNotify(t, notified, "overview fetch failure")
+	tt.Frame()
+
+	if !tt.HasText("重连中…") {
+		t.Error("indicator should show 重连中… when no data can be fetched")
 	}
 }

@@ -117,7 +117,7 @@ func (a *App) pageTraces(c *ui.Context) {
 		ui.Scroll(c).Fill().Padding(4).Gap(8).Children(func() {
 			a.traceDetail(c, recs)
 		})
-	}).Fill()
+	}).Grow(1) // 占据内容列剩余高度（Fill 的 height:100% 会以整列高为高）
 }
 
 // pollTraces 实现追踪页 5s 自动轮询（SSE 断开/未接入时的兜底）：自动刷新

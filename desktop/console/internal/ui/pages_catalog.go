@@ -81,7 +81,7 @@ func (a *App) pageCatalog(c *ui.Context) {
 		ui.Scroll(c).Fill().Padding(4).Gap(8).Children(func() {
 			a.catalogDetail(c, items)
 		})
-	}).Fill()
+	}).Grow(1) // 占据内容列剩余高度（Fill 的 height:100% 会以整列高为高）
 }
 
 // catalogDetail 渲染右侧详情面板。

@@ -151,6 +151,9 @@ type App struct {
 	rtConnected bool           // 曾成功连接过（重连成功后全量刷新的判定）
 	rtPingAt    time.Time      // 最近一次 ping 保活的墙钟时间
 	events      []rtEvent      // 实时事件时间线（最新在前，最多 rtEventLimit 条）
+	// pollOK 是轮询兜底的健康度（顶栏指示灯用）：最近一次页面数据拉取成功为真。
+	// 默认真——首次拉取失败前不显示"重连中…"，避免启动瞬间误报吓人。
+	pollOK bool
 
 	// 顶部告警横幅：进入页面/收到事件时节流拉取 Alerts()（alertsFetchEvery 一次）。
 	alerts          *runtimeapi.AlertsResponse
@@ -186,6 +189,7 @@ func New(backend runtimeapi.Backend) *App {
 		traceDiffOpen: map[string]bool{},
 		actDiffOpen:   map[string]bool{},
 		traceAuto:     true,
+		pollOK:        true,
 	}
 	if opener, ok := backend.(runtimeapi.EventsOpener); ok {
 		a.openEvents = opener.OpenEvents
@@ -239,14 +243,18 @@ func (a *App) notify() {
 
 // View 是根视图：左侧侧边栏（观测/资产/工作 三组）+ 右侧工具条与页面主体；
 // 根上挂 ⌘K 窗口级快捷键打开全局搜索浮层。
+//
+// 布局要点：根 Row 占满窗口并 AlignItems(Stretch)（ui.Row 默认 Center 会把
+// 不足全高的子元素悬浮在窗口垂直中部），子元素再各 FillHeight 兜底，保证
+// 侧栏与内容列都是窗口全高、贴顶贴底。
 func (a *App) View(c *ui.Context) {
 	c.OnShortcut(ui.Cmd, ui.KeyK, func() {
 		a.searchOpen = true
 		a.searchSel = 0
 	})
-	ui.Row(c).Fill().Children(func() {
+	ui.Row(c).Fill().AlignItems(ui.Stretch).Children(func() {
 		a.sidebar(c)
-		ui.Column(c).Grow(1).Padding(16).Gap(12).Children(func() {
+		ui.Column(c).Grow(1).FillHeight().Padding(16).Gap(12).Children(func() {
 			a.toolbar(c)
 			a.renderPage(c)
 		})
@@ -270,13 +278,16 @@ func (a *App) sidebar(c *ui.Context) {
 		ui.SidebarSection(c, "工作", &a.secWork, func() {
 			ui.SidebarItem(c, pageTasks, kit.IconListChecks(), "任务")
 		})
-	}).Width(216).Shrink(0)
+	}).Width(216).FillHeight().Shrink(0).Label("侧栏")
 }
 
 // toolbar 是页面顶部工具条：页面标题 + 实时连接指示灯 + 手动刷新按钮；
 // 追踪页另有 "自动刷新"开关与上次刷新时间（该页 5s 自动轮询）。
+//
+// 行宽铺满、行高随内容：用 FillWidth 而不是 Fill——Fill 的 height:100% 会把
+// 工具条撑成整个内容列那么高（曾经的布局事故：标题被垂直居中到窗口中部）。
 func (a *App) toolbar(c *ui.Context) {
-	ui.Row(c).Fill().AlignItems(ui.Center).Gap(8).Children(func() {
+	ui.Row(c).FillWidth().Label("工具条").AlignItems(ui.Center).Gap(8).Children(func() {
 		ui.Text(c, a.pageTitle()).Bold().FontSize(16).Grow(1)
 		label, tone := a.realtimeIndicator()
 		kit.StatusChip(c, label, tone)
@@ -315,7 +326,7 @@ func (a *App) renderPage(c *ui.Context) {
 	case pageTasks:
 		a.pageTasks(c)
 	default:
-		kit.EmptyState(c, "未知页面", "请从左侧边栏选择一个页面")
+		stateBox(c, func() { kit.EmptyState(c, "未知页面", "请从左侧边栏选择一个页面") })
 	}
 }
 
@@ -428,7 +439,8 @@ func (a *App) refresh(page string) {
 	a.notify()
 }
 
-// done 一页拉取完成：写状态并在成功时发布数据。
+// done 一页拉取完成：写状态并在成功时发布数据；同时记录最近一次数据拉取
+// 结果（pollOK）供顶栏指示灯区分"轮询兜底有数据"与"完全拿不到数据"。
 func (a *App) done(page string, publish func(), err error) {
 	a.mu.Lock()
 	ls := a.loadOf(page)
@@ -437,6 +449,7 @@ func (a *App) done(page string, publish func(), err error) {
 		ls.loaded = true
 		ls.err = err
 	}
+	a.pollOK = err == nil
 	if err == nil && publish != nil {
 		publish()
 	}
@@ -584,6 +597,14 @@ func (a *App) dropTaskDetail() {
 
 // ---------- 三态与小工具 ----------
 
+// stateBox 把 loading/错误/空态包进一个占据剩余高度的列容器：kit 状态组件用
+// Fill（width+height 各 100%）铺满父容器，直接放进有兄弟节点的内容列会把
+// height:100% 解析成整列内容高，把工具条等兄弟挤出可视区；包一层 Grow(1)
+// 后 Fill 只铺满剩余区域（在滚动/自动高度容器里 Grow 退化为内容高，无副作用）。
+func stateBox(c *ui.Context, build func()) {
+	ui.Column(c).Grow(1).Children(build)
+}
+
 // loadBanner 渲染某页的加载/错误/空态；返回 true 表示应继续渲染数据内容。
 // hasData 表示缓存里已有可用数据（后台刷新期间继续展示旧数据）；retry 是错误态的重试动作。
 func (a *App) loadBanner(c *ui.Context, what string, loading, loaded bool, err error, hasData bool, emptyTitle, emptyHint string, retry func()) bool {
@@ -591,22 +612,24 @@ func (a *App) loadBanner(c *ui.Context, what string, loading, loaded bool, err e
 	case hasData:
 		return true
 	case loading && !loaded:
-		kit.LoadingState(c, "正在加载"+what+"…")
+		stateBox(c, func() { kit.LoadingState(c, "正在加载"+what+"…") })
 		return false
 	case err != nil:
-		kit.ErrorState(c, what+"加载失败："+err.Error())
-		ui.Row(c).Children(func() {
-			btn := ui.Button(c, "").Children(func() {
-				ui.Icon(c, kit.IconRefresh())
-				ui.Text(c, "重试")
+		stateBox(c, func() {
+			kit.ErrorState(c, what+"加载失败："+err.Error())
+			ui.Row(c).Children(func() {
+				btn := ui.Button(c, "").Children(func() {
+					ui.Icon(c, kit.IconRefresh())
+					ui.Text(c, "重试")
+				})
+				if btn.Clicked() {
+					retry()
+				}
 			})
-			if btn.Clicked() {
-				retry()
-			}
 		})
 		return false
 	default:
-		kit.EmptyState(c, emptyTitle, emptyHint)
+		stateBox(c, func() { kit.EmptyState(c, emptyTitle, emptyHint) })
 		return false
 	}
 }

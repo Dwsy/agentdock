@@ -36,7 +36,9 @@ func (a *App) pagePublished(c *ui.Context) {
 	}
 
 	if !data.Configured {
-		kit.EmptyState(c, "未配置公网发布", "配置公网基址后，此处展示可分享的产物链接")
+		stateBox(c, func() {
+			kit.EmptyState(c, "未配置公网发布", "配置公网基址后，此处展示可分享的产物链接")
+		})
 		return
 	}
 
@@ -72,7 +74,7 @@ func (a *App) pagePublished(c *ui.Context) {
 		ui.Scroll(c).Fill().Padding(4).Gap(8).Children(func() {
 			a.artifactDetail(c, arts)
 		})
-	}).Fill()
+	}).Grow(1) // 占据内容列剩余高度（Fill 的 height:100% 会以整列高为高）
 }
 
 // artifactDetail 渲染右侧产物详情：URL 可复制（mygo clipboard）与打开。

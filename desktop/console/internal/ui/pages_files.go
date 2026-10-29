@@ -73,7 +73,7 @@ func (a *App) pageFiles(c *ui.Context) {
 		ui.Scroll(c).Fill().Padding(4).Gap(8).Children(func() {
 			a.fileDetail(c, rows)
 		})
-	}).Fill()
+	}).Grow(1) // 占据内容列剩余高度（Fill 的 height:100% 会以整列高为高）
 }
 
 // fileDetail 渲染右侧 diff 详情。

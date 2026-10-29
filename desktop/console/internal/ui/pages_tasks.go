@@ -42,7 +42,7 @@ func (a *App) pageTasks(c *ui.Context) {
 
 	rows := filterTasks(list.Tasks, a.taskQuery)
 	if len(rows) == 0 {
-		kit.EmptyState(c, "暂无任务", "当前筛选条件下没有任务记录")
+		stateBox(c, func() { kit.EmptyState(c, "暂无任务", "当前筛选条件下没有任务记录") })
 		return
 	}
 	if a.taskSel >= len(rows) {
@@ -85,7 +85,7 @@ func (a *App) pageTasks(c *ui.Context) {
 		ui.Scroll(c).Fill().Padding(4).Gap(8).Children(func() {
 			a.taskDetailPanel(c, rows)
 		})
-	}).Fill()
+	}).Grow(1) // 占据内容列剩余高度（Fill 的 height:100% 会以整列高为高）
 }
 
 // taskDetailPanel 渲染右侧任务详情。

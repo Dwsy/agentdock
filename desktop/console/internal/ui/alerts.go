@@ -91,8 +91,9 @@ func (a *App) renderAlertBanner(c *ui.Context) {
 	for _, al := range active {
 		tone, sevLabel := alertTone(al.Severity)
 		fg := alertBannerColor(c.Theme(), al.Severity)
+		// FillWidth 而非 Fill：横幅是内容列的子节点，height:100% 会撑满整列。
 		row := ui.ButtonBase(c).
-			Fill().
+			FillWidth().
 			Padding(10, 12).
 			Gap(10).
 			AlignItems(ui.Center).

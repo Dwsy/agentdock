@@ -13,7 +13,9 @@ import (
 // 时 New 启动 runEvents 后台循环——OpenEvents→Recv 循环消费 call/task/artifact 事件，
 // 按 kind 惰性失效对应页缓存并请求重绘；ping 只记保活时间戳；断线后按指数退避
 // 重连（1s→2s→…→30s 封顶），重连成功后全量刷新一次。SSE 正常时追踪页停止
-// 5s 轮询，断开/未接入时轮询兜底。顶栏指示灯：实时 / 重连中… / 轮询。
+// 5s 轮询，断开/未接入时轮询兜底。顶栏指示灯："实时"（SSE 正常）/ "轮询"
+// （断开或未接入但轮询兜底能取到数据）/ "重连中…"（完全拿不到数据且在重连，
+// 旧 Core 无 /internal/runtime/events 时属于前者，不该误报）。
 
 const (
 	// rtRetryInitial / rtRetryMax 是断线重连的指数退避参数。
@@ -124,15 +126,18 @@ func (a *App) refreshAll() {
 }
 
 // realtimeIndicator 返回顶栏实时连接指示灯的文案与色调：
-// SSE 正常 → "实时"；有 SSE 但断开 → "重连中…"；未接入 SSE → "轮询"。
+// SSE 正常 → "实时"（accent）；SSE 断开/未接入但轮询兜底能取到数据 → "轮询"
+// （neutral）；完全拿不到数据且在重连 → "重连中…"（warning）。
+// 旧 Core 没有 /internal/runtime/events：SSE 永远连不上但 REST 轮询有数据，
+// 显示"轮询"而不是吓人的"重连中…"。
 func (a *App) realtimeIndicator() (string, kit.Tone) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
-	case a.openEvents == nil:
-		return "轮询", kit.ToneNeutral
 	case a.realtime:
-		return "实时", kit.ToneSuccess
+		return "实时", kit.ToneAccent
+	case a.openEvents == nil || a.pollOK:
+		return "轮询", kit.ToneNeutral
 	default:
 		return "重连中…", kit.ToneWarning
 	}

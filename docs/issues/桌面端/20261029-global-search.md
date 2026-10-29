@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-global-search"
 title: "全局搜索（跨 7 类数据）"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "桌面端"
@@ -61,3 +61,4 @@ tags: ["search", "runtime-api", "priority-p1"]
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态变更 → done，备注: v2 交付（217a475）：⌘K 全局搜索以客户端聚合实现（跨 7 类数据分组、跳页定位、Esc 关闭）；后端 search 端点按决策留 P1 备选

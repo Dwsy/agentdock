@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-task-write-actions"
 title: "任务写操作 API（checkpoint / complete / delete）"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "桌面端"
@@ -60,3 +60,4 @@ UI 目前只能看任务。`task_manage` 已实现 checkpoint/complete/delete �
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态变更 → done，备注: v2 交付（217a475）：POST /tasks/{id}/actions（checkpoint/complete/delete），409 INVALID_STATUS、并发 TryLock 单胜、复用 taskstate 状态机；控制台任务页操作按钮已上

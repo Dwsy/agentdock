@@ -1,11 +1,13 @@
 package runtimeapi
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,6 +49,8 @@ const (
 	pathTracesExport = "/internal/runtime/traces/export"
 	pathFileChanges  = "/internal/runtime/file-changes"
 	pathArtifacts    = "/internal/runtime/artifacts"
+	pathEvents       = "/internal/runtime/events"
+	pathAlerts       = "/internal/runtime/alerts"
 )
 
 // NewClient 创建指向 baseURL 的 Runtime API 客户端；token 为空表示不鉴权。
@@ -308,8 +312,9 @@ func (c *Client) ArtifactExtend(id string, hours int) (*Artifact, error) {
 }
 
 // TracesExport 实现 Backend：GET /internal/runtime/traces/export?format=&q=&tool=&source=&status=&limit=。
-// 返回 (data, contentType, filename, err)：原始文件流、响应 Content-Type 的媒体类型
-// （如 application/json / text/csv）与 Content-Disposition 里的 filename（缺失为空）。
+// 响应是 JSON 包封（TracesExportEnvelope）：body 为导出原文字符串，
+// content_type/filename 从同名字段取；ok:false 走 {"ok":false,"code","error"} → *APIError。
+// 返回 (data, contentType, filename, err)，签名与导出消费方约定不变。
 func (c *Client) TracesExport(format, query, tool, source, status string, limit int) ([]byte, string, string, error) {
 	q := url.Values{}
 	if format != "" {
@@ -330,22 +335,11 @@ func (c *Client) TracesExport(format, query, tool, source, status string, limit 
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
-	data, header, err := c.request(http.MethodGet, pathTracesExport, q, nil)
+	env, err := fetchJSON[TracesExportEnvelope](c, pathTracesExport, q)
 	if err != nil {
 		return nil, "", "", err
 	}
-	contentType, filename := header.Get("Content-Type"), ""
-	if contentType != "" {
-		if mediaType, _, perr := mime.ParseMediaType(contentType); perr == nil {
-			contentType = mediaType
-		}
-	}
-	if cd := header.Get("Content-Disposition"); cd != "" {
-		if _, params, perr := mime.ParseMediaType(cd); perr == nil {
-			filename = params["filename"]
-		}
-	}
-	return data, contentType, filename, nil
+	return []byte(env.Body), env.ContentType, env.Filename, nil
 }
 
 // TracesClear 实现 Backend：DELETE /internal/runtime/traces，清空追踪记录，返回清空条数。
@@ -355,6 +349,153 @@ func (c *Client) TracesClear() (int, error) {
 		return 0, err
 	}
 	return out.Cleared, nil
+}
+
+// Alerts 实现 Backend：GET /internal/runtime/alerts，返回告警列表与规则。
+func (c *Client) Alerts() (*AlertsResponse, error) {
+	return fetchJSON[AlertsResponse](c, pathAlerts, nil)
+}
+
+// ---------- GET /internal/runtime/events（SSE） ----------
+
+// SSE 流错误：Recv 的返回值可被 errors.Is 识别。
+var (
+	// ErrSSEDisconnected 表示流因对端断开/读取失败而中止（可重连）。
+	ErrSSEDisconnected = errors.New("runtimeapi: events stream disconnected")
+	// ErrSSEClosed 表示调用方已 Close 后继续 Recv。
+	ErrSSEClosed = errors.New("runtimeapi: events stream closed")
+)
+
+// Events 是一条 SSE 事件流：Recv 顺序返回帧，Close 关闭连接。
+// 断线时 Recv 返回包装 ErrSSEDisconnected 的错误；ctx 取消时返回包装
+// context 取消原因的错误（errors.Is(err, context.Canceled/DeadlineExceeded)）。
+type Events interface {
+	Recv() (SSEEvent, error)
+	Close() error
+}
+
+// eventStream 是 Events 的实现：bufio.Scanner 按 SSE 帧（event:/data: 行
+// + 空行）解析 text/event-stream 响应体。
+type eventStream struct {
+	ctx    context.Context
+	body   io.ReadCloser
+	scan   *bufio.Scanner
+	closed bool
+}
+
+// OpenEvents 实现 EventsOpener：GET /internal/runtime/events 建立 SSE 流。
+//
+// 约定：
+//   - 请求带 Accept: text/event-stream 与 Bearer 鉴权（Token 非空时）；
+//   - 流式响应不受 HTTPClient 总超时约束（浅拷贝后清零 Timeout），
+//     连接生命周期由 ctx 与 Close 管理；
+//   - 非 2xx → *APIError（错误体 {"ok":false,"code","error"}），
+//     连接/构造失败 → 带端点信息的普通 error；
+//   - 帧内 data: 为 JSON（ping 保活帧同样透传，由调用方按 Kind 过滤）。
+func (c *Client) OpenEvents(ctx context.Context) (Events, error) {
+	u := strings.TrimRight(c.BaseURL, "/") + pathEvents
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("runtimeapi: GET %s: %w", pathEvents, err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	resp, err := c.streamClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("runtimeapi: GET %s: %w", pathEvents, err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorDetail))
+		resp.Body.Close()
+		if apiErr := responseError(http.MethodGet, pathEvents, resp.StatusCode, data); apiErr != nil {
+			return nil, apiErr
+		}
+		return nil, fmt.Errorf("runtimeapi: GET %s: status %d", pathEvents, resp.StatusCode)
+	}
+	scan := bufio.NewScanner(resp.Body)
+	scan.Buffer(make([]byte, 0, 64*1024), 1<<20) // 单行上限 1MB
+	return &eventStream{ctx: ctx, body: resp.Body, scan: scan}, nil
+}
+
+// streamClient 返回流式请求用的 HTTP 客户端：复用注入的 Transport，但去掉
+// 总超时（http.Client.Timeout 会掐断长连接），生命周期交给 ctx。
+func (c *Client) streamClient() *http.Client {
+	if c.HTTPClient != nil {
+		cp := *c.HTTPClient
+		cp.Timeout = 0
+		return &cp
+	}
+	return &http.Client{}
+}
+
+// Recv 读取下一帧 SSE 事件：event: 定 Kind，data: 行（可多行，按 \n 拼接）
+// 定 Data；空行分帧；`:` 注释行与 id:/retry: 字段忽略。帧格式见 types.go。
+//
+// 错误约定：
+//   - 对端断开/读取失败 → 包装 ErrSSEDisconnected（可重连）；
+//   - ctx 取消 → 包装 ctx.Err()；
+//   - Close 后再 Recv → ErrSSEClosed。
+func (s *eventStream) Recv() (SSEEvent, error) {
+	if s.closed {
+		return SSEEvent{}, ErrSSEClosed
+	}
+	var kind string
+	var data []string
+	for s.scan.Scan() {
+		line := s.scan.Text()
+		if line == "" {
+			if kind == "" && len(data) == 0 {
+				continue // 空帧跳过
+			}
+			return s.frame(kind, data), nil
+		}
+		if strings.HasPrefix(line, ":") {
+			continue // 注释/保活行
+		}
+		field, value, _ := strings.Cut(line, ":")
+		value = strings.TrimPrefix(value, " ") // SSE 规范：冒号后单个前导空格
+		switch field {
+		case "event":
+			kind = value
+		case "data":
+			data = append(data, value)
+		}
+		// id:/retry: 与未知字段忽略
+	}
+	if s.closed {
+		return SSEEvent{}, ErrSSEClosed
+	}
+	if s.ctx.Err() != nil {
+		return SSEEvent{}, fmt.Errorf("runtimeapi: events stream: %w", s.ctx.Err())
+	}
+	if err := s.scan.Err(); err != nil {
+		return SSEEvent{}, fmt.Errorf("runtimeapi: events stream read: %w: %w", err, ErrSSEDisconnected)
+	}
+	if kind != "" || len(data) > 0 {
+		// 末帧容错：收尾缺空行分帧也投递，下次 Recv 再报断线。
+		return s.frame(kind, data), nil
+	}
+	return SSEEvent{}, fmt.Errorf("runtimeapi: events stream: EOF: %w", ErrSSEDisconnected)
+}
+
+// frame 把一帧的 event/data 行组装为 SSEEvent。
+func (s *eventStream) frame(kind string, data []string) SSEEvent {
+	var raw json.RawMessage
+	if len(data) > 0 {
+		raw = json.RawMessage(strings.Join(data, "\n"))
+	}
+	return SSEEvent{Kind: kind, Data: raw}
+}
+
+// Close 关闭事件流；幂等。进行中的 Recv 会立即返回。
+func (s *eventStream) Close() error {
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	return s.body.Close()
 }
 
 // LoadConfig 依次读环境变量与 agentdock.env，组装 Runtime API 的 baseURL 与 token。

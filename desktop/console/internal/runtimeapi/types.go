@@ -11,7 +11,12 @@
 //   - internal/tool/skill/runtime_api.go、internal/tool/plugin/service.go
 package runtimeapi
 
-import "time"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+)
 
 // Backend 是页面层消费的只读契约；Client 是真实实现，测试用桩替换。
 type Backend interface {
@@ -32,6 +37,14 @@ type Backend interface {
 	Artifacts() (*Artifacts, error)
 	ArtifactRevoke(id string) error
 	ArtifactExtend(id string, hours int) (*Artifact, error)
+	Alerts() (*AlertsResponse, error)
+}
+
+// EventsOpener 是打开 SSE 事件流的可选能力；Client 满足。Backend 刻意不包含
+// OpenEvents（流式会话不属于请求-响应契约，便于测试桩替换），App 在装配时按
+// 该接口探测启用实时事件流。
+type EventsOpener interface {
+	OpenEvents(ctx context.Context) (Events, error)
 }
 
 // APIError 是 runtime API 的错误体 {"ok":false,"code":...,"error":...}。
@@ -501,8 +514,20 @@ type ArtifactAction struct {
 }
 
 // ---------- GET /internal/runtime/traces/export ----------
-// 导出返回原始文件流（json: application/json；csv: text/csv，
-// Content-Disposition 带 filename），客户端解析为 (data, contentType, filename)。
+// 导出返回 JSON 包封（不是原始文件流）：body 是导出原文字符串，
+// content_type（application/json|text/csv）与 filename（traces-<UTC>.json|csv）
+// 从字段取；ok:false 走 {"ok":false,"code","error"} → *APIError。
+
+// TracesExportEnvelope 是导出端点的 JSON 包封响应。
+type TracesExportEnvelope struct {
+	OK          bool   `json:"ok"`
+	Source      string `json:"source"`
+	Action      string `json:"action"`
+	Format      string `json:"format"`
+	ContentType string `json:"content_type"`
+	Filename    string `json:"filename"`
+	Body        string `json:"body"`
+}
 
 // ---------- DELETE /internal/runtime/traces ----------
 
@@ -512,6 +537,138 @@ type TracesClearResponse struct {
 	Source  string `json:"source"`
 	Action  string `json:"action"`
 	Cleared int    `json:"cleared"`
+}
+
+// ---------- GET /internal/runtime/events（SSE） ----------
+//
+// text/event-stream 流，帧格式 `event: <kind>\ndata: <json>\n\n`，
+// kind ∈ call|task|artifact|ping；15s 一次 ping 保活（由调用方过滤，
+// 客户端透传）。payload 契约：
+//
+//   - call:     {"id","tool","source","task_id","success","duration_ms","error_code","started_at"}
+//   - task:     {"id","title","status","phase","updated_at"}
+//   - artifact: {"action","artifact_id"}
+//   - ping:     保活帧，data 通常为 {}（调用方按 Kind 过滤）
+
+// SSE 事件 kind 常量。
+const (
+	EventCall     = "call"
+	EventTask     = "task"
+	EventArtifact = "artifact"
+	EventPing     = "ping"
+)
+
+// SSEEvent 是一帧 SSE 事件：Kind 来自 event: 行，Data 是 data: 行的 JSON 原文
+// （多行 data 按 SSE 规范以 \n 拼接）。具体负载用 Decode* 方法按 Kind 解出。
+type SSEEvent struct {
+	Kind string          `json:"kind"`
+	Data json.RawMessage `json:"data"`
+}
+
+// CallEvent 是 kind=call 的负载（对齐 observability.ExecutionRecord 的字段子集）。
+type CallEvent struct {
+	ID         uint64    `json:"id"`
+	Tool       string    `json:"tool"`
+	Source     string    `json:"source"`
+	TaskID     string    `json:"task_id"`
+	Success    bool      `json:"success"`
+	DurationMS float64   `json:"duration_ms"`
+	ErrorCode  string    `json:"error_code"`
+	StartedAt  time.Time `json:"started_at"`
+}
+
+// TaskEvent 是 kind=task 的负载（任务状态/阶段迁移）。
+type TaskEvent struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	Phase     string    `json:"phase"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ArtifactEvent 是 kind=artifact 的负载（产物发布/撤销等动作）。
+type ArtifactEvent struct {
+	Action     string `json:"action"`
+	ArtifactID string `json:"artifact_id"`
+}
+
+// PingEvent 是 kind=ping 的保活负载（data 通常为 {}）。
+type PingEvent struct{}
+
+// DecodeCall 解出 call 负载。
+func (e SSEEvent) DecodeCall() (CallEvent, error) {
+	var v CallEvent
+	if err := json.Unmarshal(e.Data, &v); err != nil {
+		return CallEvent{}, fmt.Errorf("runtimeapi: decode %s event: %w", EventCall, err)
+	}
+	return v, nil
+}
+
+// DecodeTask 解出 task 负载。
+func (e SSEEvent) DecodeTask() (TaskEvent, error) {
+	var v TaskEvent
+	if err := json.Unmarshal(e.Data, &v); err != nil {
+		return TaskEvent{}, fmt.Errorf("runtimeapi: decode %s event: %w", EventTask, err)
+	}
+	return v, nil
+}
+
+// DecodeArtifact 解出 artifact 负载。
+func (e SSEEvent) DecodeArtifact() (ArtifactEvent, error) {
+	var v ArtifactEvent
+	if err := json.Unmarshal(e.Data, &v); err != nil {
+		return ArtifactEvent{}, fmt.Errorf("runtimeapi: decode %s event: %w", EventArtifact, err)
+	}
+	return v, nil
+}
+
+// DecodePing 解出 ping 负载。
+func (e SSEEvent) DecodePing() (PingEvent, error) {
+	var v PingEvent
+	if err := json.Unmarshal(e.Data, &v); err != nil {
+		return PingEvent{}, fmt.Errorf("runtimeapi: decode %s event: %w", EventPing, err)
+	}
+	return v, nil
+}
+
+// ---------- GET /internal/runtime/alerts ----------
+
+// 告警 severity 与 kind 的契约取值。
+const (
+	AlertSeverityWarning = "warning"
+	AlertSeverityDanger  = "danger"
+
+	AlertKindErrorRate   = "error_rate"
+	AlertKindTraceDisk   = "trace_disk"
+	AlertKindTaskBlocked = "task_blocked"
+)
+
+// Alert 是一条告警（活跃或历史），对齐后端告警规则的产出。
+type Alert struct {
+	ID        string    `json:"id"`
+	Severity  string    `json:"severity"` // warning|danger
+	Kind      string    `json:"kind"`     // error_rate|trace_disk|task_blocked
+	Message   string    `json:"message"`
+	Detail    string    `json:"detail"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Active    bool      `json:"active"`
+}
+
+// AlertRule 是告警规则配置；threshold 为数值阈值（比率/容量/计数按 kind 解释）。
+type AlertRule struct {
+	Kind      string  `json:"kind"`
+	Threshold float64 `json:"threshold"`
+	Enabled   bool    `json:"enabled"`
+}
+
+// AlertsResponse 是告警端点的成功响应信封。
+type AlertsResponse struct {
+	OK            bool        `json:"ok"`
+	Source        string      `json:"source"`
+	Alerts        []Alert     `json:"alerts"`
+	ResolvedCount int         `json:"resolved_count"`
+	Rules         []AlertRule `json:"rules"`
 }
 
 // Artifact 对齐 publicartifacts.PublishResult（Metadata + url）。

@@ -1,6 +1,7 @@
 package runtimeapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -23,6 +24,7 @@ type capturedRequest struct {
 	RawQuery    string
 	Query       url.Values
 	AuthValues  []string // Authorization 头原值，用于校验 Bearer 存在/缺失
+	Accept      string   // Accept 头原值（SSE 流应为 text/event-stream）
 	ContentType string   // Content-Type 头原值（POST/DELETE 带 JSON 体时应为 application/json）
 	Body        []byte   // 请求体原值，用于校验 JSON 字段逐字传递
 }
@@ -56,6 +58,7 @@ func serve(t *testing.T, status int, body []byte, contentType string) (*httptest
 			RawQuery:    r.URL.RawQuery,
 			Query:       r.URL.Query(),
 			AuthValues:  r.Header.Values("Authorization"),
+			Accept:      r.Header.Get("Accept"),
 			ContentType: r.Header.Get("Content-Type"),
 			Body:        reqBody,
 		})
@@ -936,38 +939,34 @@ func TestClient_ArtifactExtend(t *testing.T) {
 }
 
 // ---------- 操作闭环契约：GET /internal/runtime/traces/export ----------
+// 响应为 JSON 包封（TracesExportEnvelope）：body 是导出原文字符串，
+// content_type/filename 从字段取（非原始文件流/Content-Disposition）。
 
 func TestClient_TracesExport_JSON(t *testing.T) {
-	// 带 Content-Disposition 的导出响应（serve 只设 Content-Type）。
-	rec2 := &requestRecorder{}
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		rec2.record(capturedRequest{
-			Method: r.Method, Path: r.URL.EscapedPath(),
-			RawQuery: r.URL.RawQuery, Query: r.URL.Query(),
-			AuthValues: r.Header.Values("Authorization"), Body: body,
-		})
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="traces-2024.json"`)
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"records":[]}`))
-	}))
-	t.Cleanup(srv2.Close)
+	srv, rec := serveJSON(t, http.StatusOK, TracesExportEnvelope{
+		OK:          true,
+		Source:      "agentdock-api",
+		Action:      "export",
+		Format:      "json",
+		ContentType: "application/json",
+		Filename:    "traces-20240506-070809.json",
+		Body:        `{"records":[]}`,
+	})
 
-	data, contentType, filename, err := NewClient(srv2.URL, "tok").TracesExport("json", "go code", "bash", "cli", "error", 25)
+	data, contentType, filename, err := NewClient(srv.URL, "tok").TracesExport("json", "go code", "bash", "cli", "error", 25)
 	if err != nil {
 		t.Fatalf("TracesExport() error: %v", err)
 	}
 	if string(data) != `{"records":[]}` {
-		t.Errorf("data = %s, want raw stream", data)
+		t.Errorf("data = %s, want 包封 body 原文", data)
 	}
 	if contentType != "application/json" {
-		t.Errorf("contentType = %q, want application/json（去掉 charset 参数）", contentType)
+		t.Errorf("contentType = %q, want application/json（取自 content_type 字段）", contentType)
 	}
-	if filename != "traces-2024.json" {
-		t.Errorf("filename = %q, want traces-2024.json（Content-Disposition 解析）", filename)
+	if filename != "traces-20240506-070809.json" {
+		t.Errorf("filename = %q, want traces-20240506-070809.json（取自 filename 字段）", filename)
 	}
-	req := rec2.get()
+	req := rec.get()
 	assertRequest(t, req, http.MethodGet, "/internal/runtime/traces/export")
 	for key, wantVal := range map[string]string{
 		"format": "json", "q": "go code", "tool": "bash", "source": "cli", "status": "error", "limit": "25",
@@ -982,31 +981,28 @@ func TestClient_TracesExport_JSON(t *testing.T) {
 }
 
 func TestClient_TracesExport_CSV(t *testing.T) {
-	rec := &requestRecorder{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.record(capturedRequest{
-			Method: r.Method, Path: r.URL.EscapedPath(),
-			RawQuery: r.URL.RawQuery, Query: r.URL.Query(),
-		})
-		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", "attachment; filename=traces.csv")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("id,tool\n1,bash\n"))
-	}))
-	t.Cleanup(srv.Close)
+	srv, rec := serveJSON(t, http.StatusOK, TracesExportEnvelope{
+		OK:          true,
+		Source:      "agentdock-api",
+		Action:      "export",
+		Format:      "csv",
+		ContentType: "text/csv",
+		Filename:    "traces-20240506-070809.csv",
+		Body:        "id,tool\n1,bash\n",
+	})
 
 	data, contentType, filename, err := NewClient(srv.URL, "").TracesExport("csv", "", "", "", "", 0)
 	if err != nil {
 		t.Fatalf("TracesExport() error: %v", err)
 	}
 	if string(data) != "id,tool\n1,bash\n" {
-		t.Errorf("data = %q, want csv 原始流", data)
+		t.Errorf("data = %q, want csv 原文", data)
 	}
 	if contentType != "text/csv" {
 		t.Errorf("contentType = %q, want text/csv", contentType)
 	}
-	if filename != "traces.csv" {
-		t.Errorf("filename = %q, want traces.csv（无引号 filename 解析）", filename)
+	if filename != "traces-20240506-070809.csv" {
+		t.Errorf("filename = %q, want traces-20240506-070809.csv", filename)
 	}
 	req := rec.get()
 	if req.Query.Get("format") != "csv" {
@@ -1032,6 +1028,22 @@ func TestClient_TracesExport_Error(t *testing.T) {
 	}
 }
 
+func TestClient_TracesExport_OKFalseBody(t *testing.T) {
+	// HTTP 200 但信封 ok:false 同样映射为 *APIError。
+	srv, _ := serveJSON(t, http.StatusOK, map[string]any{
+		"ok": false, "code": "EXPORT_BUSY", "error": "export in progress",
+	})
+
+	_, _, _, err := NewClient(srv.URL, "").TracesExport("json", "", "", "", "", 0)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.Code != "EXPORT_BUSY" || apiErr.Message != "export in progress" {
+		t.Errorf("APIError = %+v", apiErr)
+	}
+}
+
 // ---------- 操作闭环契约：DELETE /internal/runtime/traces ----------
 
 func TestClient_TracesClear(t *testing.T) {
@@ -1050,5 +1062,318 @@ func TestClient_TracesClear(t *testing.T) {
 	assertRequest(t, req, http.MethodDelete, "/internal/runtime/traces")
 	if len(req.Body) != 0 {
 		t.Errorf("body = %s, want empty", req.Body)
+	}
+}
+
+// ---------- SSE 事件流契约：GET /internal/runtime/events ----------
+
+// sseServer 起一个 SSE 服务端：记录请求头并原样写入 frames（text/event-stream），
+// 之后按 keepOpen 决定阻塞到请求 context 结束（true）还是直接断开连接（false）。
+func sseServer(t *testing.T, frames string, keepOpen bool) (*httptest.Server, *requestRecorder) {
+	t.Helper()
+	rec := &requestRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec.record(capturedRequest{
+			Method:     r.Method,
+			Path:       r.URL.EscapedPath(),
+			Accept:     r.Header.Get("Accept"),
+			AuthValues: r.Header.Values("Authorization"),
+			Body:       body,
+		})
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, frames)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if keepOpen {
+			<-r.Context().Done()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, rec
+}
+
+func TestClient_OpenEvents_MultiEvent(t *testing.T) {
+	// 注释保活行 + 空帧忽略；call 负载拆成两行 data（按 \n 拼接后仍是合法 JSON）。
+	frames := ": keep-alive\n\n" +
+		"event: call\n" +
+		`data: {"id":42,"tool":"bash","source":"cli","task_id":"t-1",` + "\n" +
+		`data: "success":true,"duration_ms":12.5,"error_code":"","started_at":"2024-05-06T07:08:09Z"}` + "\n\n" +
+		"event: task\n" +
+		`data: {"id":"t-1","title":"修复构建","status":"active","phase":"build","updated_at":"2024-05-06T07:08:09Z"}` + "\n\n" +
+		"event: artifact\n" +
+		`data: {"action":"publish","artifact_id":"a-9"}` + "\n\n"
+	srv, rec := sseServer(t, frames, false)
+
+	events, err := NewClient(srv.URL, "tok").OpenEvents(context.Background())
+	if err != nil {
+		t.Fatalf("OpenEvents() error: %v", err)
+	}
+	defer events.Close()
+
+	req := rec.get()
+	assertRequest(t, req, http.MethodGet, "/internal/runtime/events")
+	if req.Accept != "text/event-stream" {
+		t.Errorf("Accept = %q, want text/event-stream", req.Accept)
+	}
+	if len(req.AuthValues) != 1 || req.AuthValues[0] != "Bearer tok" {
+		t.Errorf("Authorization = %v, want [Bearer tok]", req.AuthValues)
+	}
+
+	ev1, err := events.Recv()
+	if err != nil {
+		t.Fatalf("Recv() call event: %v", err)
+	}
+	if ev1.Kind != EventCall {
+		t.Fatalf("kind = %q, want %q", ev1.Kind, EventCall)
+	}
+	call, err := ev1.DecodeCall()
+	if err != nil {
+		t.Fatalf("DecodeCall() error: %v", err)
+	}
+	assertDecoded(t, call, CallEvent{
+		ID: 42, Tool: "bash", Source: "cli", TaskID: "t-1",
+		Success: true, DurationMS: 12.5, StartedAt: ts,
+	})
+
+	ev2, err := events.Recv()
+	if err != nil {
+		t.Fatalf("Recv() task event: %v", err)
+	}
+	if ev2.Kind != EventTask {
+		t.Fatalf("kind = %q, want %q", ev2.Kind, EventTask)
+	}
+	task, err := ev2.DecodeTask()
+	if err != nil {
+		t.Fatalf("DecodeTask() error: %v", err)
+	}
+	assertDecoded(t, task, TaskEvent{
+		ID: "t-1", Title: "修复构建", Status: "active", Phase: "build", UpdatedAt: ts,
+	})
+
+	ev3, err := events.Recv()
+	if err != nil {
+		t.Fatalf("Recv() artifact event: %v", err)
+	}
+	if ev3.Kind != EventArtifact {
+		t.Fatalf("kind = %q, want %q", ev3.Kind, EventArtifact)
+	}
+	art, err := ev3.DecodeArtifact()
+	if err != nil {
+		t.Fatalf("DecodeArtifact() error: %v", err)
+	}
+	assertDecoded(t, art, ArtifactEvent{Action: "publish", ArtifactID: "a-9"})
+}
+
+func TestClient_OpenEvents_PingPassthrough(t *testing.T) {
+	// ping 保活帧保留 kind=ping 透传，由调用方过滤。
+	srv, _ := sseServer(t, "event: ping\ndata: {}\n\n", false)
+
+	events, err := NewClient(srv.URL, "").OpenEvents(context.Background())
+	if err != nil {
+		t.Fatalf("OpenEvents() error: %v", err)
+	}
+	defer events.Close()
+
+	ev, err := events.Recv()
+	if err != nil {
+		t.Fatalf("Recv() error: %v", err)
+	}
+	if ev.Kind != EventPing {
+		t.Errorf("kind = %q, want %q（客户端不丢弃 ping）", ev.Kind, EventPing)
+	}
+	if _, err := ev.DecodePing(); err != nil {
+		t.Errorf("DecodePing() error: %v", err)
+	}
+}
+
+func TestClient_OpenEvents_ContextCancel(t *testing.T) {
+	srv, _ := sseServer(t, "event: call\ndata: {\"id\":1,\"started_at\":\"2024-05-06T07:08:09Z\"}\n\n", true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, err := NewClient(srv.URL, "").OpenEvents(ctx)
+	if err != nil {
+		t.Fatalf("OpenEvents() error: %v", err)
+	}
+	defer events.Close()
+
+	if _, err := events.Recv(); err != nil {
+		t.Fatalf("Recv() first event: %v", err)
+	}
+	cancel()
+	_, err = events.Recv()
+	if err == nil {
+		t.Fatal("Recv() after cancel: want error, got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Recv() err = %v, want 包装 context.Canceled", err)
+	}
+	if errors.Is(err, ErrSSEDisconnected) {
+		t.Errorf("Recv() err = %v, 不应同时是断线错误（ctx 取消可识别）", err)
+	}
+}
+
+func TestClient_OpenEvents_Disconnect(t *testing.T) {
+	// 服务端写完一帧后直接断开（handler 返回、连接关闭）→ 下一次 Recv 报可识别断线错误。
+	srv, _ := sseServer(t, "event: task\ndata: {\"id\":\"t-1\"}\n\n", false)
+
+	events, err := NewClient(srv.URL, "").OpenEvents(context.Background())
+	if err != nil {
+		t.Fatalf("OpenEvents() error: %v", err)
+	}
+	defer events.Close()
+
+	ev, err := events.Recv()
+	if err != nil {
+		t.Fatalf("Recv() first event: %v", err)
+	}
+	if ev.Kind != EventTask {
+		t.Errorf("kind = %q, want %q", ev.Kind, EventTask)
+	}
+	_, err = events.Recv()
+	if err == nil {
+		t.Fatal("Recv() after server close: want error, got nil")
+	}
+	if !errors.Is(err, ErrSSEDisconnected) {
+		t.Errorf("Recv() err = %v, want 包装 ErrSSEDisconnected", err)
+	}
+}
+
+func TestClient_OpenEvents_ClosedStream(t *testing.T) {
+	srv, _ := sseServer(t, "", true)
+
+	events, err := NewClient(srv.URL, "").OpenEvents(context.Background())
+	if err != nil {
+		t.Fatalf("OpenEvents() error: %v", err)
+	}
+	if err := events.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	_, err = events.Recv()
+	if !errors.Is(err, ErrSSEClosed) {
+		t.Errorf("Recv() err = %v, want ErrSSEClosed", err)
+	}
+}
+
+func TestClient_OpenEvents_HTTPError(t *testing.T) {
+	srv, _ := serveJSON(t, http.StatusNotFound, map[string]any{
+		"ok": false, "code": "NOT_FOUND", "error": "no events endpoint",
+	})
+
+	_, err := NewClient(srv.URL, "").OpenEvents(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "NOT_FOUND" || apiErr.Message != "no events endpoint" {
+		t.Errorf("APIError = %+v", apiErr)
+	}
+}
+
+// ---------- 告警契约：GET /internal/runtime/alerts ----------
+
+func TestClient_Alerts(t *testing.T) {
+	srv, rec := serveJSON(t, http.StatusOK, AlertsResponse{
+		OK:     true,
+		Source: "agentdock-api",
+		Alerts: []Alert{
+			{
+				ID:        "al-1",
+				Severity:  AlertSeverityDanger,
+				Kind:      AlertKindErrorRate,
+				Message:   "错误率过高",
+				Detail:    "5 分钟内错误率 42%",
+				FirstSeen: ts,
+				LastSeen:  ts.Add(2 * time.Minute),
+				Active:    true,
+			},
+			{
+				ID:        "al-2",
+				Severity:  AlertSeverityWarning,
+				Kind:      AlertKindTraceDisk,
+				Message:   "追踪磁盘占用偏高",
+				FirstSeen: ts,
+				LastSeen:  ts,
+				Active:    true,
+			},
+		},
+		ResolvedCount: 3,
+		Rules: []AlertRule{
+			{Kind: AlertKindErrorRate, Threshold: 0.3, Enabled: true},
+			{Kind: AlertKindTraceDisk, Threshold: 512, Enabled: false},
+			{Kind: AlertKindTaskBlocked, Threshold: 3, Enabled: true},
+		},
+	})
+
+	got, err := NewClient(srv.URL, "").Alerts()
+	if err != nil {
+		t.Fatalf("Alerts() error: %v", err)
+	}
+	want := &AlertsResponse{
+		OK:     true,
+		Source: "agentdock-api",
+		Alerts: []Alert{
+			{
+				ID:        "al-1",
+				Severity:  "danger",
+				Kind:      "error_rate",
+				Message:   "错误率过高",
+				Detail:    "5 分钟内错误率 42%",
+				FirstSeen: ts,
+				LastSeen:  ts.Add(2 * time.Minute),
+				Active:    true,
+			},
+			{
+				ID:        "al-2",
+				Severity:  "warning",
+				Kind:      "trace_disk",
+				Message:   "追踪磁盘占用偏高",
+				FirstSeen: ts,
+				LastSeen:  ts,
+				Active:    true,
+			},
+		},
+		ResolvedCount: 3,
+		Rules: []AlertRule{
+			{Kind: "error_rate", Threshold: 0.3, Enabled: true},
+			{Kind: "trace_disk", Threshold: 512, Enabled: false},
+			{Kind: "task_blocked", Threshold: 3, Enabled: true},
+		},
+	}
+	assertDecoded(t, got, want)
+	req := rec.get()
+	assertRequest(t, req, http.MethodGet, "/internal/runtime/alerts")
+}
+
+func TestClient_Alerts_Error(t *testing.T) {
+	srv, _ := serveJSON(t, http.StatusServiceUnavailable, map[string]any{
+		"ok": false, "code": "not_ready", "error": "warming up",
+	})
+
+	_, err := NewClient(srv.URL, "").Alerts()
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusServiceUnavailable || apiErr.Code != "not_ready" || apiErr.Message != "warming up" {
+		t.Errorf("APIError = %+v, want StatusCode=503 Code=not_ready Message=warming up", apiErr)
+	}
+}
+
+func TestClient_Alerts_OKFalseBody(t *testing.T) {
+	// HTTP 200 但信封 ok:false → *APIError。
+	srv, _ := serveJSON(t, http.StatusOK, map[string]any{
+		"ok": false, "code": "ALERTS_DISABLED", "error": "alerts disabled",
+	})
+
+	_, err := NewClient(srv.URL, "").Alerts()
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.Code != "ALERTS_DISABLED" || apiErr.Message != "alerts disabled" {
+		t.Errorf("APIError = %+v", apiErr)
 	}
 }

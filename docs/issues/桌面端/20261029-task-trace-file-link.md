@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-task-trace-file-link"
 title: "任务 ↔ 调用 ↔ 文件关联（task_id 贯穿 trace）"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "桌面端"
@@ -65,3 +65,4 @@ tags: ["observability", "tasks", "trace", "priority-p1"]
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态变更 → done，备注: v2 交付（217a475）：X-AgentDock-Task 头注入 context，task_id 进 ExecutionRecord/TraceRecord/JSONL 并可搜；GET /tasks/{id}/activity 聚合；任务详情关联区块已上 MyGo 控制台

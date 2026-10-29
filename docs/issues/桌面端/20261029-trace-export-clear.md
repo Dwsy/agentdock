@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-trace-export-clear"
 title: "Trace 导出与清空"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "桌面端"
@@ -57,3 +57,4 @@ trace 目前只能看。磁盘 JSONL 保留 3 天/2000 条，用户无法归档�
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态变更 → done，备注: v2 交付（217a475）：GET /traces/export?format=json|csv（CSV 标准转义、payload 换行转 \n）、DELETE /traces（内存+磁盘一致清空，返回 cleared）；控制台导出/清空已上

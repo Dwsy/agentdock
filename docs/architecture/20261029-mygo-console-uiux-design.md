@@ -542,16 +542,9 @@ kit 位于 `desktop/console/internal/ui/kit`，只做组合与领域语义，
 
 ## 8. 非目标（P1/P2 留白）
 
-| 项 | 阶段 | 说明 |
-|---|---|---|
-| 全局搜索命令面板（⌘K） | P1 | 另立 global-search issue |
-| 写操作页（能力开关、任务操作、发布撤销等） | P1 | 另立 console-write-pages |
-| 多设备 / 机群视图 | P2 | 另立 fleet-view issue |
-| 告警与事件订阅 | P2 | 另立 events-and-alerts issue |
-| 系统集成（托盘/服务/权限/更新） | P1 | 另立 system-integration |
-| SSE / 推送刷新 | P2 | 数据层先轮询（console-data-layer 决策） |
-| 深链、多窗口 | P2 | 待 mygo-shell-spike 结论 |
-| 手动主题切换、i18n 文案框架 | P2 | 本期仅系统外观自适应 |
+> 状态更新（2026-10-29）：本节列出的 ⌘K 全局搜索、写操作页、告警
+> 已在 v2/v3 交付（见 docs/pr/跨平台UI/20261029-mygo-console-v2.md）；
+> 仍留白：多设备视图（暂缓，见路线图 B7 说明）、SSE 之外的推送通道。
 
 ## 关联
 

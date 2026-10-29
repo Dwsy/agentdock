@@ -189,7 +189,7 @@ func (a *App) ensureSearchData() {
 	}
 	a.searchAggOnce = true
 	a.mu.Unlock()
-	go a.fetchSearchData()
+	a.spawn(a.fetchSearchData)
 }
 
 // fetchSearchData 聚合拉取搜索所需的各页缓存（只补缺失的），完成后

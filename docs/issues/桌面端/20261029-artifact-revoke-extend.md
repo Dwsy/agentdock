@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-artifact-revoke-extend"
 title: "发布物撤销与延长有效期"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "桌面端"
@@ -60,3 +60,4 @@ Published 页面支持立即撤销链接与延长有效期；撤销后链接必�
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态变更 → done，备注: v2 交付（217a475）：DELETE /artifacts/{id}（ErrNotFound）、POST /artifacts/{id}/extend（1..720h、MaxRetention 钳制、重签 URL、旧链即失效）；控制台发布页操作已上

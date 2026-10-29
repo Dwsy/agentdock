@@ -67,5 +67,27 @@ func (a *App) pageOverview(c *ui.Context) {
 				boolText(st.AuthEnabled), boolText(st.BrowserEnabled),
 				boolText(st.MemoryEnabled), boolText(st.NexusEnabled)))
 		}
+
+		a.recentEvents(c)
 	})
+}
+
+// recentEvents 渲染概览页"实时事件"小节：最近 rtEventLimit 条
+// call/task/artifact 事件时间线（时间 + kind + 摘要），无事件时提示等待。
+func (a *App) recentEvents(c *ui.Context) {
+	a.mu.Lock()
+	events := append([]rtEvent(nil), a.events...)
+	a.mu.Unlock()
+	ui.Text(c, "实时事件").Bold().FontSize(13)
+	if len(events) == 0 {
+		ui.Text(c, "等待实时事件…").FontSize(12).TextColor(c.Theme().TextMuted)
+		return
+	}
+	for _, ev := range events {
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, kit.FormatTime(ev.At)).Width(150).FontSize(11).TextColor(c.Theme().TextMuted).SingleLine()
+			kit.StatusChip(c, ev.Kind, eventTone(ev.Kind))
+			ui.Text(c, ev.Summary).Grow(1).FontSize(12).Wrap()
+		})
+	}
 }

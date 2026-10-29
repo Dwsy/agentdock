@@ -120,11 +120,15 @@ func (a *App) pageTraces(c *ui.Context) {
 	}).Fill()
 }
 
-// pollTraces 实现追踪页 5s 自动轮询：自动刷新开启时每帧用 c.After 安排
-// 未来帧，渲染时以 tracePollAt（上次触发拉取的帧时钟）做时间戳去重，
-// 过期则触发后台 refresh。只在追踪页可见时被调用，其他页不轮询。
+// pollTraces 实现追踪页 5s 自动轮询（SSE 断开/未接入时的兜底）：自动刷新
+// 开启且 SSE 未连接时每帧用 c.After 安排未来帧，渲染时以 tracePollAt（上次
+// 触发拉取的帧时钟）做时间戳去重，过期则触发后台 refresh。SSE 正常时不轮询
+// （事件到达直接惰性失效缓存）。只在追踪页可见时被调用。
 func (a *App) pollTraces(c *ui.Context) {
-	if !a.traceAuto {
+	a.mu.Lock()
+	realtime := a.realtime
+	a.mu.Unlock()
+	if !a.traceAuto || realtime {
 		return
 	}
 	now := c.Now()
@@ -185,7 +189,7 @@ func (a *App) exportTraces(format string) {
 	a.mu.Lock()
 	query, tool, source, status := a.traceQuery, a.traceTool, a.traceSource, a.traceStatus
 	a.mu.Unlock()
-	go func() {
+	a.spawn(func() {
 		data, _, filename, err := a.backend.TracesExport(format, query, selectFilter(tool), selectFilter(source), tracesStatusQuery(status), 200)
 		var path string
 		if err == nil {
@@ -201,7 +205,7 @@ func (a *App) exportTraces(format string) {
 		}
 		a.mu.Unlock()
 		a.notify()
-	}()
+	})
 }
 
 // saveExportFile 把导出内容写入 os.UserCacheDir()/agentdock-console/exports/，
@@ -228,7 +232,7 @@ func saveExportFile(format, filename string, data []byte) (string, error) {
 
 // clearTraces 后台清空追踪记录；成功后 Toast 反馈并刷新列表。
 func (a *App) clearTraces() {
-	go func() {
+	a.spawn(func() {
 		n, err := a.backend.TracesClear()
 		a.mu.Lock()
 		if err != nil {
@@ -242,7 +246,7 @@ func (a *App) clearTraces() {
 			a.reload(pageTraces)
 		}
 		a.notify()
-	}()
+	})
 }
 
 // traceAutoControls 渲染追踪页工具条上的"自动刷新"开关（ui.Switch，默认开）

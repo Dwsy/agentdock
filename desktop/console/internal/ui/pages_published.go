@@ -180,7 +180,7 @@ func parseExtendHours(s string) (int, error) {
 
 // revokeArtifact 后台撤销产物；成功后 Toast 反馈并刷新列表。
 func (a *App) revokeArtifact(id string) {
-	go func(id string) {
+	a.spawn(func() {
 		err := a.backend.ArtifactRevoke(id)
 		a.mu.Lock()
 		if err != nil {
@@ -194,12 +194,12 @@ func (a *App) revokeArtifact(id string) {
 			a.reload(pagePublished)
 		}
 		a.notify()
-	}(id)
+	})
 }
 
 // extendArtifact 后台延期产物；成功后 Toast 反馈并刷新列表（过期时间更新）。
 func (a *App) extendArtifact(id string, hours int) {
-	go func(id string, hours int) {
+	a.spawn(func() {
 		_, err := a.backend.ArtifactExtend(id, hours)
 		a.mu.Lock()
 		if err != nil {
@@ -213,5 +213,5 @@ func (a *App) extendArtifact(id string, hours int) {
 			a.reload(pagePublished)
 		}
 		a.notify()
-	}(id, hours)
+	})
 }

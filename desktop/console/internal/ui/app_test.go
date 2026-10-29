@@ -26,6 +26,7 @@ type stubBackend struct {
 	task      *runtimeapi.TaskDetail
 	activity  *runtimeapi.TaskActivity
 	artifacts *runtimeapi.Artifacts
+	alerts    *runtimeapi.AlertsResponse // 告警响应（nil 时返回空告警）
 
 	// 操作桩：错误与响应可注入，调用被记录。
 	taskActionErr error
@@ -35,13 +36,14 @@ type stubBackend struct {
 	exportErr     error
 	clearCount    int
 
-	taskActions []runtimeapi.TaskActionsRequest
-	taskActIDs  []string
-	revoked     []string
-	extended    []int
-	clears      int
-	exports     []string // 每次导出的 format
-	taskFetches int      // Tasks() 拉取次数（验证操作后刷新任务列表）
+	taskActions  []runtimeapi.TaskActionsRequest
+	taskActIDs   []string
+	revoked      []string
+	extended     []int
+	clears       int
+	exports      []string // 每次导出的 format
+	taskFetches  int      // Tasks() 拉取次数（验证操作后刷新任务列表）
+	alertFetches int      // Alerts() 拉取次数（验证节流拉取）
 }
 
 func (s *stubBackend) fail() error {
@@ -195,6 +197,32 @@ func (s *stubBackend) tasksFetches() int {
 	return s.taskFetches
 }
 
+// Alerts 实现 Backend：返回注入的告警响应（默认空告警），并计数拉取次数。
+func (s *stubBackend) Alerts() (*runtimeapi.AlertsResponse, error) {
+	if err := s.fail(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alertFetches++
+	if s.alerts != nil {
+		return s.alerts, nil
+	}
+	return &runtimeapi.AlertsResponse{OK: true, Source: "agentdock-api"}, nil
+}
+
+func (s *stubBackend) alertsFetches() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.alertFetches
+}
+
+func (s *stubBackend) setAlerts(resp *runtimeapi.AlertsResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.alerts = resp
+}
+
 func (s *stubBackend) Task(id string) (*runtimeapi.TaskDetail, error) {
 	if err := s.fail(); err != nil {
 		return nil, err
@@ -226,13 +254,19 @@ func (s *stubBackend) Artifacts() (*runtimeapi.Artifacts, error) {
 	return &runtimeapi.Artifacts{}, nil
 }
 
-// newTestApp 构造 App + Tester，后台拉取完成经由 notified 频道通知。
+// newTestApp 构造 App + Tester，后台拉取完成经由 notified 频道通知；
+// 测试收尾自动 Close（停止实时事件流并等待后台 goroutine，防泄漏）。
 func newTestApp(t *testing.T, backend runtimeapi.Backend) (*App, *ui.Tester, chan struct{}) {
 	t.Helper()
 	app := New(backend)
+	t.Cleanup(app.Close)
 	notified := make(chan struct{}, 32)
 	app.SetInvalidator(func() {
-		notified <- struct{}{}
+		// 非阻塞投递：满则丢弃，避免后台 goroutine 反压阻塞 Close 回收。
+		select {
+		case notified <- struct{}{}:
+		default:
+		}
 	})
 	tt := ui.NewTester(app.View, 1180, 740)
 	return app, tt, notified

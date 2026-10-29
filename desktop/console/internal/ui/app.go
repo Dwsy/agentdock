@@ -10,6 +10,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -138,12 +139,33 @@ type App struct {
 	anLoad loadState
 	anData *runtimeapi.Analytics
 	anSort int // ToolStats 排序：0 调用次数 / 1 错误率 / 2 P95 耗时
+
+	// 实时事件流（SSE）：backend 实现 EventsOpener（即 runtimeapi.Client）时启用，
+	// 断线指数退避重连；Close/Stop 收尾，后台 goroutine 统一走 bgWG 生命周期。
+	openEvents  func(context.Context) (runtimeapi.Events, error)
+	rtCtx       context.Context
+	rtCancel    context.CancelFunc
+	closeOnce   sync.Once
+	bgWG        sync.WaitGroup // 后台 goroutine（SSE/拉取/告警）生命周期
+	realtime    bool           // SSE 连接正常；false = 重连中或未接入（轮询兜底）
+	rtConnected bool           // 曾成功连接过（重连成功后全量刷新的判定）
+	rtPingAt    time.Time      // 最近一次 ping 保活的墙钟时间
+	events      []rtEvent      // 实时事件时间线（最新在前，最多 rtEventLimit 条）
+
+	// 顶部告警横幅：进入页面/收到事件时节流拉取 Alerts()（alertsFetchEvery 一次）。
+	alerts          *runtimeapi.AlertsResponse
+	alertsFetchedAt time.Time // 上次告警拉取完成的墙钟时间
+	alertsFetching  bool      // 告警拉取在途
 }
 
-// New 创建页面层根组件。
+// New 创建页面层根组件。backend 实现 runtimeapi.EventsOpener（即 Client）时
+// 同时启动实时事件流后台循环；测试/收尾用 Close（或 Stop）停掉并等待退出。
 func New(backend runtimeapi.Backend) *App {
-	return &App{
+	rtCtx, rtCancel := context.WithCancel(context.Background())
+	a := &App{
 		backend:       backend,
+		rtCtx:         rtCtx,
+		rtCancel:      rtCancel,
 		page:          pageOverview,
 		secObs:        true,
 		secAssets:     true,
@@ -165,6 +187,35 @@ func New(backend runtimeapi.Backend) *App {
 		actDiffOpen:   map[string]bool{},
 		traceAuto:     true,
 	}
+	if opener, ok := backend.(runtimeapi.EventsOpener); ok {
+		a.openEvents = opener.OpenEvents
+		a.bgWG.Add(1)
+		go a.runEvents()
+	}
+	return a
+}
+
+// Close 停止实时事件流并等待后台 goroutine 退出（供 main 与测试收尾）；幂等。
+// 适合绑定窗口 OnClosed / 进程退出路径。
+func (a *App) Close() {
+	if a.rtCancel != nil {
+		a.closeOnce.Do(a.rtCancel)
+	}
+	a.bgWG.Wait()
+}
+
+// Stop 是 Close 的别名（停止后台活动）。
+func (a *App) Stop() {
+	a.Close()
+}
+
+// spawn 启动一个受 Close 生命周期管理的后台 goroutine。
+func (a *App) spawn(fn func()) {
+	a.bgWG.Add(1)
+	go func() {
+		defer a.bgWG.Done()
+		fn()
+	}()
 }
 
 // SetInvalidator 注入重绘回调（main 里绑定 window.Invalidate）。
@@ -222,11 +273,13 @@ func (a *App) sidebar(c *ui.Context) {
 	}).Width(216).Shrink(0)
 }
 
-// toolbar 是页面顶部工具条：页面标题 + 手动刷新按钮；追踪页另有
-// "自动刷新"开关与上次刷新时间（该页 5s 自动轮询）。
+// toolbar 是页面顶部工具条：页面标题 + 实时连接指示灯 + 手动刷新按钮；
+// 追踪页另有 "自动刷新"开关与上次刷新时间（该页 5s 自动轮询）。
 func (a *App) toolbar(c *ui.Context) {
 	ui.Row(c).Fill().AlignItems(ui.Center).Gap(8).Children(func() {
 		ui.Text(c, a.pageTitle()).Bold().FontSize(16).Grow(1)
+		label, tone := a.realtimeIndicator()
+		kit.StatusChip(c, label, tone)
 		if a.page == pageTraces {
 			a.traceAutoControls(c)
 		}
@@ -240,9 +293,12 @@ func (a *App) toolbar(c *ui.Context) {
 	})
 }
 
-// renderPage 按导航选择分发到各页渲染。
+// renderPage 按导航选择分发到各页渲染；顶部先渲染活跃告警横幅，
+// 并在进入页面时节流拉取告警。
 func (a *App) renderPage(c *ui.Context) {
 	a.ensureLoaded(a.page)
+	a.maybeFetchAlerts()
+	a.renderAlertBanner(c)
 	switch a.page {
 	case pageOverview:
 		a.pageOverview(c)
@@ -317,7 +373,7 @@ func (a *App) ensureLoaded(page string) {
 	}
 	ls.loading = true
 	a.mu.Unlock()
-	go a.refresh(page)
+	a.spawn(func() { a.refresh(page) })
 }
 
 // reload 手动刷新一页；若已有拉取在途则排队一次补拉。
@@ -336,7 +392,7 @@ func (a *App) reload(page string) {
 	ls.loading = true
 	ls.err = nil
 	a.mu.Unlock()
-	go a.refresh(page)
+	a.spawn(func() { a.refresh(page) })
 }
 
 // refresh 在后台拉取一页数据，锁内写缓存后 invalidate()。页面渲染只读缓存。
@@ -460,7 +516,7 @@ func (a *App) loadTaskDetail(id string) {
 		a.taskDetail = nil
 		a.taskDetailLoad = loadState{loading: true}
 		a.mu.Unlock()
-		go func(id string) {
+		a.spawn(func() {
 			d, err := a.backend.Task(id)
 			a.mu.Lock()
 			if a.taskDetailID == id {
@@ -469,7 +525,7 @@ func (a *App) loadTaskDetail(id string) {
 			}
 			a.mu.Unlock()
 			a.notify()
-		}(id)
+		})
 	}
 	a.loadTaskActivity(id)
 }
@@ -488,7 +544,7 @@ func (a *App) loadTaskActivity(id string) {
 	a.taskActivity = nil
 	a.taskActLoad = loadState{loading: true}
 	a.mu.Unlock()
-	go func(id string) {
+	a.spawn(func() {
 		act, err := a.backend.TaskActivity(id)
 		a.mu.Lock()
 		if a.taskActID == id {
@@ -497,7 +553,7 @@ func (a *App) loadTaskActivity(id string) {
 		}
 		a.mu.Unlock()
 		a.notify()
-	}(id)
+	})
 }
 
 // reloadTaskDetail 操作成功后强制重拉详情与活动缓存。

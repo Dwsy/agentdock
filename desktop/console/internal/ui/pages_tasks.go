@@ -230,7 +230,7 @@ func (a *App) runTaskAction(action string) {
 	if id == "" {
 		return
 	}
-	go func(id string) {
+	a.spawn(func() {
 		_, err := a.backend.TaskActions(id, runtimeapi.TaskActionsRequest{Action: action})
 		a.mu.Lock()
 		if err != nil {
@@ -249,7 +249,7 @@ func (a *App) runTaskAction(action string) {
 			a.reload(pageTasks)
 		}
 		a.notify()
-	}(id)
+	})
 }
 
 // taskActionDoneText 返回任务操作成功的 Toast 文案。

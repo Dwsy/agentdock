@@ -105,6 +105,7 @@ private struct TrayRecentCall: Identifiable {
     let tool: String
     let success: Bool
     let durationMS: Double
+    let startedAt: String
 }
 
 /// 拉取失败的统一原因。
@@ -254,7 +255,8 @@ private final class TrayPopoverModel: ObservableObject {
                     id: call.id,
                     tool: call.tool,
                     success: call.success,
-                    durationMS: call.durationMS
+                    durationMS: call.durationMS,
+                    startedAt: call.startedAt
                 )
             }
         )
@@ -582,19 +584,20 @@ private struct TrayPopoverView: View {
                 .truncationMode(.middle)
                 .help(call.tool)
             Spacer(minLength: 8)
-            Text(durationText(call.durationMS))
-                .font(.system(size: 10.5, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            HStack(spacing: 4) {
+                Text(RuntimeActivityFormat.duration(call.durationMS))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .monospacedDigit()
+                Text("·")
+                    .foregroundStyle(.tertiary)
+                // 相对时间让「几秒前发生」在托盘里可读，不只靠刷新倒推。
+                Text(RuntimeActivityFormat.relativeTime(call.startedAt))
+                    .font(.system(size: 10.5))
+            }
+            .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-    }
-
-    private func durationText(_ milliseconds: Double) -> String {
-        if milliseconds < 1_000 { return String(format: "%.0f ms", milliseconds) }
-        if milliseconds < 60_000 { return String(format: "%.2f s", milliseconds / 1_000) }
-        return String(format: "%.1f min", milliseconds / 60_000)
     }
 
     // MARK: Actions

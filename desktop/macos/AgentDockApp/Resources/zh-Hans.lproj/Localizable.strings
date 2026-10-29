@@ -544,6 +544,7 @@
 "Local" = "本机";
 "Just now" = "刚刚";
 "%@ · default" = "默认 · %@";
+"%d sec ago" = "%d 秒前";
 "%d min ago" = "%d 分钟前";
 "%d hr ago" = "%d 小时前";
 

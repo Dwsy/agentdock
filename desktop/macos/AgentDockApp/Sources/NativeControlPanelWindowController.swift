@@ -1587,60 +1587,6 @@ private struct CapabilitiesView: View {
     }
 }
 
-private enum RuntimeActivityFormat {
-    private static let fractionalDateFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-    private static let basicDateFormatter = ISO8601DateFormatter()
-
-    static func duration(_ milliseconds: Double) -> String {
-        if milliseconds < 1_000 { return String(format: "%.0f ms", milliseconds) }
-        if milliseconds < 60_000 { return String(format: "%.2f s", milliseconds / 1_000) }
-        return String(format: "%.1f min", milliseconds / 60_000)
-    }
-
-    static func bytes(_ value: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory)
-    }
-
-    static func uptime(_ milliseconds: Int64) -> String {
-        let seconds = max(0, milliseconds / 1_000)
-        if seconds < 60 { return "\(seconds) s" }
-        if seconds < 3_600 { return "\(seconds / 60) min" }
-        if seconds < 86_400 { return "\(seconds / 3_600) h" }
-        return "\(seconds / 86_400) d"
-    }
-
-    static func source(_ value: String) -> String {
-        switch value.lowercased() {
-        case "nexus": return L10n.text("Remote")
-        case "internal": return L10n.text("Local")
-        case "mcp": return "MCP"
-        default: return value
-        }
-    }
-
-    static func relativeTime(_ value: String) -> String {
-        guard let date = fractionalDateFormatter.date(from: value) ?? basicDateFormatter.date(from: value) else { return value }
-        let seconds = max(0, Int(Date().timeIntervalSince(date)))
-        if seconds < 60 { return L10n.text("Just now") }
-        if seconds < 3_600 { return L10n.format("%d min ago", seconds / 60) }
-        return L10n.format("%d hr ago", seconds / 3_600)
-    }
-
-    static func stage(_ name: String) -> String {
-        switch name {
-        case "mcp.refresh": return L10n.text("MCP initialize & discover")
-        case "mcp.remote_call": return L10n.text("MCP remote call")
-        case "command.start": return L10n.text("Command start")
-        case "command.foreground_wait": return L10n.text("Foreground wait")
-        default: return name
-        }
-    }
-}
-
 private struct RuntimeActivityCallRow: View {
     let call: RuntimeAnalyticsCall
     @State private var isExpanded = false

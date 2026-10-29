@@ -544,6 +544,7 @@
 "Local" = "Local";
 "Just now" = "Just now";
 "%@ · default" = "%@ · default";
+"%d sec ago" = "%d sec ago";
 "%d min ago" = "%d min ago";
 "%d hr ago" = "%d hr ago";
 

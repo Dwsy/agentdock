@@ -20,7 +20,11 @@ func (a *App) pageFiles(c *ui.Context) {
 
 	kit.SectionHeader(c, "文件变更", "工具调用产生的文件改动")
 	ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
-		if ui.SearchField(c, &a.fileQuery).Label("搜索路径").Width(260).Changed() {
+		// 路径查询会被后台拉取（fetchFiles）读取：绑定局部副本，提交时写回锁内。
+		if ui.SearchField(c, &query).Label("搜索路径").Width(260).Changed() {
+			a.mu.Lock()
+			a.fileQuery = query
+			a.mu.Unlock()
 			a.reload(pageFiles)
 		}
 	})

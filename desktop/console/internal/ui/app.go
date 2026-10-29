@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 
@@ -75,6 +76,17 @@ type App struct {
 	taskDetail     *runtimeapi.TaskDetail
 	taskDetailID   string
 
+	// 任务详情关联活动（本任务的调用与文件）。
+	taskActLoad  loadState
+	taskActivity *runtimeapi.TaskActivity
+	taskActID    string
+	actDiffOpen  map[string]bool // 活动文件变更 diff 展开状态
+
+	// 任务操作（checkpoint/complete/delete）反馈；msg/err 由后台 goroutine 写入、渲染期取走。
+	taskDeleteAsk bool // 删除二次确认（AlertDialog 开关，仅 UI 线程）
+	taskActionMsg string
+	taskActionErr error
+
 	// 文件变更页。
 	fileLoad  loadState
 	fileData  *runtimeapi.FileChanges
@@ -88,6 +100,12 @@ type App struct {
 	pubSel   int
 	pubSplit float32
 
+	// 发布产物操作（撤销/延期）反馈；Input/Ask 仅 UI 线程，msg/err 后台写入。
+	pubRevokeAsk   bool // 撤销二次确认（AlertDialog 开关）
+	pubExtendInput string
+	pubActionMsg   string
+	pubActionErr   error
+
 	// 调用追踪页。
 	traceLoad     loadState
 	traceData     *runtimeapi.Traces
@@ -98,6 +116,23 @@ type App struct {
 	traceSel      int
 	traceSplit    float32
 	traceDiffOpen map[string]bool // FileChanges 展开状态
+
+	// 调用追踪页 5s 自动轮询。
+	traceAuto        bool      // "自动刷新"开关（默认开），关闭后停止轮询
+	tracePollAt      time.Time // 上次触发轮询拉取的帧时钟（c.Now()），时间戳去重
+	traceRefreshedAt time.Time // 上次拉取完成的墙钟时间，工具条展示
+
+	// 追踪页导出/清空；Ask 仅 UI 线程，路径/msg/err 后台写入。
+	traceClearAsk   bool // 清空二次确认（AlertDialog 开关）
+	traceExportPath string
+	traceActionMsg  string
+	traceActionErr  error
+
+	// ⌘K 全局搜索。
+	searchOpen    bool
+	searchQuery   string
+	searchSel     int  // 扁平结果列表的选中索引
+	searchAggOnce bool // 缓存聚合拉取已发起过（缺失时只拉一次）
 
 	// 统计页。
 	anLoad loadState
@@ -127,6 +162,8 @@ func New(backend runtimeapi.Backend) *App {
 		traceSource:   "全部",
 		traceStatus:   "全部",
 		traceDiffOpen: map[string]bool{},
+		actDiffOpen:   map[string]bool{},
+		traceAuto:     true,
 	}
 }
 
@@ -149,8 +186,13 @@ func (a *App) notify() {
 
 // ---------- 页面骨架 ----------
 
-// View 是根视图：左侧侧边栏（观测/资产/工作 三组）+ 右侧工具条与页面主体。
+// View 是根视图：左侧侧边栏（观测/资产/工作 三组）+ 右侧工具条与页面主体；
+// 根上挂 ⌘K 窗口级快捷键打开全局搜索浮层。
 func (a *App) View(c *ui.Context) {
+	c.OnShortcut(ui.Cmd, ui.KeyK, func() {
+		a.searchOpen = true
+		a.searchSel = 0
+	})
 	ui.Row(c).Fill().Children(func() {
 		a.sidebar(c)
 		ui.Column(c).Grow(1).Padding(16).Gap(12).Children(func() {
@@ -158,6 +200,7 @@ func (a *App) View(c *ui.Context) {
 			a.renderPage(c)
 		})
 	})
+	a.renderSearch(c)
 }
 
 // sidebar 是左侧导航：三组页面，SidebarItem 带 kit 图标。
@@ -179,10 +222,14 @@ func (a *App) sidebar(c *ui.Context) {
 	}).Width(216).Shrink(0)
 }
 
-// toolbar 是页面顶部工具条：页面标题 + 手动刷新按钮。
+// toolbar 是页面顶部工具条：页面标题 + 手动刷新按钮；追踪页另有
+// "自动刷新"开关与上次刷新时间（该页 5s 自动轮询）。
 func (a *App) toolbar(c *ui.Context) {
 	ui.Row(c).Fill().AlignItems(ui.Center).Gap(8).Children(func() {
 		ui.Text(c, a.pageTitle()).Bold().FontSize(16).Grow(1)
+		if a.page == pageTraces {
+			a.traceAutoControls(c)
+		}
 		btn := ui.Button(c, "").Children(func() {
 			ui.Icon(c, kit.IconRefresh())
 			ui.Text(c, "刷新")
@@ -394,9 +441,13 @@ func (a *App) fetchTraces() {
 	a.mu.Unlock()
 	recs, err := a.backend.Traces(query, selectFilter(tool), selectFilter(source), tracesStatusQuery(status), 200)
 	a.done(pageTraces, func() { a.traceData = recs }, err)
+	a.mu.Lock()
+	a.traceRefreshedAt = time.Now()
+	a.mu.Unlock()
 }
 
-// loadTaskDetail 拉取选中任务的详情（切换选中行时触发）。
+// loadTaskDetail 拉取选中任务的详情与关联活动（切换选中行时触发）；
+// 活动拉取独立缓存（taskActID/taskActLoad），互不阻塞。
 func (a *App) loadTaskDetail(id string) {
 	if id == "" {
 		return
@@ -404,22 +455,75 @@ func (a *App) loadTaskDetail(id string) {
 	a.mu.Lock()
 	if a.taskDetailID == id && (a.taskDetailLoad.loading || (a.taskDetailLoad.loaded && a.taskDetailLoad.err == nil)) {
 		a.mu.Unlock()
+	} else {
+		a.taskDetailID = id
+		a.taskDetail = nil
+		a.taskDetailLoad = loadState{loading: true}
+		a.mu.Unlock()
+		go func(id string) {
+			d, err := a.backend.Task(id)
+			a.mu.Lock()
+			if a.taskDetailID == id {
+				a.taskDetail = d
+				a.taskDetailLoad = loadState{loaded: true, err: err}
+			}
+			a.mu.Unlock()
+			a.notify()
+		}(id)
+	}
+	a.loadTaskActivity(id)
+}
+
+// loadTaskActivity 拉取任务关联的调用与文件变更（详情底部区块）。
+func (a *App) loadTaskActivity(id string) {
+	if id == "" {
 		return
 	}
-	a.taskDetailID = id
-	a.taskDetail = nil
-	a.taskDetailLoad = loadState{loading: true}
+	a.mu.Lock()
+	if a.taskActID == id && (a.taskActLoad.loading || (a.taskActLoad.loaded && a.taskActLoad.err == nil)) {
+		a.mu.Unlock()
+		return
+	}
+	a.taskActID = id
+	a.taskActivity = nil
+	a.taskActLoad = loadState{loading: true}
 	a.mu.Unlock()
 	go func(id string) {
-		d, err := a.backend.Task(id)
+		act, err := a.backend.TaskActivity(id)
 		a.mu.Lock()
-		if a.taskDetailID == id {
-			a.taskDetail = d
-			a.taskDetailLoad = loadState{loaded: true, err: err}
+		if a.taskActID == id {
+			a.taskActivity = act
+			a.taskActLoad = loadState{loaded: true, err: err}
 		}
 		a.mu.Unlock()
 		a.notify()
 	}(id)
+}
+
+// reloadTaskDetail 操作成功后强制重拉详情与活动缓存。
+func (a *App) reloadTaskDetail(id string) {
+	a.mu.Lock()
+	if a.taskDetailID == id {
+		a.taskDetailLoad = loadState{}
+	}
+	if a.taskActID == id {
+		a.taskActLoad = loadState{}
+	}
+	a.mu.Unlock()
+	a.loadTaskDetail(id)
+}
+
+// dropTaskDetail 丢弃任务详情缓存（任务删除后不再展示）。
+func (a *App) dropTaskDetail() {
+	a.mu.Lock()
+	a.taskDetailID = ""
+	a.taskDetail = nil
+	a.taskDetailLoad = loadState{}
+	a.taskActID = ""
+	a.taskActivity = nil
+	a.taskActLoad = loadState{}
+	a.mu.Unlock()
+	a.taskSel = -1
 }
 
 // ---------- 三态与小工具 ----------

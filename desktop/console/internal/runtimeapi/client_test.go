@@ -3,6 +3,7 @@ package runtimeapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,11 +18,13 @@ import (
 // ---------- 测试脚手架 ----------
 
 type capturedRequest struct {
-	Method     string
-	Path       string // URL.EscapedPath()，用于校验路径转义
-	RawQuery   string
-	Query      url.Values
-	AuthValues []string // Authorization 头原值，用于校验 Bearer 存在/缺失
+	Method      string
+	Path        string // URL.EscapedPath()，用于校验路径转义
+	RawQuery    string
+	Query       url.Values
+	AuthValues  []string // Authorization 头原值，用于校验 Bearer 存在/缺失
+	ContentType string   // Content-Type 头原值（POST/DELETE 带 JSON 体时应为 application/json）
+	Body        []byte   // 请求体原值，用于校验 JSON 字段逐字传递
 }
 
 type requestRecorder struct {
@@ -46,12 +49,15 @@ func serve(t *testing.T, status int, body []byte, contentType string) (*httptest
 	t.Helper()
 	rec := &requestRecorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqBody, _ := io.ReadAll(r.Body)
 		rec.record(capturedRequest{
-			Method:     r.Method,
-			Path:       r.URL.EscapedPath(),
-			RawQuery:   r.URL.RawQuery,
-			Query:      r.URL.Query(),
-			AuthValues: r.Header.Values("Authorization"),
+			Method:      r.Method,
+			Path:        r.URL.EscapedPath(),
+			RawQuery:    r.URL.RawQuery,
+			Query:       r.URL.Query(),
+			AuthValues:  r.Header.Values("Authorization"),
+			ContentType: r.Header.Get("Content-Type"),
+			Body:        reqBody,
 		})
 		if contentType != "" {
 			w.Header().Set("Content-Type", contentType)
@@ -133,12 +139,12 @@ func TestClient_Status(t *testing.T) {
 
 func TestClient_Overview(t *testing.T) {
 	want := Overview{
-		OK:     true,
-		Source: "memory",
-		Tasks:  OverviewTasks{Active: 1, Completed: 2, Blocked: 3, ActiveRecent24h: 4},
-		Skills: OverviewCount{Count: 5},
+		OK:      true,
+		Source:  "memory",
+		Tasks:   OverviewTasks{Active: 1, Completed: 2, Blocked: 3, ActiveRecent24h: 4},
+		Skills:  OverviewCount{Count: 5},
 		Plugins: OverviewPlugins{Count: 6, Available: true},
-		MCP:    OverviewCount{Count: 7},
+		MCP:     OverviewCount{Count: 7},
 	}
 	srv, rec := serveJSON(t, http.StatusOK, want)
 
@@ -715,5 +721,334 @@ func TestLoadConfig_EnvFileInvalidLine(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "NOT A KEY VALUE") {
 		t.Errorf("err = %v, want offending line in message", err)
+	}
+}
+
+// ---------- 操作闭环契约：POST /internal/runtime/tasks/{id}/actions ----------
+
+func TestClient_TaskActions(t *testing.T) {
+	want := TaskActionResponse{
+		OK: true, Source: "agentdock-api", Action: "checkpoint", TaskID: "t-7",
+		Task: &TaskListItem{
+			ID: "t-7", Title: "Ship", Goal: "G", Status: "active", Phase: "exec",
+			CompletedStepCount: 2, StepCount: 3, ReviewStatus: "pending",
+			UpdatedAt: ts, CreatedAt: ts, EventCount: 5,
+		},
+	}
+	srv, rec := serveJSON(t, http.StatusOK, want)
+	c := NewClient(srv.URL, "tok-9")
+
+	got, err := c.TaskActions("t-7", TaskActionsRequest{
+		Action:           "checkpoint",
+		CompletedStepIDs: []string{"s1", "s2"},
+		CurrentStepID:    "s2",
+	})
+	if err != nil {
+		t.Fatalf("TaskActions() error: %v", err)
+	}
+	assertDecoded(t, got, &want)
+	if got.Task == nil || got.Task.ID != "t-7" {
+		t.Errorf("TaskActions() task = %+v, want list item t-7", got.Task)
+	}
+	req := rec.get()
+	assertRequest(t, req, http.MethodPost, "/internal/runtime/tasks/t-7/actions")
+	if len(req.AuthValues) != 1 || req.AuthValues[0] != "Bearer tok-9" {
+		t.Errorf("Authorization = %v, want [Bearer tok-9]", req.AuthValues)
+	}
+	if req.ContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", req.ContentType)
+	}
+	const wantBody = `{"action":"checkpoint","completed_step_ids":["s1","s2"],"current_step_id":"s2"}`
+	if string(req.Body) != wantBody {
+		t.Errorf("body = %s, want %s", req.Body, wantBody)
+	}
+}
+
+func TestClient_TaskActions_OptionalFieldsOmitted(t *testing.T) {
+	srv, rec := serveJSON(t, http.StatusOK, TaskActionResponse{
+		OK: true, Source: "agentdock-api", Action: "delete", TaskID: "t 1/2#3",
+	})
+
+	got, err := NewClient(srv.URL, "").TaskActions("t 1/2#3", TaskActionsRequest{Action: "delete"})
+	if err != nil {
+		t.Fatalf("TaskActions() error: %v", err)
+	}
+	if got.Action != "delete" || got.TaskID != "t 1/2#3" {
+		t.Errorf("TaskActions() = %+v", got)
+	}
+	req := rec.get()
+	assertRequest(t, req, http.MethodPost, "/internal/runtime/tasks/t%201%2F2%233/actions")
+	if string(req.Body) != `{"action":"delete"}` {
+		t.Errorf("body = %s, want %s", req.Body, `{"action":"delete"}`)
+	}
+}
+
+func TestClient_TaskActions_InvalidStatus(t *testing.T) {
+	srv, _ := serveJSON(t, http.StatusBadRequest, map[string]any{
+		"ok": false, "code": "INVALID_STATUS", "error": "任务已完成，不能再保存检查点",
+	})
+
+	_, err := NewClient(srv.URL, "").TaskActions("t-1", TaskActionsRequest{Action: "checkpoint"})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusBadRequest || apiErr.Code != "INVALID_STATUS" {
+		t.Errorf("APIError = %+v, want StatusCode=400 Code=INVALID_STATUS", apiErr)
+	}
+	if apiErr.Message != "任务已完成，不能再保存检查点" {
+		t.Errorf("Message = %q, want 可读原因", apiErr.Message)
+	}
+}
+
+func TestClient_TaskActions_Conflict(t *testing.T) {
+	srv, _ := serveJSON(t, http.StatusConflict, map[string]any{
+		"ok": false, "code": "CONFLICT", "message": "任务已被其他进程更新",
+	})
+
+	_, err := NewClient(srv.URL, "").TaskActions("t-1", TaskActionsRequest{Action: "complete"})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusConflict || apiErr.Code != "CONFLICT" {
+		t.Errorf("APIError = %+v, want StatusCode=409 Code=CONFLICT", apiErr)
+	}
+	if apiErr.Message != "任务已被其他进程更新" {
+		t.Errorf("Message = %q, want message 字段内容", apiErr.Message)
+	}
+}
+
+// ---------- 操作闭环契约：GET /internal/runtime/tasks/{id}/activity ----------
+
+func TestClient_TaskActivity(t *testing.T) {
+	want := TaskActivity{
+		OK: true, Source: "agentdock-api", TaskID: "t-7", Mode: "disk",
+		Calls: []ActivityCall{{
+			ID: 11, Tool: "bash", Source: "cli", UserAgent: "ua/1.0",
+			StartedAt: ts, DurationMS: 12.5, Success: false,
+			ErrorCode: "E_EXEC", TraceID: "tr-1",
+		}},
+		FileChanges: []ActivityChange{{
+			TraceID: "tr-1", Tool: "write_file", StartedAt: ts,
+			Path: "a.go", Action: "modify", Insertions: 3, Deletions: 1,
+			Diff: "@@ -1 +1 @@", Truncated: true,
+		}},
+		CallCount: 1, ChangeCount: 1,
+	}
+	srv, rec := serveJSON(t, http.StatusOK, want)
+
+	got, err := NewClient(srv.URL, "").TaskActivity("t-7")
+	if err != nil {
+		t.Fatalf("TaskActivity() error: %v", err)
+	}
+	assertDecoded(t, got, &want)
+	if got.Mode != "disk" || got.CallCount != 1 || got.ChangeCount != 1 {
+		t.Errorf("TaskActivity() = %+v", got)
+	}
+	if got.Calls[0].ID != 11 || got.FileChanges[0].Path != "a.go" {
+		t.Errorf("TaskActivity() entries = %+v / %+v", got.Calls, got.FileChanges)
+	}
+	req := rec.get()
+	assertRequest(t, req, http.MethodGet, "/internal/runtime/tasks/t-7/activity")
+}
+
+func TestClient_TaskActivity_Off(t *testing.T) {
+	want := TaskActivity{
+		OK: true, Source: "agentdock-api", TaskID: "t-7", Mode: "off",
+		Calls: []ActivityCall{}, FileChanges: []ActivityChange{},
+		CallCount: 0, ChangeCount: 0,
+	}
+	srv, rec := serveJSON(t, http.StatusOK, want)
+
+	got, err := NewClient(srv.URL, "").TaskActivity("t-7")
+	if err != nil {
+		t.Fatalf("TaskActivity() error: %v", err)
+	}
+	assertDecoded(t, got, &want)
+	if got.Mode != "off" || len(got.Calls) != 0 || len(got.FileChanges) != 0 {
+		t.Errorf("TaskActivity() = %+v, want mode=off 且两数组空", got)
+	}
+	assertRequest(t, rec.get(), http.MethodGet, "/internal/runtime/tasks/t-7/activity")
+}
+
+// ---------- 操作闭环契约：DELETE /internal/runtime/artifacts/{id} ----------
+
+func TestClient_ArtifactRevoke(t *testing.T) {
+	srv, rec := serveJSON(t, http.StatusOK, map[string]any{
+		"ok": true, "source": "agentdock-api", "action": "revoke", "artifact_id": "a-1",
+	})
+
+	if err := NewClient(srv.URL, "").ArtifactRevoke("a-1"); err != nil {
+		t.Fatalf("ArtifactRevoke() error: %v", err)
+	}
+	req := rec.get()
+	assertRequest(t, req, http.MethodDelete, "/internal/runtime/artifacts/a-1")
+	if len(req.Body) != 0 {
+		t.Errorf("body = %s, want empty", req.Body)
+	}
+}
+
+func TestClient_ArtifactRevoke_NotFound(t *testing.T) {
+	srv, _ := serveJSON(t, http.StatusNotFound, map[string]any{
+		"ok": false, "code": "NOT_FOUND", "error": "artifact not found",
+	})
+
+	err := NewClient(srv.URL, "").ArtifactRevoke("missing")
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.StatusCode != http.StatusNotFound || apiErr.Code != "NOT_FOUND" {
+		t.Errorf("APIError = %+v, want StatusCode=404 Code=NOT_FOUND", apiErr)
+	}
+}
+
+// ---------- 操作闭环契约：POST /internal/runtime/artifacts/{id}/extend ----------
+
+func TestClient_ArtifactExtend(t *testing.T) {
+	want := ArtifactAction{
+		OK: true, Source: "agentdock-api", Action: "extend",
+		Artifact: &Artifact{
+			ArtifactID: "a-1", Filename: "shot.png", MimeType: "image/png",
+			SizeBytes: 10, SHA256: "sha:3", CreatedAt: ts, ExpiresAt: ts.Add(24 * time.Hour),
+			URL: "https://pub.example/a-1",
+		},
+	}
+	srv, rec := serveJSON(t, http.StatusOK, want)
+
+	got, err := NewClient(srv.URL, "").ArtifactExtend("a-1", 24)
+	if err != nil {
+		t.Fatalf("ArtifactExtend() error: %v", err)
+	}
+	assertDecoded(t, got, want.Artifact)
+	if got.URL != "https://pub.example/a-1" || !got.ExpiresAt.Equal(ts.Add(24*time.Hour)) {
+		t.Errorf("ArtifactExtend() = %+v", got)
+	}
+	req := rec.get()
+	assertRequest(t, req, http.MethodPost, "/internal/runtime/artifacts/a-1/extend")
+	if string(req.Body) != `{"hours":24}` {
+		t.Errorf("body = %s, want %s", req.Body, `{"hours":24}`)
+	}
+	if req.ContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", req.ContentType)
+	}
+}
+
+// ---------- 操作闭环契约：GET /internal/runtime/traces/export ----------
+
+func TestClient_TracesExport_JSON(t *testing.T) {
+	// 带 Content-Disposition 的导出响应（serve 只设 Content-Type）。
+	rec2 := &requestRecorder{}
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec2.record(capturedRequest{
+			Method: r.Method, Path: r.URL.EscapedPath(),
+			RawQuery: r.URL.RawQuery, Query: r.URL.Query(),
+			AuthValues: r.Header.Values("Authorization"), Body: body,
+		})
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="traces-2024.json"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"records":[]}`))
+	}))
+	t.Cleanup(srv2.Close)
+
+	data, contentType, filename, err := NewClient(srv2.URL, "tok").TracesExport("json", "go code", "bash", "cli", "error", 25)
+	if err != nil {
+		t.Fatalf("TracesExport() error: %v", err)
+	}
+	if string(data) != `{"records":[]}` {
+		t.Errorf("data = %s, want raw stream", data)
+	}
+	if contentType != "application/json" {
+		t.Errorf("contentType = %q, want application/json（去掉 charset 参数）", contentType)
+	}
+	if filename != "traces-2024.json" {
+		t.Errorf("filename = %q, want traces-2024.json（Content-Disposition 解析）", filename)
+	}
+	req := rec2.get()
+	assertRequest(t, req, http.MethodGet, "/internal/runtime/traces/export")
+	for key, wantVal := range map[string]string{
+		"format": "json", "q": "go code", "tool": "bash", "source": "cli", "status": "error", "limit": "25",
+	} {
+		if gotVal := req.Query.Get(key); gotVal != wantVal {
+			t.Errorf("%s = %q, want %q", key, gotVal, wantVal)
+		}
+	}
+	if len(req.AuthValues) != 1 || req.AuthValues[0] != "Bearer tok" {
+		t.Errorf("Authorization = %v, want [Bearer tok]", req.AuthValues)
+	}
+}
+
+func TestClient_TracesExport_CSV(t *testing.T) {
+	rec := &requestRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(capturedRequest{
+			Method: r.Method, Path: r.URL.EscapedPath(),
+			RawQuery: r.URL.RawQuery, Query: r.URL.Query(),
+		})
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", "attachment; filename=traces.csv")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("id,tool\n1,bash\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	data, contentType, filename, err := NewClient(srv.URL, "").TracesExport("csv", "", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("TracesExport() error: %v", err)
+	}
+	if string(data) != "id,tool\n1,bash\n" {
+		t.Errorf("data = %q, want csv 原始流", data)
+	}
+	if contentType != "text/csv" {
+		t.Errorf("contentType = %q, want text/csv", contentType)
+	}
+	if filename != "traces.csv" {
+		t.Errorf("filename = %q, want traces.csv（无引号 filename 解析）", filename)
+	}
+	req := rec.get()
+	if req.Query.Get("format") != "csv" {
+		t.Errorf("format = %q, want csv", req.Query.Get("format"))
+	}
+	if req.RawQuery != "format=csv" {
+		t.Errorf("raw query = %q, want 只带 format", req.RawQuery)
+	}
+}
+
+func TestClient_TracesExport_Error(t *testing.T) {
+	srv, _ := serveJSON(t, http.StatusBadRequest, map[string]any{
+		"ok": false, "code": "BAD_FORMAT", "error": "unsupported format",
+	})
+
+	_, _, _, err := NewClient(srv.URL, "").TracesExport("xml", "", "", "", "", 0)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want *APIError", err)
+	}
+	if apiErr.Code != "BAD_FORMAT" || apiErr.Message != "unsupported format" {
+		t.Errorf("APIError = %+v", apiErr)
+	}
+}
+
+// ---------- 操作闭环契约：DELETE /internal/runtime/traces ----------
+
+func TestClient_TracesClear(t *testing.T) {
+	srv, rec := serveJSON(t, http.StatusOK, map[string]any{
+		"ok": true, "source": "agentdock-api", "action": "clear", "cleared": 12,
+	})
+
+	n, err := NewClient(srv.URL, "").TracesClear()
+	if err != nil {
+		t.Fatalf("TracesClear() error: %v", err)
+	}
+	if n != 12 {
+		t.Errorf("cleared = %d, want 12", n)
+	}
+	req := rec.get()
+	assertRequest(t, req, http.MethodDelete, "/internal/runtime/traces")
+	if len(req.Body) != 0 {
+		t.Errorf("body = %s, want empty", req.Body)
 	}
 }

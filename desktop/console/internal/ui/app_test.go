@@ -12,7 +12,8 @@ import (
 	"github.com/uvwt/agentdock/desktop/console/internal/runtimeapi"
 )
 
-// stubBackend 是 runtimeapi.Backend 的测试桩：返回固定数据或固定错误。
+// stubBackend 是 runtimeapi.Backend 的测试桩：返回固定数据或固定错误，
+// 并记录操作闭环（任务动作/产物延期撤销/导出清空）的调用供测试断言。
 type stubBackend struct {
 	mu       sync.Mutex
 	failures int // >0 时每个调用递减并返回错误
@@ -23,6 +24,24 @@ type stubBackend struct {
 	catalog   *runtimeapi.Catalog
 	tasks     *runtimeapi.TaskList
 	task      *runtimeapi.TaskDetail
+	activity  *runtimeapi.TaskActivity
+	artifacts *runtimeapi.Artifacts
+
+	// 操作桩：错误与响应可注入，调用被记录。
+	taskActionErr error
+	exportData    []byte
+	exportType    string
+	exportName    string
+	exportErr     error
+	clearCount    int
+
+	taskActions []runtimeapi.TaskActionsRequest
+	taskActIDs  []string
+	revoked     []string
+	extended    []int
+	clears      int
+	exports     []string // 每次导出的 format
+	taskFetches int      // Tasks() 拉取次数（验证操作后刷新任务列表）
 }
 
 func (s *stubBackend) fail() error {
@@ -66,11 +85,114 @@ func (s *stubBackend) Catalog() (*runtimeapi.Catalog, error) {
 func (s *stubBackend) Skills() (*runtimeapi.Skills, error)   { return &runtimeapi.Skills{}, nil }
 func (s *stubBackend) Plugins() (*runtimeapi.Plugins, error) { return &runtimeapi.Plugins{}, nil }
 
+func (s *stubBackend) TaskActions(id string, req runtimeapi.TaskActionsRequest) (*runtimeapi.TaskActionResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.taskActionErr != nil {
+		return nil, s.taskActionErr
+	}
+	s.taskActions = append(s.taskActions, req)
+	s.taskActIDs = append(s.taskActIDs, id)
+	return &runtimeapi.TaskActionResponse{
+		OK: true, Source: "agentdock-api", Action: req.Action, TaskID: id,
+	}, nil
+}
+
+func (s *stubBackend) TaskActivity(id string) (*runtimeapi.TaskActivity, error) {
+	if err := s.fail(); err != nil {
+		return nil, err
+	}
+	if s.activity != nil {
+		return s.activity, nil
+	}
+	return &runtimeapi.TaskActivity{}, nil
+}
+
+func (s *stubBackend) ArtifactRevoke(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revoked = append(s.revoked, id)
+	return nil
+}
+
+func (s *stubBackend) ArtifactExtend(id string, hours int) (*runtimeapi.Artifact, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.extended = append(s.extended, hours)
+	return &runtimeapi.Artifact{ArtifactID: id, ExpiresAt: time.Now().Add(time.Duration(hours) * time.Hour)}, nil
+}
+
+func (s *stubBackend) TracesExport(format, query, tool, source, status string, limit int) ([]byte, string, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exports = append(s.exports, format)
+	if s.exportErr != nil {
+		return nil, "", "", s.exportErr
+	}
+	data, typ, name := s.exportData, s.exportType, s.exportName
+	if data == nil {
+		data = []byte("{}")
+	}
+	if typ == "" {
+		typ = "application/json"
+	}
+	return data, typ, name, nil
+}
+
+func (s *stubBackend) TracesClear() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clears++
+	return s.clearCount, nil
+}
+
+// 操作记录读取（测试断言用）。
+func (s *stubBackend) actionCalls() ([]string, []runtimeapi.TaskActionsRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := append([]string(nil), s.taskActIDs...)
+	reqs := append([]runtimeapi.TaskActionsRequest(nil), s.taskActions...)
+	return ids, reqs
+}
+
+func (s *stubBackend) revokeCalls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.revoked...)
+}
+
+func (s *stubBackend) extendCalls() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]int(nil), s.extended...)
+}
+
+func (s *stubBackend) exportCalls() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.exports...)
+}
+
+func (s *stubBackend) clearCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clears
+}
+
 func (s *stubBackend) Tasks(status string, limit int) (*runtimeapi.TaskList, error) {
 	if err := s.fail(); err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	s.taskFetches++
+	s.mu.Unlock()
 	return s.tasks, nil
+}
+
+func (s *stubBackend) tasksFetches() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.taskFetches
 }
 
 func (s *stubBackend) Task(id string) (*runtimeapi.TaskDetail, error) {
@@ -97,6 +219,9 @@ func (s *stubBackend) FileChanges(query string, limit int) (*runtimeapi.FileChan
 func (s *stubBackend) Artifacts() (*runtimeapi.Artifacts, error) {
 	if err := s.fail(); err != nil {
 		return nil, err
+	}
+	if s.artifacts != nil {
+		return s.artifacts, nil
 	}
 	return &runtimeapi.Artifacts{}, nil
 }

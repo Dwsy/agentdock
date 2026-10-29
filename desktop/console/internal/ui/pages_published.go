@@ -1,15 +1,27 @@
 package ui
 
 import (
+	"errors"
+	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/egoist/mygo/ui"
 
 	"github.com/uvwt/agentdock/desktop/console/internal/runtimeapi"
 	"github.com/uvwt/agentdock/desktop/console/internal/ui/kit"
 )
 
+// minExtendHours/maxExtendHours 是产物延期的允许范围（小时）。
+const (
+	minExtendHours = 1
+	maxExtendHours = 720
+)
+
 // pagePublished 渲染发布产物页：未配置公网时给 EmptyState 说明；
 // 否则 Table（文件名/类型/大小/创建/过期）+ 选中详情含 URL（可复制/可打开）。
 func (a *App) pagePublished(c *ui.Context) {
+	a.consumePubActionToast(c)
 	a.mu.Lock()
 	loading, loaded, err := a.pubLoad.loading, a.pubLoad.loaded, a.pubLoad.err
 	data := a.pubData
@@ -71,6 +83,7 @@ func (a *App) artifactDetail(c *ui.Context, arts []runtimeapi.Artifact) {
 	}
 	art := arts[a.pubSel]
 	kit.SectionHeader(c, art.Filename, art.MimeType)
+	a.artifactActionRow(c, art)
 	kit.KV(c, "大小", kit.FormatBytes(art.SizeBytes))
 	kit.KV(c, "创建", kit.FormatTime(art.CreatedAt))
 	kit.KV(c, "过期", kit.FormatTime(art.ExpiresAt))
@@ -92,4 +105,113 @@ func (a *App) artifactDetail(c *ui.Context, arts []runtimeapi.Artifact) {
 			c.OpenURL(art.URL)
 		}
 	})
+}
+
+// consumePubActionToast 取走产物操作的成功反馈并以 Toast 展示。
+func (a *App) consumePubActionToast(c *ui.Context) {
+	a.mu.Lock()
+	msg := a.pubActionMsg
+	a.pubActionMsg = ""
+	a.mu.Unlock()
+	if msg != "" {
+		c.Toast(msg)
+	}
+}
+
+// artifactActionRow 渲染产物详情顶部操作行：撤销（AlertDialog 二次确认）与
+// 延期（TextInput 输入小时数 + 延期按钮，1..720 校验）；结果 Toast/ErrorState 反馈。
+func (a *App) artifactActionRow(c *ui.Context, art runtimeapi.Artifact) {
+	ui.Text(c, "操作").Bold().FontSize(13)
+	ui.Row(c).AlignItems(ui.Center).Gap(8).Children(func() {
+		revokeBtn := ui.Button(c, "").Children(func() {
+			ui.Text(c, "撤销")
+		})
+		if revokeBtn.Clicked() {
+			a.pubRevokeAsk = true
+		}
+		ui.Text(c, "延期小时").FontSize(12).TextColor(c.Theme().TextMuted)
+		ui.TextInput(c, &a.pubExtendInput).Width(90).Label("延期小时")
+		extendBtn := ui.Button(c, "").Children(func() {
+			ui.Text(c, "延期")
+		})
+		if extendBtn.Clicked() {
+			hours, err := parseExtendHours(a.pubExtendInput)
+			if err != nil {
+				a.setPubActionErr(err)
+			} else {
+				a.extendArtifact(art.ArtifactID, hours)
+			}
+		}
+	})
+
+	// 撤销二次确认：默认按钮“确认撤销”，Esc/取消 不执行。
+	switch ui.AlertDialog(c, &a.pubRevokeAsk, "撤销产物", "撤销后链接立即失效，确定撤销吗？", "取消", "确认撤销") {
+	case 1:
+		a.revokeArtifact(art.ArtifactID)
+	}
+
+	a.mu.Lock()
+	actionErr := a.pubActionErr
+	a.mu.Unlock()
+	if actionErr != nil {
+		kit.ErrorState(c, "操作失败："+actionErr.Error())
+	}
+}
+
+// setPubActionErr 同步写入操作错误并请求重绘（如延期小时数校验失败）。
+func (a *App) setPubActionErr(err error) {
+	a.mu.Lock()
+	a.pubActionErr = err
+	a.mu.Unlock()
+	a.notify()
+}
+
+// parseExtendHours 解析并校验延期小时数（整数，1..720）。
+func parseExtendHours(s string) (int, error) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, errors.New("延期小时数需为整数")
+	}
+	if n < minExtendHours || n > maxExtendHours {
+		return 0, fmt.Errorf("延期小时数需在 %d 到 %d 之间", minExtendHours, maxExtendHours)
+	}
+	return n, nil
+}
+
+// revokeArtifact 后台撤销产物；成功后 Toast 反馈并刷新列表。
+func (a *App) revokeArtifact(id string) {
+	go func(id string) {
+		err := a.backend.ArtifactRevoke(id)
+		a.mu.Lock()
+		if err != nil {
+			a.pubActionErr = err
+		} else {
+			a.pubActionMsg = "产物已撤销"
+			a.pubActionErr = nil
+		}
+		a.mu.Unlock()
+		if err == nil {
+			a.reload(pagePublished)
+		}
+		a.notify()
+	}(id)
+}
+
+// extendArtifact 后台延期产物；成功后 Toast 反馈并刷新列表（过期时间更新）。
+func (a *App) extendArtifact(id string, hours int) {
+	go func(id string, hours int) {
+		_, err := a.backend.ArtifactExtend(id, hours)
+		a.mu.Lock()
+		if err != nil {
+			a.pubActionErr = err
+		} else {
+			a.pubActionMsg = fmt.Sprintf("产物已延期 %d 小时", hours)
+			a.pubActionErr = nil
+		}
+		a.mu.Unlock()
+		if err == nil {
+			a.reload(pagePublished)
+		}
+		a.notify()
+	}(id, hours)
 }

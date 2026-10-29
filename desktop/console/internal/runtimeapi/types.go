@@ -23,9 +23,15 @@ type Backend interface {
 	Plugins() (*Plugins, error)
 	Tasks(status string, limit int) (*TaskList, error)
 	Task(id string) (*TaskDetail, error)
+	TaskActions(id string, req TaskActionsRequest) (*TaskActionResponse, error)
+	TaskActivity(id string) (*TaskActivity, error)
 	Traces(query, tool, source, status string, limit int) (*Traces, error)
+	TracesExport(format, query, tool, source, status string, limit int) ([]byte, string, string, error)
+	TracesClear() (int, error)
 	FileChanges(query string, limit int) (*FileChanges, error)
 	Artifacts() (*Artifacts, error)
+	ArtifactRevoke(id string) error
+	ArtifactExtend(id string, hours int) (*Artifact, error)
 }
 
 // APIError 是 runtime API 的错误体 {"ok":false,"code":...,"error":...}。
@@ -45,30 +51,30 @@ func (e *APIError) Error() string {
 // ---------- GET /internal/runtime/status ----------
 
 type Status struct {
-	OK                 bool     `json:"ok"`
-	Source             string   `json:"source"`
-	Service            string   `json:"service"`
-	Version            string   `json:"version"`
-	AgentDockHome      string   `json:"agentdock_home"`
-	AgentDockDefaultDir string  `json:"agentdock_default_dir"`
-	PathModel          string   `json:"path_model"`
-	AuthEnabled        bool     `json:"auth_enabled"`
-	BrowserEnabled     bool     `json:"browser_enabled"`
-	MemoryEnabled      bool     `json:"memory_enabled"`
-	NexusEnabled       bool     `json:"nexus_enabled"`
-	ToolCount          int      `json:"tool_count"`
-	Tools              []string `json:"tools"`
+	OK                  bool     `json:"ok"`
+	Source              string   `json:"source"`
+	Service             string   `json:"service"`
+	Version             string   `json:"version"`
+	AgentDockHome       string   `json:"agentdock_home"`
+	AgentDockDefaultDir string   `json:"agentdock_default_dir"`
+	PathModel           string   `json:"path_model"`
+	AuthEnabled         bool     `json:"auth_enabled"`
+	BrowserEnabled      bool     `json:"browser_enabled"`
+	MemoryEnabled       bool     `json:"memory_enabled"`
+	NexusEnabled        bool     `json:"nexus_enabled"`
+	ToolCount           int      `json:"tool_count"`
+	Tools               []string `json:"tools"`
 }
 
 // ---------- GET /internal/runtime/overview ----------
 
 type Overview struct {
-	OK      bool           `json:"ok"`
-	Source  string         `json:"source"`
-	Tasks   OverviewTasks  `json:"tasks"`
-	Skills  OverviewCount  `json:"skills"`
+	OK      bool            `json:"ok"`
+	Source  string          `json:"source"`
+	Tasks   OverviewTasks   `json:"tasks"`
+	Skills  OverviewCount   `json:"skills"`
 	Plugins OverviewPlugins `json:"plugins"`
-	MCP     OverviewCount  `json:"mcp"`
+	MCP     OverviewCount   `json:"mcp"`
 }
 
 type OverviewTasks struct {
@@ -90,17 +96,17 @@ type OverviewPlugins struct {
 // ---------- GET /internal/runtime/analytics ----------
 
 type Analytics struct {
-	OK             bool            `json:"ok"`
-	Source         string          `json:"source"`
-	StartedAt      time.Time       `json:"started_at"`
-	RecentCapacity int             `json:"recent_capacity"`
-	WindowCalls    int             `json:"window_calls"`
-	TotalCalls     uint64          `json:"total_calls"`
-	TotalErrors    uint64          `json:"total_errors"`
-	ActiveCalls    int             `json:"active_calls"`
-	ToolStats      []ToolStats     `json:"tool_stats"`
+	OK             bool              `json:"ok"`
+	Source         string            `json:"source"`
+	StartedAt      time.Time         `json:"started_at"`
+	RecentCapacity int               `json:"recent_capacity"`
+	WindowCalls    int               `json:"window_calls"`
+	TotalCalls     uint64            `json:"total_calls"`
+	TotalErrors    uint64            `json:"total_errors"`
+	ActiveCalls    int               `json:"active_calls"`
+	ToolStats      []ToolStats       `json:"tool_stats"`
 	RecentCalls    []ExecutionRecord `json:"recent_calls"`
-	Process        ProcessSnapshot `json:"process"`
+	Process        ProcessSnapshot   `json:"process"`
 }
 
 type ToolStats struct {
@@ -155,11 +161,11 @@ type Catalog struct {
 }
 
 type CatalogTool struct {
-	Name         string         `json:"name"`
-	Title        string         `json:"title,omitempty"`
-	Description  string         `json:"description"`
-	InputSchema  map[string]any `json:"input_schema"`
-	OutputSchema map[string]any `json:"output_schema"`
+	Name         string           `json:"name"`
+	Title        string           `json:"title,omitempty"`
+	Description  string           `json:"description"`
+	InputSchema  map[string]any   `json:"input_schema"`
+	OutputSchema map[string]any   `json:"output_schema"`
 	Annotations  *ToolAnnotations `json:"annotations,omitempty"`
 }
 
@@ -249,23 +255,23 @@ type TaskList struct {
 
 // TaskListItem 对齐 compactTaskListItem 的输出。
 type TaskListItem struct {
-	ID                 string             `json:"id"`
-	Title              string             `json:"title"`
-	Goal               string             `json:"goal"`
-	Status             string             `json:"status"`
-	Phase              string             `json:"phase"`
-	CompletedStepCount int                `json:"completed_step_count"`
-	StepCount          int                `json:"step_count"`
-	ReviewStatus       string             `json:"review_status"`
-	UpdatedAt          time.Time          `json:"updated_at"`
-	Project            string             `json:"project,omitempty"`
-	Device             string             `json:"device,omitempty"`
-	CurrentStep        string             `json:"current_step,omitempty"`
-	Summary            string             `json:"summary,omitempty"`
-	Blocker            string             `json:"blocker,omitempty"`
-	CreatedAt          time.Time          `json:"created_at"`
-	EventCount         int                `json:"event_count"`
-	CompletedAt        *time.Time         `json:"completed_at,omitempty"`
+	ID                 string              `json:"id"`
+	Title              string              `json:"title"`
+	Goal               string              `json:"goal"`
+	Status             string              `json:"status"`
+	Phase              string              `json:"phase"`
+	CompletedStepCount int                 `json:"completed_step_count"`
+	StepCount          int                 `json:"step_count"`
+	ReviewStatus       string              `json:"review_status"`
+	UpdatedAt          time.Time           `json:"updated_at"`
+	Project            string              `json:"project,omitempty"`
+	Device             string              `json:"device,omitempty"`
+	CurrentStep        string              `json:"current_step,omitempty"`
+	Summary            string              `json:"summary,omitempty"`
+	Blocker            string              `json:"blocker,omitempty"`
+	CreatedAt          time.Time           `json:"created_at"`
+	EventCount         int                 `json:"event_count"`
+	CompletedAt        *time.Time          `json:"completed_at,omitempty"`
 	SourceTemplates    []TemplateReference `json:"source_templates,omitempty"`
 }
 
@@ -284,24 +290,24 @@ type TaskDetail struct {
 
 // Task 对齐 taskstate.Task（省略 guidance/evolution 字段；需要时按源码补齐）。
 type Task struct {
-	SchemaVersion   int                `json:"schema_version"`
-	ID              string             `json:"id"`
-	Title           string             `json:"title"`
-	Goal            string             `json:"goal"`
-	Project         string             `json:"project,omitempty"`
-	Device          string             `json:"device,omitempty"`
-	Status          string             `json:"status"`
-	Phase           string             `json:"phase"`
-	Conditions      []Condition        `json:"conditions"`
+	SchemaVersion   int                 `json:"schema_version"`
+	ID              string              `json:"id"`
+	Title           string              `json:"title"`
+	Goal            string              `json:"goal"`
+	Project         string              `json:"project,omitempty"`
+	Device          string              `json:"device,omitempty"`
+	Status          string              `json:"status"`
+	Phase           string              `json:"phase"`
+	Conditions      []Condition         `json:"conditions"`
 	SourceTemplates []TemplateReference `json:"source_templates,omitempty"`
-	Steps           []TaskStep         `json:"steps,omitempty"`
-	Events          []Event            `json:"events"`
-	Blocker         string             `json:"blocker,omitempty"`
-	Summary         string             `json:"summary,omitempty"`
-	FinalReview     *FinalReview       `json:"final_review,omitempty"`
-	CreatedAt       time.Time          `json:"created_at"`
-	UpdatedAt       time.Time          `json:"updated_at"`
-	CompletedAt     *time.Time         `json:"completed_at,omitempty"`
+	Steps           []TaskStep          `json:"steps,omitempty"`
+	Events          []Event             `json:"events"`
+	Blocker         string              `json:"blocker,omitempty"`
+	Summary         string              `json:"summary,omitempty"`
+	FinalReview     *FinalReview        `json:"final_review,omitempty"`
+	CreatedAt       time.Time           `json:"created_at"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+	CompletedAt     *time.Time          `json:"completed_at,omitempty"`
 }
 
 // TaskStep 对齐 taskstate.TaskStep；字段以源码为准补齐（title/phase/…）。
@@ -324,25 +330,25 @@ type Event struct {
 }
 
 type FinalReview struct {
-	Status         string   `json:"status"`
-	Summary        string   `json:"summary"`
-	VerifiedFacts  []string `json:"verified_facts,omitempty"`
-	OpenRisks      []string `json:"open_risks,omitempty"`
-	MissingChecks  []string `json:"missing_checks,omitempty"`
-	ReviewRevision string   `json:"review_revision"`
+	Status         string    `json:"status"`
+	Summary        string    `json:"summary"`
+	VerifiedFacts  []string  `json:"verified_facts,omitempty"`
+	OpenRisks      []string  `json:"open_risks,omitempty"`
+	MissingChecks  []string  `json:"missing_checks,omitempty"`
+	ReviewRevision string    `json:"review_revision"`
 	ReviewedAt     time.Time `json:"reviewed_at"`
 }
 
 // ---------- GET /internal/runtime/traces ----------
 
 type Traces struct {
-	OK      bool         `json:"ok"`
-	Source  string       `json:"source"`
-	Mode    string       `json:"mode,omitempty"`
-	Status  *TraceStatus `json:"status,omitempty"`
+	OK      bool          `json:"ok"`
+	Source  string        `json:"source"`
+	Mode    string        `json:"mode,omitempty"`
+	Status  *TraceStatus  `json:"status,omitempty"`
 	Records []TraceRecord `json:"records"`
-	Count   int          `json:"count"`
-	Tools   []string     `json:"tools"`
+	Count   int           `json:"count"`
+	Tools   []string      `json:"tools"`
 }
 
 type TraceStatus struct {
@@ -384,12 +390,12 @@ type FileChange struct {
 // ---------- GET /internal/runtime/file-changes ----------
 
 type FileChanges struct {
-	OK      bool             `json:"ok"`
-	Source  string           `json:"source"`
-	Mode    string           `json:"mode,omitempty"`
-	Status  *TraceStatus     `json:"status,omitempty"`
+	OK      bool              `json:"ok"`
+	Source  string            `json:"source"`
+	Mode    string            `json:"mode,omitempty"`
+	Status  *TraceStatus      `json:"status,omitempty"`
 	Changes []FileChangeEntry `json:"changes"`
-	Count   int              `json:"count"`
+	Count   int               `json:"count"`
 }
 
 type FileChangeEntry struct {
@@ -417,6 +423,95 @@ type Artifacts struct {
 	Configured    bool       `json:"configured"`
 	Artifacts     []Artifact `json:"artifacts"`
 	Count         int        `json:"count"`
+}
+
+// ---------- POST /internal/runtime/tasks/{id}/actions ----------
+
+// TaskActionsRequest 是任务操作请求体：action 必填（checkpoint|complete|delete），
+// completed_step_ids 与 current_step_id 可省。
+type TaskActionsRequest struct {
+	Action           string   `json:"action"`
+	CompletedStepIDs []string `json:"completed_step_ids,omitempty"`
+	CurrentStepID    string   `json:"current_step_id,omitempty"`
+}
+
+// TaskActionResponse 是任务操作成功响应；task 为任务列表项形状（compactTaskListItem）。
+// 非法状态迁移 → 4xx {"ok":false,"code":"INVALID_STATUS","error":"…"}，
+// 并发冲突 → 4xx code=CONFLICT（读 message 展示），由 APIError 承载。
+type TaskActionResponse struct {
+	OK     bool          `json:"ok"`
+	Source string        `json:"source"`
+	Action string        `json:"action"`
+	TaskID string        `json:"task_id"`
+	Task   *TaskListItem `json:"task,omitempty"`
+}
+
+// ---------- GET /internal/runtime/tasks/{id}/activity ----------
+
+// TaskActivity 是任务关联的工具调用与文件变更汇总；trace 关闭时
+// mode="off" 且 calls/file_changes 为空。
+type TaskActivity struct {
+	OK          bool             `json:"ok"`
+	Source      string           `json:"source"`
+	TaskID      string           `json:"task_id"`
+	Mode        string           `json:"mode"`
+	Calls       []ActivityCall   `json:"calls"`
+	FileChanges []ActivityChange `json:"file_changes"`
+	CallCount   int              `json:"call_count"`
+	ChangeCount int              `json:"change_count"`
+}
+
+// ActivityCall 是活动里的单次工具调用（ExecutionRecord 的字段子集）。
+type ActivityCall struct {
+	ID         uint64    `json:"id"`
+	Tool       string    `json:"tool"`
+	Source     string    `json:"source"`
+	UserAgent  string    `json:"user_agent,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	DurationMS float64   `json:"duration_ms"`
+	Success    bool      `json:"success"`
+	ErrorCode  string    `json:"error_code,omitempty"`
+	TraceID    string    `json:"trace_id,omitempty"`
+}
+
+// ActivityChange 是活动里的单条文件变更（FileChangeEntry 的字段子集）。
+type ActivityChange struct {
+	TraceID    string    `json:"trace_id,omitempty"`
+	Tool       string    `json:"tool"`
+	StartedAt  time.Time `json:"started_at"`
+	Path       string    `json:"path"`
+	Action     string    `json:"action"`
+	Insertions int       `json:"insertions,omitempty"`
+	Deletions  int       `json:"deletions,omitempty"`
+	Diff       string    `json:"diff,omitempty"`
+	Truncated  bool      `json:"truncated,omitempty"`
+}
+
+// ---------- DELETE /internal/runtime/artifacts/{id} ----------
+// ---------- POST /internal/runtime/artifacts/{id}/extend ----------
+
+// ArtifactAction 是产物操作（revoke/extend）的响应信封：
+// revoke 带 artifact_id（不存在 → 4xx code=NOT_FOUND），extend 带 artifact 对象。
+type ArtifactAction struct {
+	OK         bool      `json:"ok"`
+	Source     string    `json:"source"`
+	Action     string    `json:"action"`
+	ArtifactID string    `json:"artifact_id,omitempty"`
+	Artifact   *Artifact `json:"artifact,omitempty"`
+}
+
+// ---------- GET /internal/runtime/traces/export ----------
+// 导出返回原始文件流（json: application/json；csv: text/csv，
+// Content-Disposition 带 filename），客户端解析为 (data, contentType, filename)。
+
+// ---------- DELETE /internal/runtime/traces ----------
+
+// TracesClearResponse 是清空追踪记录的成功响应。
+type TracesClearResponse struct {
+	OK      bool   `json:"ok"`
+	Source  string `json:"source"`
+	Action  string `json:"action"`
+	Cleared int    `json:"cleared"`
 }
 
 // Artifact 对齐 publicartifacts.PublishResult（Metadata + url）。

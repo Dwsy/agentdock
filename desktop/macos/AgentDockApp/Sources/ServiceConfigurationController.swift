@@ -169,19 +169,15 @@ final class ServiceConfigurationController {
         self.service = service
     }
 
+    /// 只落盘配置，不重启 Core：用户可能正在跑任务，重启由用户显式触发。
     func apply(_ requested: EditableServiceSettings) async throws {
         let settings = try requested.validated()
-        try await service.withLifecycleTransaction { lifecycle in
-            try await self.applyWithinLifecycle(settings, lifecycle: lifecycle)
-        }
+        try await writeConfiguration(settings)
     }
 
-    private func applyWithinLifecycle(
-        _ settings: EditableServiceSettings,
-        lifecycle: ServiceController.LifecycleTransaction
-    ) async throws {
+    private func writeConfiguration(_ settings: EditableServiceSettings) async throws {
         let environmentURL = service.paths.environment
-        let originalData = try readPrivateRegularFile(environmentURL)
+        _ = try readPrivateRegularFile(environmentURL)
         let environment = try ManagedEnvironment.load(from: environmentURL)
         let replacements = [
             "AGENTDOCK_PORT": String(settings.port),
@@ -197,32 +193,8 @@ final class ServiceConfigurationController {
             "AGENTDOCK_TRACE_RETENTION_DAYS": String(settings.traceRetentionDays),
         ]
         let updatedData = try environment.dataByUpdating(replacements, removing: ServiceConfiguration.removableLegacyKeys)
-        let wasLoaded = service.isLoaded()
-
         try await service.runInBackground {
             try self.writePrivateAtomically(updatedData, to: environmentURL)
-        }
-        guard wasLoaded else { return }
-
-        do {
-            _ = try await lifecycle.restart()
-        } catch {
-            let originalError = error
-            do {
-                try await service.runInBackground {
-                    try self.writePrivateAtomically(originalData, to: environmentURL)
-                }
-                _ = try await lifecycle.restart()
-            } catch {
-                throw ValidationError(L10n.format(
-                    "Failed to start the new configuration, and validation after restoring the old configuration also failed: %@",
-                    error.localizedDescription
-                ))
-            }
-            throw ValidationError(L10n.format(
-                "Failed to start the new configuration; restored the previous configuration: %@",
-                originalError.localizedDescription
-            ))
         }
     }
 

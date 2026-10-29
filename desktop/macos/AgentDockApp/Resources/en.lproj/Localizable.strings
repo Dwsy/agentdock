@@ -582,6 +582,18 @@
 "Not connected" = "Not connected";
 "Set up AgentDock to get started." = "Set up AgentDock to get started.";
 
+"Remote access" = "Remote access";
+"Active tasks" = "Active tasks";
+"Public tunnel" = "Public tunnel";
+"Needs permission" = "Needs permission";
+"Port %d" = "Port %d";
+"%d calls · %d errors" = "%d calls · %d errors";
+"%d running" = "%d running";
+"Core is not running" = "Core is not running";
+"Core is not responding" = "Core is not responding";
+"Could not load runtime data" = "Could not load runtime data";
+"Loading…" = "Loading…";
+
 "Exit AgentDock" = "Exit AgentDock";
 "Show main window" = "Show main window";
 "Tray Start" = "Start AgentDock";
@@ -708,3 +720,25 @@
 "Archive" = "Archive";
 "Expires %@" = "Expires %@";
 "%d files" = "%d files";
+"%d items" = "%d items";
+"Back" = "Back";
+"Capability catalog" = "Capability catalog";
+"Common skills" = "Common skills";
+"No matching entries" = "No matching entries";
+"Rules" = "Rules";
+"Search" = "Search";
+"Tools" = "Tools";
+"Code" = "Code";
+"Saved. Restart AgentDock Core to apply the new configuration." = "Saved. Restart AgentDock Core to apply the new configuration.";
+"Last 5 minutes" = "Last 5 minutes";
+"Working directory" = "Working directory";
+"Mode" = "Mode";
+"Timeout" = "Timeout";
+"Action" = "Action";
+"Session" = "Session";
+"Exit code" = "Exit code";
+"Timed out" = "Timed out";
+"Stdout" = "Stdout";
+"Stderr" = "Stderr";
+"output truncated" = "output truncated";
+"Load %d more lines" = "Load %d more lines";

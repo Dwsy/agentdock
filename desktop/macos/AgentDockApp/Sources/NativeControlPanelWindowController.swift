@@ -20,8 +20,9 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
             onChanged: onChanged,
             onUpdateRequested: onUpdateRequested
         )
+        // 侧边栏固定 240pt + 内容区，1060 在长页面里显得拥挤，启动宽度提到 1272（+20%）。
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1060, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 1272, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -32,12 +33,19 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
-        window.setFrame(NSRect(x: 0, y: 0, width: 1060, height: 720), display: false)
+        window.setFrame(NSRect(x: 0, y: 0, width: 1272, height: 720), display: false)
         window.minSize = NSSize(width: 900, height: 620)
         window.center()
         super.init(window: window)
         window.delegate = self
-        window.contentViewController = NSHostingController(rootView: ControlPanelRootView(model: model))
+        window.contentViewController = {
+            let hosting = NSHostingController(rootView: ControlPanelRootView(model: model))
+            // 默认的 .preferredContentSize 会让页面内容反向驱动窗口尺寸，某些页面
+            // （无固有高度的列表/图表）会把窗口高度拉到屏幕高度。窗口尺寸由我们
+            // 自己的 frame 与 minSize 控制。
+            hosting.sizingOptions = []
+            return hosting
+        }()
         NotificationCenter.default.addObserver(
             forName: .agentDockOpenPermissions,
             object: nil,
@@ -115,9 +123,44 @@ private final class ControlPanelModel: ObservableObject {
         }
     }
 
-    /// Sidebar 把页面导航与能力目录条目放在同一个 List 里，因此需要单一 selection 类型。
+    /// 能力目录分类。侧栏只放页面导航，目录条目进二级可搜索列表，避免把侧栏铺满。
+    enum CatalogSection: String, CaseIterable, Identifiable {
+        case tools, skills, commonSkills, rules, plugins
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .tools: return L10n.text("Tools")
+            case .skills: return L10n.text("Skills")
+            case .commonSkills: return L10n.text("Common skills")
+            case .rules: return L10n.text("Rules")
+            case .plugins: return L10n.text("Plugins")
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .tools: return "wrench.and.screwdriver"
+            case .skills: return "book.closed"
+            case .commonSkills: return "books.vertical"
+            case .rules: return "doc.text"
+            case .plugins: return "puzzlepiece.extension"
+            }
+        }
+    }
+
+    struct CatalogEntry: Identifiable {
+        let id: String
+        let title: String
+        let subtitle: String?
+        let selection: SidebarSelection
+    }
+
+    /// Sidebar 只承载页面导航，能力目录条目通过 selection 进入二级列表。
     enum SidebarSelection: Hashable {
         case page(Page)
+        case catalog(CatalogSection)
         case tool(String)
         case skill(String)
         case commonSkill(String)
@@ -126,7 +169,7 @@ private final class ControlPanelModel: ObservableObject {
     }
 
     enum SettingsPage: String, CaseIterable, Identifiable {
-        case appearance, permissions, startup, logs, advancedConnection, about
+        case appearance, permissions, startup, logs, traces, advancedConnection, about
 
         var id: String { rawValue }
         var title: String {
@@ -134,6 +177,7 @@ private final class ControlPanelModel: ObservableObject {
             case .permissions: return L10n.text("Permissions")
             case .startup: return L10n.text("Startup")
             case .logs: return L10n.text("Logs")
+            case .traces: return L10n.text("Call tracing")
 
             case .advancedConnection: return L10n.text("Advanced connection")
             case .appearance: return L10n.text("Appearance")
@@ -178,6 +222,7 @@ private final class ControlPanelModel: ObservableObject {
     @Published private(set) var quickTunnelGenerating = false
     @Published var updateActivity: DesktopUpdateActivity = .idle
     @Published var message: String?
+    @Published var notice: String?
     @Published private(set) var cloudflaredComponentOperation: ComponentOperationState?
     @Published private(set) var publicEndpointCheckRevision = 0
 
@@ -261,13 +306,29 @@ private final class ControlPanelModel: ObservableObject {
     }
 
     func loadTraces(query: String, tool: String, source: String, status filter: String) async -> RuntimeTracesPayload? {
-        await service.runtimeTraces(
+        let summary = await service.runtimeTraces(
             query: query,
             tool: tool,
             source: source,
             status: filter,
+            view: "summary",
             configuration: status.configuration
         )
+        if summary != nil { return summary }
+        // 与未支持 view=summary 的旧 Core 混用时回退到完整列表，仍能展示记录。
+        return await service.runtimeTraces(
+            query: query,
+            tool: tool,
+            source: source,
+            status: filter,
+            view: "full",
+            configuration: status.configuration
+        )
+    }
+
+    /// 列表只带摘要，正文（命令/stdout/stderr）在选中记录后单独回读。
+    func loadTraceDetail(id: UInt64) async -> RuntimeTraceRecord? {
+        await service.runtimeTraceDetail(id: id, configuration: status.configuration)
     }
 
     func loadArtifacts() async -> RuntimeArtifactsPayload? {
@@ -300,6 +361,40 @@ private final class ControlPanelModel: ObservableObject {
 
     func catalogPlugin(named name: String) -> RuntimePluginItem? {
         runtimePlugins?.plugins.first { $0.name == name }
+    }
+
+    func catalogEntryCount(for section: CatalogSection) -> Int {
+        catalogEntries(for: section).count
+    }
+
+    func catalogEntries(for section: CatalogSection) -> [CatalogEntry] {
+        switch section {
+        case .tools:
+            return (catalog?.tools ?? []).map {
+                CatalogEntry(id: "tool:\($0.name)", title: $0.name, subtitle: $0.title, selection: .tool($0.name))
+            }
+        case .skills:
+            return (runtimeSkills?.skills ?? []).map {
+                CatalogEntry(id: "skill:\($0.skillRef)", title: $0.name, subtitle: $0.sourceType, selection: .skill($0.skillRef))
+            }
+        case .commonSkills:
+            return (catalog?.commonSkills?.items ?? []).map {
+                CatalogEntry(id: "common:\($0.skillRef)", title: $0.name, subtitle: $0.file, selection: .commonSkill($0.skillRef))
+            }
+        case .rules:
+            return (catalog?.rules ?? []).map {
+                CatalogEntry(
+                    id: "rule:\($0.path)",
+                    title: ($0.path as NSString).lastPathComponent,
+                    subtitle: $0.scope.isEmpty ? $0.path : "\($0.scope) · \($0.path)",
+                    selection: .rule($0.path)
+                )
+            }
+        case .plugins:
+            return (runtimePlugins?.plugins ?? []).map {
+                CatalogEntry(id: "plugin:\($0.name)", title: $0.name, subtitle: $0.format, selection: .plugin($0.name))
+            }
+        }
     }
 
     func invalidatePublicEndpointCheck() {
@@ -405,9 +500,13 @@ private final class ControlPanelModel: ObservableObject {
 
     @discardableResult
     func applySettings(_ settings: EditableServiceSettings) async -> Bool {
-        await perform(recheckPublicEndpointOnSuccess: true) {
+        let applied = await perform(recheckPublicEndpointOnSuccess: true) {
             try await self.configurationController.apply(settings)
         }
+        if applied {
+            notice = L10n.text("Saved. Restart AgentDock Core to apply the new configuration.")
+        }
+        return applied
     }
 
     func setCoreAutostart(_ enabled: Bool) async {
@@ -442,6 +541,7 @@ private final class ControlPanelModel: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         message = nil
+        notice = nil
         do {
             try await operation()
             update(await service.status())
@@ -493,8 +593,9 @@ private struct ControlPanelRootView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 14)
-                .padding(.top, 18)
-                .padding(.bottom, 12)
+                // fullSizeContentView 已经给出标题栏安全区，再叠 18pt 会把侧栏标题推得偏高。
+                .padding(.top, 6)
+                .padding(.bottom, 10)
 
                 List(selection: $model.selection) {
                     Section {
@@ -503,7 +604,6 @@ private struct ControlPanelRootView: View {
                                 .tag(ControlPanelModel.SidebarSelection.page(page))
                         }
                     }
-                    catalogSections
                 }
                 .id(model.languageRevision)
                 .listStyle(.sidebar)
@@ -524,69 +624,9 @@ private struct ControlPanelRootView: View {
         }
     }
 
-    /// 能力目录直接留在侧栏：工具数量、来源和顺序都要能被一眼扫完，
-    /// 详情只负责展示选中项的完整定义。
-    @ViewBuilder private var catalogSections: some View {
-        if let catalog = model.catalog {
-            Section {
-                ForEach(catalog.tools) { tool in
-                    Label(tool.name, systemImage: "wrench.and.screwdriver")
-                        .tag(ControlPanelModel.SidebarSelection.tool(tool.name))
-                }
-            } header: {
-                Text(L10n.format("Tools (%d)", catalog.tools.count))
-            }
-        }
-        if let skills = model.runtimeSkills {
-            Section {
-                ForEach(skills.skills) { skill in
-                    Label(skill.name, systemImage: "book.closed")
-                        .tag(ControlPanelModel.SidebarSelection.skill(skill.skillRef))
-                }
-            } header: {
-                Text(L10n.format("Skills (%d)", skills.count))
-            }
-        }
-        if let common = model.catalog?.commonSkills, common.total > 0 {
-            Section {
-                ForEach(common.items) { skill in
-                    Label(skill.name, systemImage: "books.vertical")
-                        .tag(ControlPanelModel.SidebarSelection.commonSkill(skill.skillRef))
-                }
-            } header: {
-                Text(L10n.format("Common skills (%d)", common.total))
-            }
-        }
-        if let catalog = model.catalog {
-            Section {
-                ForEach(catalog.rules) { rule in
-                    Label(Self.ruleLabel(rule), systemImage: "doc.text")
-                        .tag(ControlPanelModel.SidebarSelection.rule(rule.path))
-                }
-            } header: {
-                Text(L10n.format("Rules (%d)", catalog.rules.count))
-            }
-        }
-        if let plugins = model.runtimePlugins {
-            Section {
-                ForEach(plugins.plugins) { plugin in
-                    Label(plugin.name, systemImage: "puzzlepiece.extension")
-                        .tag(ControlPanelModel.SidebarSelection.plugin(plugin.name))
-                }
-            } header: {
-                Text(L10n.format("Plugins (%d)", plugins.count))
-            }
-        }
-    }
-
-    private static func ruleLabel(_ rule: RuntimeCatalogRule) -> String {
-        let name = (rule.path as NSString).lastPathComponent
-        let scope = rule.scope.isEmpty ? "AGENTS.md" : rule.scope
-        return "\(name) · \(scope)"
-    }
-
     @ViewBuilder private var pageContent: some View {
         switch model.selection {
+        case .catalog(let section): CatalogSectionListView(model: model, section: section)
         case .tool(let name): ToolCatalogDetailView(model: model, toolName: name)
         case .skill(let reference): SkillCatalogDetailView(model: model, skillRef: reference)
         case .commonSkill(let reference): CommonSkillCatalogDetailView(model: model, skillRef: reference)
@@ -857,6 +897,8 @@ private struct HomeView: View {
                             .foregroundStyle(.secondary)
                         if let message = model.message {
                             Text(message).font(.system(size: 12)).foregroundStyle(.red)
+                        } else if let notice = model.notice {
+                            Text(notice).font(.system(size: 12)).foregroundStyle(.secondary)
                         }
                     }
 
@@ -1318,8 +1360,6 @@ private struct CapabilitiesView: View {
     @State private var profiles: [ACPProfileConfiguration] = []
     @State private var defaultProfile = ""
     @State private var selectedMCPAppsMode: MCPAppsMode = .full
-    @State private var traceMode: TraceMode = .off
-    @State private var traceRetentionDays = 3
     @State private var customName = ""
     @State private var customCommand = ""
     @State private var customArguments = ""
@@ -1331,6 +1371,35 @@ private struct CapabilitiesView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 PageHeader(title: L10n.text("Capabilities"), detail: L10n.text("Configure the capabilities AgentDock provides to AI."))
+                // 目录条目进二级可搜索列表：数量一览无余，但不会把侧栏铺满。
+                SettingsSection(L10n.text("Capability catalog")) {
+                    ForEach(ControlPanelModel.CatalogSection.allCases) { section in
+                        Button {
+                            model.selection = .catalog(section)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: section.symbol)
+                                    .frame(width: 18, alignment: .leading)
+                                    .foregroundStyle(.secondary)
+                                Text(section.title)
+                                Spacer(minLength: 12)
+                                Text("\(model.catalogEntryCount(for: section))")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 10)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if section != .plugins {
+                            RowDivider()
+                        }
+                    }
+                }
                 VStack(alignment: .leading, spacing: 8) {
                     Text(L10n.text("Built-in capabilities"))
                         .font(.system(size: 12, weight: .semibold))
@@ -1423,31 +1492,9 @@ private struct CapabilitiesView: View {
                             }.labelsHidden().frame(width: 120, alignment: .trailing)
                         }
                     }
-
-                    SettingsCard {
-                        SettingsRow(L10n.text("Call tracing"), detail: L10n.text("Record tool arguments and results for debugging.")) {
-                            Picker(L10n.text("Call tracing"), selection: $traceMode) {
-                                ForEach(TraceMode.allCases) { mode in
-                                    Text(mode.title).tag(mode)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 160, alignment: .trailing)
-                        }
-                        if traceMode != .off {
-                            RowDivider()
-                            SettingsRow(L10n.text("Keep traces"), detail: L10n.text("Older trace files are deleted after this window.")) {
-                                Stepper(value: $traceRetentionDays, in: 1...30) {
-                                    Text(L10n.format("%d days", traceRetentionDays))
-                                        .monospacedDigit()
-                                }
-                                .frame(width: 120, alignment: .trailing)
-                            }
-                        }
-                    }
                 }
 
-                Button(L10n.text("Save and restart")) {
+                Button(L10n.text("Save")) {
                     let settings = EditableServiceSettings(
                         port: configuration?.port ?? 8765,
                         logLevel: configuration?.logLevel ?? "info",
@@ -1458,8 +1505,8 @@ private struct CapabilitiesView: View {
                         acpEnabled: acpEnabled,
                         acpProfiles: profiles,
                         acpDefaultProfile: defaultProfile,
-                        traceMode: traceMode,
-                        traceRetentionDays: traceRetentionDays
+                        traceMode: configuration?.traceMode ?? .off,
+                        traceRetentionDays: configuration?.traceRetentionDays ?? 3
                     )
                     Task {
                         if await model.applySettings(settings) { loadConfiguration() }
@@ -1518,8 +1565,6 @@ private struct CapabilitiesView: View {
         }
         defaultProfile = configuration.acpDefaultProfile
         selectedMCPAppsMode = configuration.mcpAppsMode
-        traceMode = configuration.traceMode
-        traceRetentionDays = configuration.traceRetentionDays
         configurationInitialized = true
     }
 
@@ -1784,6 +1829,90 @@ private struct ActivityView: View {
     }
 }
 
+/// 追踪是运行期可观测性开关，与浏览器/ACP 这类能力开关分开：单独一页，只提交追踪字段。
+private struct SettingsTracesView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var traceMode: TraceMode = .off
+    @State private var traceRetentionDays = 3
+    @State private var initialized = false
+
+    private var configuration: ServiceConfiguration? { model.status.configuration }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            PageHeader(
+                title: L10n.text("Call tracing"),
+                detail: L10n.text("Record tool arguments and results for debugging.")
+            )
+
+            SettingsSection(L10n.text("Call tracing")) {
+                SettingsRow(L10n.text("Call tracing"), detail: L10n.text("Record tool arguments and results for debugging.")) {
+                    Picker(L10n.text("Call tracing"), selection: $traceMode) {
+                        ForEach(TraceMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160, alignment: .trailing)
+                }
+                if traceMode != .off {
+                    RowDivider()
+                    SettingsRow(L10n.text("Keep traces"), detail: L10n.text("Older trace files are deleted after this window.")) {
+                        Stepper(value: $traceRetentionDays, in: 1...30) {
+                            Text(L10n.format("%d days", traceRetentionDays))
+                                .monospacedDigit()
+                        }
+                        .frame(width: 120, alignment: .trailing)
+                    }
+                }
+            }
+
+            Button(L10n.text("Save")) {
+                Task {
+                    if await model.applySettings(editableSettings()) {
+                        loadConfiguration()
+                    }
+                }
+            }
+            .disabled(model.isBusy)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            if let message = model.message {
+                Text(message).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 650, alignment: .leading)
+        .task(id: model.statusUpdatedAt) {
+            if !initialized { loadConfiguration() }
+        }
+    }
+
+    private func loadConfiguration() {
+        guard let configuration else { return }
+        traceMode = configuration.traceMode
+        traceRetentionDays = configuration.traceRetentionDays
+        initialized = true
+    }
+
+    /// 只改追踪字段，其余配置从当前环境回填，避免覆盖用户在其他页面的修改。
+    private func editableSettings() -> EditableServiceSettings {
+        let current = configuration
+        return EditableServiceSettings(
+            port: current?.port ?? 8765,
+            logLevel: current?.logLevel ?? "info",
+            mcpAppsMode: current?.mcpAppsMode ?? .full,
+            browserEnabled: current?.browserEnabled ?? false,
+            browserCDPURL: current?.browserCDPURL ?? "",
+            browserReuseExistingCDP: current?.browserReuseExistingCDP ?? false,
+            acpEnabled: current?.acpEnabled ?? false,
+            acpProfiles: current?.acpProfiles ?? [],
+            acpDefaultProfile: current?.acpDefaultProfile ?? "",
+            traceMode: traceMode,
+            traceRetentionDays: traceRetentionDays
+        )
+    }
+}
+
 private struct SettingsView: View {
     @ObservedObject var model: ControlPanelModel
     @State private var port = 8765
@@ -1991,6 +2120,8 @@ private struct SettingsView: View {
                     Text(message).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
+        case .traces:
+            SettingsTracesView(model: model)
         case .permissions:
             VStack(alignment: .leading, spacing: 20) {
                 PageHeader(title: L10n.text("Permissions"), detail: L10n.text("Review macOS permissions required by enabled capabilities."))
@@ -2468,14 +2599,106 @@ private extension Notification.Name {
 
 // MARK: - Capability catalog
 
+/// 能力目录二级页：先看全部条目，再搜索筛选，点条目进详情。
+private struct CatalogSectionListView: View {
+    @ObservedObject var model: ControlPanelModel
+    let section: ControlPanelModel.CatalogSection
+    @State private var query = ""
+
+    private var entries: [ControlPanelModel.CatalogEntry] {
+        let all = model.catalogEntries(for: section)
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return all }
+        return all.filter { entry in
+            entry.title.localizedCaseInsensitiveContains(trimmed)
+                || (entry.subtitle?.localizedCaseInsensitiveContains(trimmed) ?? false)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                Button {
+                    model.selection = .page(.capabilities)
+                } label: {
+                    Label(L10n.text("Back"), systemImage: "chevron.left")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+
+                PageHeader(
+                    title: section.title,
+                    detail: L10n.format("%d items", entries.count)
+                )
+
+                TextField(L10n.text("Search"), text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 320)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 12)
+
+            if entries.isEmpty {
+                Text(L10n.text("No matching entries"))
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+                Spacer(minLength: 0)
+            } else {
+                List(entries) { entry in
+                    Button {
+                        model.selection = entry.selection
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: section.symbol)
+                                .frame(width: 18, alignment: .leading)
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.title).font(.system(size: 13))
+                                if let subtitle = entry.subtitle, !subtitle.isEmpty {
+                                    Text(subtitle)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            Spacer(minLength: 12)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .listStyle(.inset)
+            }
+        }
+        // 目录页首屏就要看到条目：进入时补拉一次，避开上层页面的节流窗口。
+        .task { await model.refreshRuntimeData() }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
 private struct CatalogDetailScroll<Content: View>: View {
     let title: String
     var detail: String?
+    var onBack: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                if let onBack {
+                    Button(action: onBack) {
+                        Label(L10n.text("Back"), systemImage: "chevron.left")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
                 PageHeader(title: title, detail: detail)
                 content()
             }
@@ -2551,7 +2774,7 @@ private struct ToolCatalogDetailView: View {
 
     var body: some View {
         if let tool = model.catalogTool(named: toolName) {
-            CatalogDetailScroll(title: tool.name, detail: tool.title) {
+            CatalogDetailScroll(title: tool.name, detail: tool.title, onBack: { model.selection = .catalog(.tools) }) {
                 if !tool.description.isEmpty {
                     Text(tool.description)
                         .font(.system(size: 12.5))
@@ -2603,7 +2826,7 @@ private struct SkillCatalogDetailView: View {
 
     var body: some View {
         if let skill = model.catalogSkill(reference: skillRef) {
-            CatalogDetailScroll(title: skill.name, detail: skill.description) {
+            CatalogDetailScroll(title: skill.name, detail: skill.description, onBack: { model.selection = .catalog(.skills) }) {
                 CatalogCard(title: L10n.text("Skill")) {
                     CatalogKeyValueRow(label: L10n.text("Source"), value: skill.sourceType)
                     CatalogKeyValueRow(label: L10n.text("Reference"), value: skill.skillRef, mono: true)
@@ -2626,7 +2849,7 @@ private struct CommonSkillCatalogDetailView: View {
 
     var body: some View {
         if let skill = model.catalogCommonSkill(reference: skillRef) {
-            CatalogDetailScroll(title: skill.name, detail: skill.description) {
+            CatalogDetailScroll(title: skill.name, detail: skill.description, onBack: { model.selection = .catalog(.commonSkills) }) {
                 CatalogCard(title: L10n.text("Skill")) {
                     CatalogKeyValueRow(label: L10n.text("Source"), value: skill.sourceType)
                     CatalogKeyValueRow(label: L10n.text("Reference"), value: skill.skillRef, mono: true)
@@ -2645,7 +2868,11 @@ private struct RuleCatalogDetailView: View {
 
     var body: some View {
         if let rule = model.catalogRule(path: rulePath) {
-            CatalogDetailScroll(title: (rule.path as NSString).lastPathComponent, detail: rule.path) {
+            CatalogDetailScroll(
+                title: (rule.path as NSString).lastPathComponent,
+                detail: rule.path,
+                onBack: { model.selection = .catalog(.rules) }
+            ) {
                 CatalogCard(title: L10n.text("Rule")) {
                     CatalogKeyValueRow(label: L10n.text("Scope"), value: rule.scope)
                     CatalogKeyValueRow(label: L10n.text("Status"), value: rule.status)
@@ -2685,7 +2912,7 @@ private struct PluginCatalogDetailView: View {
 
     var body: some View {
         if let plugin = model.catalogPlugin(named: pluginName) {
-            CatalogDetailScroll(title: plugin.name, detail: plugin.format) {
+            CatalogDetailScroll(title: plugin.name, detail: plugin.format, onBack: { model.selection = .catalog(.plugins) }) {
                 CatalogCard(title: L10n.text("Plugin")) {
                     CatalogKeyValueRow(label: L10n.text("Version"), value: plugin.version)
                     CatalogKeyValueRow(label: L10n.text("Enabled"), value: plugin.enabled ? L10n.text("Yes") : L10n.text("No"))
@@ -2817,22 +3044,21 @@ private struct TasksView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 PageHeader(title: L10n.text("Tasks"), detail: L10n.format("%d tasks", allTasks.count))
-                HStack(spacing: 14) {
+                HStack(spacing: 10) {
                     ForEach(statusSummary, id: \.0) { item in
                         Button {
                             statusFilter = statusFilter == item.3 ? "all" : item.3
                         } label: {
-                            HStack(spacing: 5) {
-                                Circle().fill(item.2).frame(width: 7, height: 7)
-                                Text("\(item.1) \(item.0)")
-                                    .font(.system(size: 11.5, weight: statusFilter == item.3 ? .semibold : .regular))
-                                    .foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                            }
-                            .contentShape(Rectangle())
+                            TaskStatusCard(
+                                title: item.0,
+                                count: item.1,
+                                color: item.2,
+                                selected: statusFilter == item.3
+                            )
                         }
                         .buttonStyle(.plain)
                     }
+                    Spacer(minLength: 0)
                 }
                 HStack(spacing: 10) {
                     TextField(L10n.text("Search title, project, or device"), text: $query)
@@ -2880,14 +3106,26 @@ private struct TasksView: View {
                                         expandedProjects.insert(group.label)
                                     }
                                 } label: {
-                                    HStack(spacing: 6) {
+                                    HStack(spacing: 8) {
                                         Image(systemName: isExpanded(group.label) ? "chevron.down" : "chevron.right")
-                                            .font(.system(size: 10, weight: .semibold))
-                                        Text(group.label).lineLimit(1)
-                                        Spacer()
-                                        Text("\(group.rows.count)")
-                                            .monospacedDigit()
+                                            .font(.system(size: 9, weight: .semibold))
                                             .foregroundStyle(.secondary)
+                                            .frame(width: 10)
+                                        Image(systemName: "folder")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.secondary)
+                                        Text(group.label)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                            .help(group.label)
+                                        Spacer(minLength: 8)
+                                        Text("\(group.rows.count)")
+                                            .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 1.5)
+                                            .background(Capsule().fill(Color.primary.opacity(0.07)))
                                     }
                                     .contentShape(Rectangle())
                                 }
@@ -2895,7 +3133,8 @@ private struct TasksView: View {
                             }
                         }
                     }
-                    .listStyle(.sidebar)
+                    // .sidebar 会把内容区渲染成侧栏灰底，这里只是分栏列表，应当跟窗口背景一致。
+                    .listStyle(.inset)
                     .frame(minWidth: 300, idealWidth: 340, maxWidth: 420)
 
                     Divider()
@@ -2921,10 +3160,51 @@ private struct TasksView: View {
         } else if selectedTaskID != nil {
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            Text(L10n.text("Select a task"))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 10) {
+                Image(systemName: "square.split.2x1")
+                    .font(.system(size: 26, weight: .light))
+                    .foregroundStyle(.tertiary)
+                Text(L10n.text("Select a task"))
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+private struct TaskStatusCard: View {
+    let title: String
+    let count: Int
+    let color: Color
+    let selected: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                Circle().fill(color).frame(width: 7, height: 7)
+                Text(title)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+
+            Text("\(count)")
+                .font(.system(size: 20, weight: .semibold))
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .frame(minWidth: 104, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(selected ? color.opacity(0.12) : Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(selected ? color.opacity(0.5) : Color.primary.opacity(0.07), lineWidth: 1)
+        )
+        .contentShape(Rectangle())
     }
 }
 
@@ -3095,12 +3375,18 @@ private struct TracesView: View {
     @State private var statusFilter = "all"
     @State private var payload: RuntimeTracesPayload?
     @State private var selectedTraceID: UInt64?
+    @State private var detailRecord: RuntimeTraceRecord?
+    @State private var detailLoading = false
     @State private var loading = false
 
     private var records: [RuntimeTraceRecord] { payload?.records ?? [] }
 
+    /// 详情回读完成前先用列表摘要渲染元数据，避免选中后出现空白等待。
     private var selectedRecord: RuntimeTraceRecord? {
-        records.first { $0.id == selectedTraceID }
+        if let detailRecord, detailRecord.id == selectedTraceID {
+            return detailRecord
+        }
+        return records.first { $0.id == selectedTraceID }
     }
 
     var body: some View {
@@ -3150,7 +3436,7 @@ private struct TracesView: View {
                                 .tag(record.id)
                         }
                     }
-                    .listStyle(.sidebar)
+                    .listStyle(.inset)
                     .frame(minWidth: 320, idealWidth: 380, maxWidth: 460)
 
                     Divider()
@@ -3161,6 +3447,7 @@ private struct TracesView: View {
             }
         }
         .task { await reload() }
+        .task(id: selectedTraceID) { await loadDetail() }
     }
 
     private var statusDetail: String {
@@ -3172,7 +3459,7 @@ private struct TracesView: View {
 
     @ViewBuilder private var traceDetailPane: some View {
         if let record = selectedRecord {
-            TraceDetailContent(record: record)
+            TraceDetailView(record: record, loadingDetail: detailLoading)
         } else {
             Text(L10n.text("Select a trace"))
                 .foregroundStyle(.secondary)
@@ -3190,8 +3477,25 @@ private struct TracesView: View {
         )
         if let selectedTraceID, !records.contains(where: { $0.id == selectedTraceID }) {
             self.selectedTraceID = nil
+            self.detailRecord = nil
         }
         loading = false
+        await loadDetail()
+    }
+
+    private func loadDetail() async {
+        guard let id = selectedTraceID else {
+            detailRecord = nil
+            detailLoading = false
+            return
+        }
+        detailLoading = true
+        let loaded = await model.loadTraceDetail(id: id)
+        // 用户可能在请求返回前切换了选中行，晚到的响应不能覆盖当前详情。
+        if selectedTraceID == id {
+            detailRecord = loaded
+        }
+        detailLoading = false
     }
 }
 
@@ -3220,74 +3524,20 @@ private struct TraceRowView: View {
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
+                if let summary = record.command?.summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(summary)
+                }
                 if let code = record.errorCode, !code.isEmpty {
                     Text(code).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.red)
                 }
             }
         }
         .padding(.vertical, 2)
-    }
-}
-
-private struct TraceDetailContent: View {
-    let record: RuntimeTraceRecord
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(record.tool).font(.system(size: 18, weight: .semibold))
-                    HStack(spacing: 10) {
-                        Text(record.source)
-                        Text(String(format: "%.1f ms", record.durationMS)).monospacedDigit()
-                        Text(record.success ? L10n.text("Success") : L10n.text("Error"))
-                        Text(RuntimeTimestamp.precise(record.startedAt)).monospacedDigit()
-                    }
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
-                    if let userAgent = record.userAgent, !userAgent.isEmpty {
-                        Text(userAgent)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .textSelection(.enabled)
-                    }
-                }
-
-                if let code = record.errorCode, !code.isEmpty {
-                    CatalogCard(title: L10n.text("Error")) {
-                        CatalogKeyValueRow(label: L10n.text("Code"), value: code, mono: true)
-                        if let error = record.error, !error.isEmpty {
-                            Text(error).font(.system(size: 12)).textSelection(.enabled)
-                        }
-                    }
-                }
-
-                payloadCard(L10n.text("Arguments"), record.arguments)
-                payloadCard(L10n.text("Result"), record.result)
-
-                if record.truncated == true {
-                    Text(L10n.text("Payload preview is truncated to 8 KiB per side."))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(22)
-            .frame(maxWidth: 860, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    @ViewBuilder private func payloadCard(_ title: String, _ text: String?) -> some View {
-        CatalogCard(title: title) {
-            if let text, !text.isEmpty {
-                Text(text)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Text("—").foregroundStyle(.secondary)
-            }
-        }
     }
 }
 
@@ -3382,11 +3632,35 @@ private struct AnalyticsView: View {
             ? 0
             : Double(payload.totalErrors) / Double(payload.totalCalls)
         return HStack(spacing: 10) {
-            AnalyticsMetric(title: L10n.text("Window calls"), value: "\(payload.windowCalls)")
-            AnalyticsMetric(title: L10n.text("Total calls"), value: "\(payload.totalCalls)")
-            AnalyticsMetric(title: L10n.text("Errors"), value: "\(payload.totalErrors)")
-            AnalyticsMetric(title: L10n.text("Error rate"), value: String(format: "%.1f%%", errorRate * 100))
-            AnalyticsMetric(title: L10n.text("Active calls"), value: "\(payload.activeCalls)")
+            AnalyticsMetric(
+                title: L10n.text("Window calls"),
+                value: "\(payload.windowCalls)",
+                icon: "clock",
+                caption: L10n.text("Last 5 minutes")
+            )
+            AnalyticsMetric(
+                title: L10n.text("Total calls"),
+                value: "\(payload.totalCalls)",
+                icon: "sum"
+            )
+            AnalyticsMetric(
+                title: L10n.text("Errors"),
+                value: "\(payload.totalErrors)",
+                icon: "exclamationmark.triangle",
+                tint: payload.totalErrors > 0 ? .red : .secondary
+            )
+            AnalyticsMetric(
+                title: L10n.text("Error rate"),
+                value: String(format: "%.1f%%", errorRate * 100),
+                icon: "percent",
+                tint: errorRate > 0.05 ? .red : (errorRate > 0 ? .orange : .secondary)
+            )
+            AnalyticsMetric(
+                title: L10n.text("Active calls"),
+                value: "\(payload.activeCalls)",
+                icon: "bolt.horizontal",
+                tint: payload.activeCalls > 0 ? .accentColor : .secondary
+            )
         }
     }
 
@@ -3410,13 +3684,14 @@ private struct AnalyticsView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
-            .padding(.bottom, 4)
+            .padding(.bottom, 6)
 
             if stats.isEmpty {
                 Text(L10n.text("No tool calls recorded yet."))
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 10)
             } else {
                 ForEach(stats.prefix(Self.barLimit)) { item in
                     AnalyticsBarRow(stat: item, maxCount: maxCount)
@@ -3425,6 +3700,7 @@ private struct AnalyticsView: View {
                     Text(L10n.format("Showing top %d of %d tools.", Self.barLimit, stats.count))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                        .padding(.top, 4)
                 }
             }
         }
@@ -3443,53 +3719,58 @@ private struct AnalyticsView: View {
             }
             .font(.system(size: 10.5, weight: .semibold))
             .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4)
             Divider()
-            ForEach(stats) { item in
-                HStack(spacing: 8) {
-                    Text(item.tool)
-                        .font(.system(size: 12, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("\(item.count)").frame(width: 70, alignment: .trailing)
-                    Text("\(item.errorCount)")
-                        .foregroundStyle(item.errorCount > 0 ? Color.red : Color.secondary)
-                        .frame(width: 70, alignment: .trailing)
-                    Text(String(format: "%.1f%%", item.errorRate * 100))
-                        .frame(width: 90, alignment: .trailing)
-                    Text(formatMS(item.p50DurationMS)).frame(width: 70, alignment: .trailing)
-                    Text(formatMS(item.p95DurationMS)).frame(width: 70, alignment: .trailing)
-                    Text(formatMS(item.p99DurationMS)).frame(width: 70, alignment: .trailing)
-                }
-                .font(.system(size: 11.5).monospacedDigit())
+            ForEach(Array(stats.enumerated()), id: \.element.id) { index, item in
+                AnalyticsTableRow(stat: item, isEven: index.isMultiple(of: 2))
             }
         }
     }
 
     private func formatMS(_ value: Double) -> String {
-        value >= 1000 ? String(format: "%.1fs", value / 1000) : String(format: "%.0fms", value)
+        analyticsDuration(value)
     }
 }
 
 private struct AnalyticsMetric: View {
     let title: String
     let value: String
+    var icon: String
+    var tint: Color = .secondary
+    var caption: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+
             Text(value)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold))
                 .monospacedDigit()
+                .foregroundStyle(tint == .secondary ? Color.primary : tint)
+
+            if let caption {
+                Text(caption)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, minHeight: 84, alignment: .topLeading)
         .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
         )
     }
 }
@@ -3503,37 +3784,82 @@ private struct AnalyticsBarRow: View {
         return min(1, Double(stat.count) / Double(maxCount))
     }
 
+    private var barColor: Color {
+        if stat.errorRate > 0.2 { return .red }
+        if stat.errorCount > 0 { return .orange }
+        return .accentColor
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(stat.tool)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .frame(width: 180, alignment: .leading)
-                    .lineLimit(1)
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(stat.errorCount > 0 ? Color.accentColor.opacity(0.85) : Color.accentColor)
-                            .frame(width: max(2, geometry.size.width * ratio))
-                    }
-                }
-                .frame(height: 10)
-                Text("\(stat.count)")
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .frame(width: 52, alignment: .trailing)
-                if stat.errorCount > 0 {
-                    Text("\(stat.errorCount) err")
-                        .font(.system(size: 10.5).monospacedDigit())
-                        .foregroundStyle(.red)
-                        .frame(width: 62, alignment: .trailing)
-                } else {
-                    Color.clear.frame(width: 62, height: 1)
+        HStack(spacing: 10) {
+            Text(stat.tool)
+                .font(.system(size: 11.5, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: 168, alignment: .leading)
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.06))
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [barColor.opacity(0.7), barColor],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(3, geometry.size.width * ratio))
                 }
             }
+            .frame(height: 8)
+
+            Text("\(stat.count)")
+                .font(.system(size: 11.5, weight: .medium).monospacedDigit())
+                .frame(width: 40, alignment: .trailing)
+
+            Text(stat.errorCount > 0 ? String(format: "%.0f%%", stat.errorRate * 100) : "—")
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(stat.errorCount > 0 ? Color.red : Color.secondary)
+                .frame(width: 46, alignment: .trailing)
         }
+        .padding(.vertical, 3)
     }
+}
+
+private struct AnalyticsTableRow: View {
+    let stat: RuntimeToolStats
+    let isEven: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(stat.tool)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("\(stat.count)").frame(width: 70, alignment: .trailing)
+            Text("\(stat.errorCount)")
+                .foregroundStyle(stat.errorCount > 0 ? Color.red : Color.secondary)
+                .frame(width: 70, alignment: .trailing)
+            Text(String(format: "%.1f%%", stat.errorRate * 100))
+                .foregroundStyle(stat.errorRate > 0 ? Color.red : Color.secondary)
+                .frame(width: 90, alignment: .trailing)
+            Text(analyticsDuration(stat.p50DurationMS)).frame(width: 70, alignment: .trailing)
+            Text(analyticsDuration(stat.p95DurationMS)).frame(width: 70, alignment: .trailing)
+            Text(analyticsDuration(stat.p99DurationMS)).frame(width: 70, alignment: .trailing)
+        }
+        .font(.system(size: 11.5).monospacedDigit())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(isEven ? Color.primary.opacity(0.035) : Color.clear)
+        )
+    }
+}
+
+private func analyticsDuration(_ value: Double) -> String {
+    value >= 1000 ? String(format: "%.1fs", value / 1000) : String(format: "%.0fms", value)
 }
 
 // MARK: - File change history
@@ -3725,7 +4051,7 @@ private struct FilesView: View {
                                     .tag(node.path)
                             }
                         }
-                        .listStyle(.sidebar)
+                        .listStyle(.inset)
                     }
                     .frame(minWidth: 280, idealWidth: 340, maxWidth: 440)
 

@@ -3,6 +3,7 @@ package scripts
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -105,9 +106,15 @@ func TestMacOSPagesUseConsistentCompactTopSpacing(t *testing.T) {
 	}
 	content := string(data)
 
-	// 五个右侧页面共用 44pt 标题栏空间；正文各留 16pt，避免顶部大块留白。
-	if got := strings.Count(content, ".padding(.top, 16)"); got != 5 {
-		t.Fatalf("expected compact 16pt top padding on all five pages, got %d", got)
+	// 右侧页面共用 44pt 标题栏空间；正文各留 16pt，避免顶部大块留白。
+	// 页面数量跟随 Page 枚举，新增页面忘记内边距会被这条断言拦住。
+	pageLine := regexp.MustCompile(`case home, [a-zA-Z, ]+`).FindString(content)
+	if pageLine == "" {
+		t.Fatal("cannot locate ControlPanelModel.Page case list")
+	}
+	pageCount := len(strings.Split(strings.TrimPrefix(pageLine, "case "), ","))
+	if got := strings.Count(content, ".padding(.top, 16)"); got != pageCount {
+		t.Fatalf("expected compact 16pt top padding on all %d pages, got %d", pageCount, got)
 	}
 	if strings.Contains(content, ".padding(.top, 24)") {
 		t.Fatal("macOS pages must not keep the oversized 24pt top padding")

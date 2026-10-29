@@ -650,3 +650,18 @@
 
 "Common skills (%d)" = "通用技能（%d）";
 "This shared Skill is no longer indexed." = "该共享技能已不在索引中。";
+
+"Analytics" = "调用分析";
+"Tool call counts and latency distribution." = "工具调用次数与延迟分布。";
+"Window calls" = "窗口调用";
+"Errors" = "错误";
+"Error rate" = "错误率";
+"Tool calls" = "工具调用";
+"Search tools" = "搜索工具";
+"Sort by" = "排序";
+"Calls" = "调用次数";
+"P95 latency" = "P95 延迟";
+"Details" = "明细";
+"%d tools" = "%d 个工具";
+"No tool calls recorded yet." = "暂无工具调用记录。";
+"Showing top %d of %d tools." = "仅显示前 %d 个工具，共 %d 个。";

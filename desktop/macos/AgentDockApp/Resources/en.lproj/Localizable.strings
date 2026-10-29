@@ -650,3 +650,18 @@
 
 "Common skills (%d)" = "Common skills (%d)";
 "This shared Skill is no longer indexed." = "This shared Skill is no longer indexed.";
+
+"Analytics" = "Analytics";
+"Tool call counts and latency distribution." = "Tool call counts and latency distribution.";
+"Window calls" = "Window calls";
+"Errors" = "Errors";
+"Error rate" = "Error rate";
+"Tool calls" = "Tool calls";
+"Search tools" = "Search tools";
+"Sort by" = "Sort by";
+"Calls" = "Calls";
+"P95 latency" = "P95 latency";
+"Details" = "Details";
+"%d tools" = "%d tools";
+"No tool calls recorded yet." = "No tool calls recorded yet.";
+"Showing top %d of %d tools." = "Showing top %d of %d tools.";

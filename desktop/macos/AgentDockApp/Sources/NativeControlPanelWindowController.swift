@@ -83,7 +83,7 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
 @MainActor
 private final class ControlPanelModel: ObservableObject {
     enum Page: String, CaseIterable, Identifiable {
-        case home, connections, capabilities, tasks, traces, activity, settings
+        case home, connections, capabilities, tasks, traces, analytics, activity, settings
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -92,6 +92,7 @@ private final class ControlPanelModel: ObservableObject {
             case .capabilities: return L10n.text("Capabilities")
             case .tasks: return L10n.text("Tasks")
             case .traces: return L10n.text("Traces")
+            case .analytics: return L10n.text("Analytics")
             case .activity: return L10n.text("Activity")
             case .settings: return L10n.text("Settings")
             }
@@ -103,6 +104,7 @@ private final class ControlPanelModel: ObservableObject {
             case .capabilities: return "square.grid.2x2"
             case .tasks: return "checklist"
             case .traces: return "waveform.path.ecg"
+            case .analytics: return "chart.bar.xaxis"
             case .activity: return "clock.arrow.circlepath"
             case .settings: return "gearshape"
             }
@@ -586,6 +588,7 @@ private struct ControlPanelRootView: View {
         case .capabilities: CapabilitiesView(model: model)
         case .tasks: TasksView(model: model)
         case .traces: TracesView(model: model)
+        case .analytics: AnalyticsView(model: model)
         case .activity: ActivityView(model: model)
         }
     }
@@ -2694,6 +2697,7 @@ private struct TasksView: View {
                 }
             }
             .padding(.horizontal, 24)
+            .padding(.top, 16)
             .padding(.bottom, 12)
 
             Divider()
@@ -2972,6 +2976,7 @@ private struct TracesView: View {
                 }
             }
             .padding(.horizontal, 24)
+            .padding(.top, 16)
             .padding(.bottom, 12)
 
             Divider()
@@ -3112,6 +3117,251 @@ private struct TraceDetailContent: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Text("—").foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Analytics dashboard
+
+private enum AnalyticsSort: String, CaseIterable, Identifiable {
+    case count, errorRate, p95
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .count: return L10n.text("Calls")
+        case .errorRate: return L10n.text("Error rate")
+        case .p95: return L10n.text("P95 latency")
+        }
+    }
+}
+
+private struct AnalyticsView: View {
+    private static let refreshIntervalNanoseconds: UInt64 = 5_000_000_000
+    private static let barLimit = 24
+
+    @ObservedObject var model: ControlPanelModel
+    @State private var analytics: RuntimeAnalyticsPayload?
+    @State private var query = ""
+    @State private var sort: AnalyticsSort = .count
+
+    private var running: Bool { model.status.loaded && model.status.healthy }
+
+    private var stats: [RuntimeToolStats] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filtered = (analytics?.toolStats ?? []).filter {
+            needle.isEmpty || $0.tool.lowercased().contains(needle)
+        }
+        return filtered.sorted { left, right in
+            switch sort {
+            case .count:
+                return left.count == right.count ? left.tool < right.tool : left.count > right.count
+            case .errorRate:
+                return left.errorRate == right.errorRate ? left.count > right.count : left.errorRate > right.errorRate
+            case .p95:
+                return left.p95DurationMS == right.p95DurationMS ? left.count > right.count : left.p95DurationMS > right.p95DurationMS
+            }
+        }
+    }
+
+    private var maxCount: Int { stats.map(\.count).max() ?? 0 }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                PageHeader(
+                    title: L10n.text("Analytics"),
+                    detail: L10n.text("Tool call counts and latency distribution.")
+                )
+
+                if let analytics {
+                    metrics(analytics)
+                    chart
+                    table
+                } else {
+                    CatalogUnavailable(
+                        reason: running
+                            ? L10n.text("Runtime analytics are unavailable.")
+                            : L10n.text("Start AgentDock to view runtime activity.")
+                    )
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+            .frame(maxWidth: 960, alignment: .leading)
+        }
+        .task {
+            while !Task.isCancelled {
+                if running {
+                    let next = await model.service.runtimeAnalytics(configuration: model.status.configuration)
+                    if analytics == nil || next?.windowCalls != analytics?.windowCalls || next?.totalCalls != analytics?.totalCalls {
+                        analytics = next
+                    }
+                } else if analytics != nil {
+                    analytics = nil
+                }
+                try? await Task.sleep(nanoseconds: Self.refreshIntervalNanoseconds)
+            }
+        }
+    }
+
+    private func metrics(_ payload: RuntimeAnalyticsPayload) -> some View {
+        let errorRate = payload.totalCalls == 0
+            ? 0
+            : Double(payload.totalErrors) / Double(payload.totalCalls)
+        return HStack(spacing: 10) {
+            AnalyticsMetric(title: L10n.text("Window calls"), value: "\(payload.windowCalls)")
+            AnalyticsMetric(title: L10n.text("Total calls"), value: "\(payload.totalCalls)")
+            AnalyticsMetric(title: L10n.text("Errors"), value: "\(payload.totalErrors)")
+            AnalyticsMetric(title: L10n.text("Error rate"), value: String(format: "%.1f%%", errorRate * 100))
+            AnalyticsMetric(title: L10n.text("Active calls"), value: "\(payload.activeCalls)")
+        }
+    }
+
+    private var chart: some View {
+        CatalogCard(title: L10n.text("Tool calls")) {
+            HStack(spacing: 10) {
+                TextField(L10n.text("Search tools"), text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 240)
+                Picker(L10n.text("Sort by"), selection: $sort) {
+                    ForEach(AnalyticsSort.allCases) { option in
+                        Text(option.title).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 300)
+                Spacer()
+                Text(L10n.format("%d tools", stats.count))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            .padding(.bottom, 4)
+
+            if stats.isEmpty {
+                Text(L10n.text("No tool calls recorded yet."))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                ForEach(stats.prefix(Self.barLimit)) { item in
+                    AnalyticsBarRow(stat: item, maxCount: maxCount)
+                }
+                if stats.count > Self.barLimit {
+                    Text(L10n.format("Showing top %d of %d tools.", Self.barLimit, stats.count))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var table: some View {
+        CatalogCard(title: L10n.text("Details")) {
+            HStack(spacing: 8) {
+                Text(L10n.text("Tool")).frame(maxWidth: .infinity, alignment: .leading)
+                Text(L10n.text("Calls")).frame(width: 70, alignment: .trailing)
+                Text(L10n.text("Errors")).frame(width: 70, alignment: .trailing)
+                Text(L10n.text("Error rate")).frame(width: 90, alignment: .trailing)
+                Text("P50").frame(width: 70, alignment: .trailing)
+                Text("P95").frame(width: 70, alignment: .trailing)
+                Text("P99").frame(width: 70, alignment: .trailing)
+            }
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(.secondary)
+            Divider()
+            ForEach(stats) { item in
+                HStack(spacing: 8) {
+                    Text(item.tool)
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("\(item.count)").frame(width: 70, alignment: .trailing)
+                    Text("\(item.errorCount)")
+                        .foregroundStyle(item.errorCount > 0 ? Color.red : Color.secondary)
+                        .frame(width: 70, alignment: .trailing)
+                    Text(String(format: "%.1f%%", item.errorRate * 100))
+                        .frame(width: 90, alignment: .trailing)
+                    Text(formatMS(item.p50DurationMS)).frame(width: 70, alignment: .trailing)
+                    Text(formatMS(item.p95DurationMS)).frame(width: 70, alignment: .trailing)
+                    Text(formatMS(item.p99DurationMS)).frame(width: 70, alignment: .trailing)
+                }
+                .font(.system(size: 11.5).monospacedDigit())
+            }
+        }
+    }
+
+    private func formatMS(_ value: Double) -> String {
+        value >= 1000 ? String(format: "%.1fs", value / 1000) : String(format: "%.0fms", value)
+    }
+}
+
+private struct AnalyticsMetric: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 19, weight: .semibold))
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+private struct AnalyticsBarRow: View {
+    let stat: RuntimeToolStats
+    let maxCount: Int
+
+    private var ratio: Double {
+        guard maxCount > 0 else { return 0 }
+        return min(1, Double(stat.count) / Double(maxCount))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(stat.tool)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .frame(width: 180, alignment: .leading)
+                    .lineLimit(1)
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(stat.errorCount > 0 ? Color.accentColor.opacity(0.85) : Color.accentColor)
+                            .frame(width: max(2, geometry.size.width * ratio))
+                    }
+                }
+                .frame(height: 10)
+                Text("\(stat.count)")
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .frame(width: 52, alignment: .trailing)
+                if stat.errorCount > 0 {
+                    Text("\(stat.errorCount) err")
+                        .font(.system(size: 10.5).monospacedDigit())
+                        .foregroundStyle(.red)
+                        .frame(width: 62, alignment: .trailing)
+                } else {
+                    Color.clear.frame(width: 62, height: 1)
+                }
             }
         }
     }

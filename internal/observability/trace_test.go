@@ -82,6 +82,7 @@ func TestTraceStoreDiskPersistsAndReloads(t *testing.T) {
 	}
 	store.Record(TraceRecord{
 		Tool: "file_edit", Source: "mcp", Success: true, Arguments: `{"action":"add"}`,
+		UserAgent:   "ChatGPT/1.0 (+macOS)",
 		FileChanges: []FileChange{{Path: "/tmp/a.txt", Action: "add", Insertions: 1, Diff: "@@ -0,0 +1 @@"}},
 		StartedAt:   time.Now(),
 	})
@@ -105,6 +106,12 @@ func TestTraceStoreDiskPersistsAndReloads(t *testing.T) {
 	}
 	if changes := reloaded.FileChanges("/tmp/a.txt", 10); len(changes) != 1 || changes[0].Diff == "" {
 		t.Fatalf("reloaded file changes = %#v", changes)
+	}
+	if records[0].UserAgent != "ChatGPT/1.0 (+macOS)" {
+		t.Fatalf("reloaded user agent = %q", records[0].UserAgent)
+	}
+	if got := reloaded.Query(TraceQuery{Query: "chatgpt"}); len(got) != 1 {
+		t.Fatalf("UA search = %#v", got)
 	}
 	// 重启后 ID 必须继续递增，不能覆盖已落盘记录的排序。
 	reloaded.Record(TraceRecord{Tool: "read_file", Success: true, StartedAt: time.Now()})

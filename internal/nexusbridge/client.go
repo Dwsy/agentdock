@@ -368,6 +368,8 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 			err = fmt.Errorf("解析工具请求: %w", decodeErr)
 		} else {
 			toolCtx := observability.WithSource(ctx, observability.SourceNexus)
+			// Nexus 调用没有 HTTP UA；用固定标识区分云中继来源。
+			toolCtx = observability.WithUserAgent(toolCtx, "nexus-bridge")
 			result, err = c.node.Invoke(toolCtx, request.Tool, request.Arguments)
 		}
 	case protocol.OperationResourceRead:

@@ -84,6 +84,7 @@ type FileChangeEntry struct {
 	TraceID    string    `json:"trace_id,omitempty"`
 	Tool       string    `json:"tool"`
 	Source     string    `json:"source"`
+	UserAgent  string    `json:"user_agent,omitempty"`
 	StartedAt  time.Time `json:"started_at"`
 	Success    bool      `json:"success"`
 	Path       string    `json:"path"`
@@ -100,6 +101,7 @@ type TraceRecord struct {
 	ID            uint64    `json:"id"`
 	Tool          string    `json:"tool"`
 	Source        string    `json:"source"`
+	UserAgent     string    `json:"user_agent,omitempty"`
 	StartedAt     time.Time `json:"started_at"`
 	DurationMS    float64   `json:"duration_ms"`
 	Success       bool      `json:"success"`
@@ -309,7 +311,7 @@ func (s *TraceStore) Query(query TraceQuery) []TraceRecord {
 }
 
 func traceMatches(record TraceRecord, needle string) bool {
-	fields := []string{record.Tool, string(record.Source), record.ErrorCode, record.Error, record.Arguments, record.Result, record.TraceID}
+	fields := []string{record.Tool, string(record.Source), record.UserAgent, record.ErrorCode, record.Error, record.Arguments, record.Result, record.TraceID}
 	for _, field := range fields {
 		if strings.Contains(strings.ToLower(field), needle) {
 			return true

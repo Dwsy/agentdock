@@ -15,6 +15,7 @@ import (
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/httpx/requestmeta"
 	"github.com/uvwt/agentdock/internal/mcp"
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 func agentDockContextHandler(server *mcp.Server, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
@@ -58,6 +59,9 @@ func mcpEndpointHandler(server *mcp.Server, cfg config.Config, oauthStore *auth.
 			return
 		}
 		ctx := extractMCPTraceContext(r.Context(), r.Header)
+		// UA 是调用来源的一部分：桌面端、ChatGPT、Claude 或脚本会给出不同值，
+		// 记录到 trace/调用记录后可在 UI 直接区分来源。
+		ctx = observability.WithUserAgent(ctx, r.Header.Get("User-Agent"))
 		ctx = requestmeta.WithBaseURL(ctx, requestPublicBaseURL(cfg, r))
 		transport.ServeHTTP(w, r.WithContext(ctx))
 	}

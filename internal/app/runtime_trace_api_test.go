@@ -209,7 +209,8 @@ func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rt.Call(context.Background(), "agentdock_context", nil); err != nil {
+	uaCtx := observability.WithUserAgent(context.Background(), "ChatGPT/1.0 (+macOS)")
+	if _, err := rt.Call(uaCtx, "agentdock_context", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,7 +224,7 @@ func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
 		},
 		"traces": {
 			result: mustTraces(t, rt),
-			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`},
+			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`, `"user_agent"`},
 		},
 		"file-changes": {
 			result: mustFileChanges(t, rt),
@@ -289,5 +290,27 @@ func TestRuntimeFileChangesSkipsFailedEdits(t *testing.T) {
 	}
 	if changes := result["changes"].([]observability.FileChangeEntry); len(changes) != 0 {
 		t.Fatalf("failed edit leaked into history: %#v", changes)
+	}
+}
+
+func TestRuntimeCapturesUserAgent(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	ctx := observability.WithUserAgent(context.Background(), "ChatGPT/1.0 (+macOS)")
+	if _, err := rt.Call(ctx, "agentdock_context", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	records := rt.observer.Snapshot().RecentCalls
+	if len(records) != 1 || records[0].UserAgent != "ChatGPT/1.0 (+macOS)" {
+		t.Fatalf("analytics recent calls = %#v", records)
+	}
+
+	result, err := rt.RuntimeTraces("", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces := result["records"].([]observability.TraceRecord)
+	if len(traces) != 1 || traces[0].UserAgent != "ChatGPT/1.0 (+macOS)" {
+		t.Fatalf("traces = %#v", traces)
 	}
 }

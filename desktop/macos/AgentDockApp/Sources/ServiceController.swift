@@ -401,6 +401,7 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
     let id: UInt64
     let tool: String
     let source: String
+    let userAgent: String?
     let startedAt: String
     let durationMS: Double
     let success: Bool
@@ -412,6 +413,7 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, tool, source, success, arguments, result, error, truncated
+        case userAgent = "user_agent"
         case startedAt = "started_at"
         case durationMS = "duration_ms"
         case errorCode = "error_code"
@@ -747,6 +749,7 @@ struct RuntimeAnalyticsCall: Decodable, Identifiable {
     let id: UInt64
     let tool: String
     let source: String
+    let userAgent: String?
     let startedAt: String
     let durationMS: Double
     let success: Bool
@@ -756,6 +759,7 @@ struct RuntimeAnalyticsCall: Decodable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, tool, source, success, stages
+        case userAgent = "user_agent"
         case startedAt = "started_at"
         case durationMS = "duration_ms"
         case errorCode = "error_code"
@@ -767,6 +771,7 @@ struct RuntimeAnalyticsCall: Decodable, Identifiable {
         id = try container.decode(UInt64.self, forKey: .id)
         tool = try container.decode(String.self, forKey: .tool)
         source = try container.decode(String.self, forKey: .source)
+        userAgent = try container.decodeIfPresent(String.self, forKey: .userAgent)
         startedAt = try container.decode(String.self, forKey: .startedAt)
         durationMS = try container.decode(Double.self, forKey: .durationMS)
         success = try container.decode(Bool.self, forKey: .success)

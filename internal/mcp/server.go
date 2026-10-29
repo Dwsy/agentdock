@@ -109,7 +109,9 @@ func (s *Server) ServeStdio(in io.Reader, out io.Writer) error {
 	if s == nil || s.sdk == nil {
 		return errors.New("MCP server is not initialized")
 	}
-	return s.sdk.Run(context.Background(), &mcpsdk.IOTransport{
+	// stdio 没有 HTTP 头，用固定标识区分本地管道调用。
+	ctx := observability.WithUserAgent(context.Background(), "stdio")
+	return s.sdk.Run(ctx, &mcpsdk.IOTransport{
 		Reader: readCloser{Reader: in},
 		Writer: writeCloser{Writer: out},
 	})

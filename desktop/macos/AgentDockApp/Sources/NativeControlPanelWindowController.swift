@@ -1642,9 +1642,17 @@ private struct RuntimeActivityCallRow: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Text("\(RuntimeActivityFormat.source(call.source)) · \(RuntimeActivityFormat.relativeTime(call.startedAt))")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text("\(RuntimeActivityFormat.source(call.source)) · \(RuntimeActivityFormat.relativeTime(call.startedAt))")
+                    if let userAgent = call.userAgent, !userAgent.isEmpty {
+                        Text("· \(userAgent)")
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(userAgent)
+                    }
+                }
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
             }
             Spacer(minLength: 16)
             Text(RuntimeActivityFormat.duration(call.durationMS))
@@ -3203,6 +3211,12 @@ private struct TraceRowView: View {
                     Text(String(format: "%.1f ms", record.durationMS)).monospacedDigit()
                     Text(RuntimeTimestamp.minute(record.startedAt)).monospacedDigit()
                         .help(RuntimeTimestamp.precise(record.startedAt))
+                    if let userAgent = record.userAgent, !userAgent.isEmpty {
+                        Text(userAgent)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(userAgent)
+                    }
                 }
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
@@ -3231,6 +3245,12 @@ private struct TraceDetailContent: View {
                     }
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
+                    if let userAgent = record.userAgent, !userAgent.isEmpty {
+                        Text(userAgent)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
                 }
 
                 if let code = record.errorCode, !code.isEmpty {

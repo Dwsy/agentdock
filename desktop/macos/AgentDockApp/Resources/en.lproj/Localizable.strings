@@ -756,3 +756,12 @@
 "Copy tool name" = "Copy tool name";
 "Copy trace ID" = "Copy trace ID";
 "Search path, action, or diff" = "Search path, action, or diff";
+"Task handoff" = "Task handoff";
+"Copy task handoff" = "Copy task handoff";
+"Copy a brief that lets an agent claim and continue this task." = "Copy a brief that lets an agent claim and continue this task.";
+"Task ID" = "Task ID";
+"Project" = "Project";
+"Device" = "Device";
+"Updated" = "Updated";
+"How to continue" = "How to continue";
+"Claim this task and continue it with task_manage: call get to load the full state, checkpoint to update step progress, block to record a blocker, resume to continue after it clears, final_review to record the acceptance review, and complete to close the task." = "Claim this task and continue it with task_manage: call get to load the full state, checkpoint to update step progress, block to record a blocker, resume to continue after it clears, final_review to record the acceptance review, and complete to close the task.";

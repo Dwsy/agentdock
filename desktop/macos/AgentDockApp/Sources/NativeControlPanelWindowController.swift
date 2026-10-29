@@ -3218,11 +3218,75 @@ private struct TaskRowView: View {
 private struct TaskDetailContent: View {
     let task: RuntimeTaskDetail
 
+    /// 任务交接文本：一段可直接粘贴给 agent 的自包含简报，
+    /// 让它领取任务并按 task_manage 生命周期继续推进，
+    /// 不需要再回头翻控制面板。
+    private var handoffText: String {
+        var lines: [String] = []
+        lines.append("# \(L10n.text("Task handoff")): \(task.title)")
+        lines.append("")
+        lines.append("- \(L10n.text("Task ID")): \(task.id)")
+        if let project = task.project, !project.isEmpty {
+            lines.append("- \(L10n.text("Project")): \(project)")
+        }
+        if let device = task.device, !device.isEmpty {
+            lines.append("- \(L10n.text("Device")): \(device)")
+        }
+        lines.append("- \(L10n.text("Status")): \(task.status) / \(task.phase)")
+        lines.append("- \(L10n.text("Updated")): \(RuntimeTimestamp.precise(task.updatedAt))")
+
+        if !task.goal.isEmpty {
+            lines.append("")
+            lines.append("## \(L10n.text("Goal"))")
+            lines.append(task.goal)
+        }
+        if let conditions = task.conditions, !conditions.isEmpty {
+            lines.append("")
+            lines.append("## \(L10n.text("Conditions"))")
+            lines += conditions.map { "- \($0.text)" }
+        }
+        if let steps = task.steps, !steps.isEmpty {
+            lines.append("")
+            lines.append("## \(L10n.text("Steps"))")
+            lines += steps.map { step in
+                let mark: String
+                switch step.status {
+                case "completed": mark = "[x]"
+                case "in_progress": mark = "[>]"
+                default: mark = "[ ]"
+                }
+                return "- \(mark) \(step.title) (\(step.status))"
+            }
+        }
+        if let blocker = task.blocker, !blocker.isEmpty {
+            lines.append("")
+            lines.append("## \(L10n.text("Blocker"))")
+            lines.append(blocker)
+        }
+        if let summary = task.summary, !summary.isEmpty {
+            lines.append("")
+            lines.append("## \(L10n.text("Summary"))")
+            lines.append(summary)
+        }
+        if let events = task.events, !events.isEmpty {
+            lines.append("")
+            lines.append("## \(L10n.text("Events"))")
+            lines += events.suffix(10).map { "- \(RuntimeTimestamp.precise($0.createdAt)) \($0.summary)" }
+        }
+        lines.append("")
+        lines.append("## \(L10n.text("How to continue"))")
+        lines.append(L10n.text("Claim this task and continue it with task_manage: call get to load the full state, checkpoint to update step progress, block to record a blocker, resume to continue after it clears, final_review to record the acceptance review, and complete to close the task."))
+        return lines.joined(separator: "\n")
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(task.title).font(.system(size: 18, weight: .semibold))
+                    HStack(spacing: 8) {
+                        Text(task.title).font(.system(size: 18, weight: .semibold))
+                        CopyButton(text: task.title)
+                    }
                     HStack(spacing: 10) {
                         Text(task.status)
                         Text(task.phase)
@@ -3232,6 +3296,7 @@ private struct TaskDetailContent: View {
                         if let device = task.device, !device.isEmpty {
                             Text(device)
                         }
+                        CopyButton(text: task.id)
                     }
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
@@ -3246,11 +3311,25 @@ private struct TaskDetailContent: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
+                    HStack(spacing: 8) {
+                        Button {
+                            copyToPasteboard(handoffText)
+                        } label: {
+                            Label(L10n.text("Copy task handoff"), systemImage: "doc.on.doc")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help(L10n.text("Copy a brief that lets an agent claim and continue this task."))
+                    }
                 }
 
                 if !task.goal.isEmpty {
                     CatalogCard(title: L10n.text("Goal")) {
-                        Text(task.goal).font(.system(size: 12.5)).textSelection(.enabled)
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(task.goal).font(.system(size: 12.5)).textSelection(.enabled)
+                            CopyButton(text: task.goal)
+                        }
                     }
                 }
                 if let blocker = task.blocker, !blocker.isEmpty {

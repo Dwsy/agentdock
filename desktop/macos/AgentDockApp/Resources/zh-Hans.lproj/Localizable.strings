@@ -756,3 +756,12 @@
 "Copy tool name" = "复制工具名";
 "Copy trace ID" = "复制 trace ID";
 "Search path, action, or diff" = "搜索路径、动作或 diff";
+"Task handoff" = "任务交接";
+"Copy task handoff" = "复制任务交接";
+"Copy a brief that lets an agent claim and continue this task." = "复制一段简报，让 Agent 领取并继续该任务。";
+"Task ID" = "任务 ID";
+"Project" = "项目";
+"Device" = "设备";
+"Updated" = "更新";
+"How to continue" = "如何继续";
+"Claim this task and continue it with task_manage: call get to load the full state, checkpoint to update step progress, block to record a blocker, resume to continue after it clears, final_review to record the acceptance review, and complete to close the task." = "请领取并继续该任务：用 task_manage get 获取完整状态，用 checkpoint 更新步骤进度；被阻塞时用 block 记录 blocker，解除后 resume；验收用 final_review 记录评审，收尾用 complete。";

@@ -23,6 +23,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     )
     private lazy var trayPopover = TrayPopoverController(
+        // 托盘面板自己按需拉取运行态数据（仅打开时），因此需要同一个 ServiceController 实例，
+        // 不能另建一份以免配置文件与生命周期状态出现两份视图。
+        service: service,
+        // 打开面板时 AppDelegate 的 15 秒轮询可能已经过期，面板要求重新取一次状态。
+        onRequestStatusRefresh: { [weak self] in
+            self?.refreshStatus()
+        },
         onOpenAgentDock: { [weak self] in
             self?.showSetup()
         },
@@ -647,11 +654,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupWindow.presentSettings(status: currentStatus)
     }
 
-    private func runTrayPopoverServiceAction(_ action: String) {
-        if action == "start" {
-            startService()
-        } else {
-            restartService()
+    private func runTrayPopoverServiceAction(_ action: TrayServiceAction) {
+        switch action {
+        case .start: startService()
+        case .stop: stopService()
         }
     }
 

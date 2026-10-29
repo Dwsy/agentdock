@@ -72,6 +72,10 @@ func (r *runtimeStub) RuntimeCatalog(context.Context) (app.Result, error) {
 	return app.Result{"tools": []any{}, "rules": []any{}, "tool_count": 0}, nil
 }
 
+func (r *runtimeStub) RuntimeArtifacts(context.Context) (app.Result, error) {
+	return app.Result{"artifacts": []any{}, "count": 0, "configured": false}, nil
+}
+
 func (r *runtimeStub) RuntimeFileChanges(query string, limit int) (app.Result, error) {
 	r.changeQuery, r.changeLimit = query, limit
 	return app.Result{"count": 0, "changes": []any{}}, nil
@@ -405,5 +409,15 @@ func TestDispatchFileChanges(t *testing.T) {
 	var toolErr *app.ToolError
 	if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" {
 		t.Fatalf("error = %#v", err)
+	}
+}
+
+func TestDispatchArtifacts(t *testing.T) {
+	result, err := Dispatch(context.Background(), &runtimeStub{}, Request{Method: "GET", Path: "/internal/runtime/artifacts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := result["artifacts"]; !ok {
+		t.Fatalf("result = %#v", result)
 	}
 }

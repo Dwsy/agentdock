@@ -55,6 +55,11 @@ type FileChangeRuntime interface {
 	RuntimeFileChanges(query string, limit int) (app.Result, error)
 }
 
+// ArtifactRuntime 是公开文件发布记录的只读列表。
+type ArtifactRuntime interface {
+	RuntimeArtifacts(context.Context) (app.Result, error)
+}
+
 type MCPOAuthRuntime interface {
 	RuntimeMCPOAuthCallback(context.Context, oauthclient.CallbackResult) error
 }

@@ -102,6 +102,15 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			limit,
 		)
 		return map[string]any(result), err
+	case path == "/internal/runtime/artifacts":
+		artifacts, ok := runtime.(ArtifactRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "ARTIFACTS_UNSUPPORTED", Message: "runtime does not expose published artifacts", Category: "not_found",
+			}
+		}
+		result, err := artifacts.RuntimeArtifacts(ctx)
+		return map[string]any(result), err
 	case path == "/internal/runtime/file-changes":
 		fileChanges, ok := runtime.(FileChangeRuntime)
 		if !ok {

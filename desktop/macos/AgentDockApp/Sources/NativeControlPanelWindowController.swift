@@ -83,7 +83,7 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
 @MainActor
 private final class ControlPanelModel: ObservableObject {
     enum Page: String, CaseIterable, Identifiable {
-        case home, connections, capabilities, tasks, files, traces, analytics, activity, settings
+        case home, connections, capabilities, tasks, files, published, traces, analytics, activity, settings
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -92,6 +92,7 @@ private final class ControlPanelModel: ObservableObject {
             case .capabilities: return L10n.text("Capabilities")
             case .tasks: return L10n.text("Tasks")
             case .files: return L10n.text("Files")
+            case .published: return L10n.text("Published")
             case .traces: return L10n.text("Traces")
             case .analytics: return L10n.text("Analytics")
             case .activity: return L10n.text("Activity")
@@ -105,6 +106,7 @@ private final class ControlPanelModel: ObservableObject {
             case .capabilities: return "square.grid.2x2"
             case .tasks: return "checklist"
             case .files: return "folder"
+            case .published: return "link"
             case .traces: return "waveform.path.ecg"
             case .analytics: return "chart.bar.xaxis"
             case .activity: return "clock.arrow.circlepath"
@@ -266,6 +268,10 @@ private final class ControlPanelModel: ObservableObject {
             status: filter,
             configuration: status.configuration
         )
+    }
+
+    func loadArtifacts() async -> RuntimeArtifactsPayload? {
+        await service.runtimeArtifacts(configuration: status.configuration)
     }
 
     func loadPluginDetail(name: String) async -> RuntimePluginDetail? {
@@ -598,6 +604,7 @@ private struct ControlPanelRootView: View {
         case .capabilities: CapabilitiesView(model: model)
         case .tasks: TasksView(model: model)
         case .files: FilesView(model: model)
+        case .published: PublishedView(model: model)
         case .traces: TracesView(model: model)
         case .analytics: AnalyticsView(model: model)
         case .activity: ActivityView(model: model)
@@ -3938,4 +3945,150 @@ private func diffLines(_ diff: String) -> [FileDiffLine] {
             }
             return FileDiffLine(id: index, kind: kind, text: line)
         }
+}
+
+// MARK: - Published artifacts
+
+private struct PublishedView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var payload: RuntimeArtifactsPayload?
+    @State private var loading = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                PageHeader(
+                    title: L10n.text("Published"),
+                    detail: L10n.text("Files shared through file_publish.")
+                )
+                HStack(spacing: 10) {
+                    if let payload {
+                        Text(L10n.format("%d files", payload.count))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        if !payload.publicBaseURL.isEmpty {
+                            Text(payload.publicBaseURL)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(payload.publicBaseURL)
+                        }
+                    }
+                    Spacer()
+                    Button(L10n.text("Refresh")) { Task { await reload() } }
+                        .disabled(loading)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            if payload == nil {
+                CatalogUnavailable(reason: L10n.text("Published files are unavailable while AgentDock Core is not running."))
+            } else {
+                if payload?.configured == false {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                        Text(L10n.text("No public address is configured. Links appear after configuring a public URL or tunnel."))
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 10)
+                    Divider()
+                }
+                let items = payload?.artifacts ?? []
+                if items.isEmpty {
+                    CatalogUnavailable(reason: L10n.text("No published files."))
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(items) { item in
+                                PublishedRow(item: item)
+                                Divider().padding(.leading, 24)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+        .task { await reload() }
+    }
+
+    private func reload() async {
+        loading = true
+        payload = await model.loadArtifacts()
+        loading = false
+    }
+}
+
+private struct PublishedRow: View {
+    let item: RuntimeArtifactItem
+
+    private var expired: Bool {
+        guard let date = RuntimeTimestamp.parse(item.expiresAt) else { return false }
+        return date < Date()
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: item.archive ? "archivebox" : "doc")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(item.filename)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(1)
+                    if item.archive {
+                        Text(L10n.text("Archive"))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                HStack(spacing: 12) {
+                    Text(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))
+                    Text(item.mimeType)
+                    Text(RuntimeTimestamp.minute(item.createdAt))
+                        .help(RuntimeTimestamp.precise(item.createdAt))
+                    Text(L10n.format("Expires %@", RuntimeTimestamp.minute(item.expiresAt)))
+                        .foregroundStyle(expired ? .red : .secondary)
+                        .help(RuntimeTimestamp.precise(item.expiresAt))
+                }
+                .font(.system(size: 10.5).monospacedDigit())
+                .foregroundStyle(.secondary)
+
+                if !item.url.isEmpty {
+                    HStack(spacing: 8) {
+                        Text(item.url)
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Button(L10n.text("Open")) {
+                            if let url = URL(string: item.url) { NSWorkspace.shared.open(url) }
+                        }
+                        .controlSize(.small)
+                        Button(L10n.text("Copy link")) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(item.url, forType: .string)
+                        }
+                        .controlSize(.small)
+                    }
+                    .padding(.top, 2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 12)
+    }
 }

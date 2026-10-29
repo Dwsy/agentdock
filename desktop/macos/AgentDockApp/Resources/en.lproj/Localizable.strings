@@ -698,3 +698,13 @@
 "Patched" = "Patched";
 "Deleted" = "Deleted";
 "Moved" = "Moved";
+
+"Published" = "Published";
+"Files shared through file_publish." = "Files shared through file_publish.";
+"No public address is configured. Links appear after configuring a public URL or tunnel." = "No public address is configured. Links appear after configuring a public URL or tunnel.";
+"No published files." = "No published files.";
+"Published files are unavailable while AgentDock Core is not running." = "Published files are unavailable while AgentDock Core is not running.";
+"Copy link" = "Copy link";
+"Archive" = "Archive";
+"Expires %@" = "Expires %@";
+"%d files" = "%d files";

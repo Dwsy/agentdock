@@ -16,6 +16,7 @@ import (
 	mcpclient "github.com/uvwt/agentdock/internal/mcp/client"
 	"github.com/uvwt/agentdock/internal/observability"
 	pluginruntime "github.com/uvwt/agentdock/internal/plugin"
+	"github.com/uvwt/agentdock/internal/publicartifacts"
 	"github.com/uvwt/agentdock/internal/resourcelibrary"
 	"github.com/uvwt/agentdock/internal/taskstate"
 	toolacp "github.com/uvwt/agentdock/internal/tool/acp"
@@ -53,6 +54,7 @@ type Runtime struct {
 	acp            *toolacp.Service
 	observer       *observability.Recorder
 	traces         *observability.TraceStore
+	artifacts      publicartifacts.Store
 	tracing        *observability.Tracing
 	resourceOnce   sync.Once
 	resourceSvc    *resourcelibrary.Service
@@ -153,6 +155,12 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 		return nil, fmt.Errorf("initialize trace store: %w", err)
 	}
 	runtime.traces = traces
+	// 公开文件与 HTTP 服务共用同一目录与签名密钥；store 无内存状态，重复构造安全。
+	runtime.artifacts = publicartifacts.New(cfg.AgentDockHome, cfg.OAuthServerURL, cfg.Port)
+	if err := runtime.artifacts.EnsureSecret(); err != nil {
+		_ = runtime.Close()
+		return nil, fmt.Errorf("initialize public artifacts: %w", err)
+	}
 	runtime.dynamicMCP = toolmcp.New(mcpClients, envs)
 	if err := runtime.configureMCPOAuthCallbacks(); err != nil {
 		_ = runtime.dynamicMCP.Close()

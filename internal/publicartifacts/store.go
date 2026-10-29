@@ -196,17 +196,27 @@ func (s Store) finishPublishedPayload(req publishPayloadRequest) (PublishResult,
 		return PublishResult{}, fmt.Errorf("write artifact metadata: %w", err)
 	}
 	base := strings.TrimRight(firstNonEmpty(req.BaseURL, s.ServerURL), "/")
-	publicURL := ""
-	if base != "" {
-		secret, err := s.ensureSecret()
-		if err != nil {
-			_ = os.RemoveAll(req.Dir)
-			return PublishResult{}, err
-		}
-		sig := sign(secret, meta.ArtifactID, meta.Filename, meta.ExpiresAt.Unix(), meta.SHA256)
-		publicURL = base + "/artifacts/public/" + url.PathEscape(meta.ArtifactID) + "/" + url.PathEscape(meta.Filename) + "?expires=" + strconv.FormatInt(meta.ExpiresAt.Unix(), 10) + "&sig=" + url.QueryEscape(sig)
+	publicURL, err := s.publicURL(base, meta)
+	if err != nil {
+		_ = os.RemoveAll(req.Dir)
+		return PublishResult{}, err
 	}
 	return PublishResult{Metadata: meta, URL: publicURL}, nil
+}
+
+// publicURL 由签名参数唯一决定；List 与 Publish 必须产出同一种链接，
+// 否则控制面板显示的地址会和真正能下载的地址不一致。
+func (s Store) publicURL(base string, meta Metadata) (string, error) {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return "", nil
+	}
+	secret, err := s.ensureSecret()
+	if err != nil {
+		return "", err
+	}
+	sig := sign(secret, meta.ArtifactID, meta.Filename, meta.ExpiresAt.Unix(), meta.SHA256)
+	return base + "/artifacts/public/" + url.PathEscape(meta.ArtifactID) + "/" + url.PathEscape(meta.Filename) + "?expires=" + strconv.FormatInt(meta.ExpiresAt.Unix(), 10) + "&sig=" + url.QueryEscape(sig), nil
 }
 
 func normalizeNow(now time.Time) time.Time {

@@ -24,6 +24,7 @@ private enum RuntimeAPIPath {
     static let tasks = "/internal/runtime/tasks"
     static let traces = "/internal/runtime/traces"
     static let fileChanges = "/internal/runtime/file-changes"
+    static let artifacts = "/internal/runtime/artifacts"
 }
 
 // MARK: - Runtime capability catalog
@@ -428,6 +429,40 @@ struct RuntimeTraceStatus: Decodable {
         case mode, root, count
         case retentionDays = "retention_days"
         case maxRecords = "max_records"
+    }
+}
+
+struct RuntimeArtifactItem: Decodable, Identifiable {
+    let artifactID: String
+    let filename: String
+    let mimeType: String
+    let sizeBytes: Int64
+    let createdAt: String
+    let expiresAt: String
+    let archive: Bool
+    let url: String
+
+    var id: String { artifactID }
+
+    private enum CodingKeys: String, CodingKey {
+        case filename, archive, url
+        case artifactID = "artifact_id"
+        case mimeType = "mime_type"
+        case sizeBytes = "size_bytes"
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct RuntimeArtifactsPayload: Decodable {
+    let count: Int
+    let configured: Bool
+    let publicBaseURL: String
+    let artifacts: [RuntimeArtifactItem]
+
+    private enum CodingKeys: String, CodingKey {
+        case count, configured, artifacts
+        case publicBaseURL = "public_base_url"
     }
 }
 
@@ -1008,6 +1043,16 @@ final class ServiceController: @unchecked Sendable {
             path: RuntimeAPIPath.tasks + "/" + id,
             timeout: 5
         )?.task
+    }
+
+    func runtimeArtifacts(configuration: ServiceConfiguration?) async -> RuntimeArtifactsPayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeArtifactsPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.artifacts,
+            timeout: 5
+        )
     }
 
     func runtimeFileChanges(query: String = "", limit: Int = 500, configuration: ServiceConfiguration?) async -> RuntimeFileChangesPayload? {

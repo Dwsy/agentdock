@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-console-readonly-pages"
 title: "Console 只读页面迁移（6 页功能对等）"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "跨平台UI"
@@ -76,3 +76,4 @@ tags: ["mygo", "ui", "migration"]
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态补记 → done，备注: 经 `mygo-console-implementation` 交付（`desktop/console/internal/ui/` 7 页只读 UI + 三态 + 无窗口测试）

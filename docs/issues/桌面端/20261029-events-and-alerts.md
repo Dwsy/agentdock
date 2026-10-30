@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-events-and-alerts"
 title: "事件流与阈值告警"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "桌面端"
@@ -62,3 +62,4 @@ tags: ["events", "sse", "alerts", "priority-p2"]
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态补记 → done，备注: 经 `runtime-events-alerts` 交付（07d3d9d 运行时 SSE + 阈值告警，c1e2539 控制台告警横幅）

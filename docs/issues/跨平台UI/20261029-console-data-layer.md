@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-console-data-layer"
 title: "Console 数据层：Runtime API 客户端与页面状态机"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "跨平台UI"
@@ -62,3 +62,4 @@ tags: ["mygo", "runtime-api", "go", "contract"]
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态补记 → done，备注: 经 `mygo-console-implementation` 交付（`desktop/console/internal/runtimeapi/` client + 契约测试）

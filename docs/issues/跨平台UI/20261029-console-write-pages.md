@@ -1,7 +1,7 @@
 ---
 id: "2026-10-29-console-write-pages"
 title: "Console 写操作页面（任务/发布/trace）"
-status: "todo"
+status: "done"
 created: "2026-10-29"
 updated: "2026-10-29"
 category: "跨平台UI"
@@ -60,3 +60,4 @@ tags: ["mygo", "ui", "write", "approval"]
 ## Status 更新日志
 
 - **2026-10-29**: 创建
+- **2026-10-29**: 状态补记 → done，备注: 经 `mygo-console-v2-write-loop` 交付（任务/发布/trace 写操作，`pages_actions_test.go` 覆盖）

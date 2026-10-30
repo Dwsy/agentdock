@@ -41,6 +41,11 @@ const (
 	defaultTraceFlushMS       = 1000
 	defaultTraceMaxRecords    = 2000
 	maxTraceRetentionDays     = 30
+
+	// HTTP 抓包是内存环，默认关闭：它保留未脱敏的 header 与 body，
+	// 默认开启会把每次请求的凭据都留在进程内存里。
+	defaultNetworkCaptureMax = 200
+	maxNetworkCaptureMax     = 2000
 )
 
 func ParseTraceMode(value string) (TraceMode, error) {
@@ -138,6 +143,8 @@ type Config struct {
 	TraceBufferSize              int
 	TraceFlushMS                 int
 	TraceMaxRecords              int
+	NetworkCaptureEnabled        bool
+	NetworkCaptureMax            int
 }
 
 // ACPProfile 表示一个可独立运行、独立持久化会话的 ACP 实例。
@@ -182,6 +189,14 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	traceMaxRecords, err := getenvInt("AGENTDOCK_TRACE_MAX_RECORDS", defaultTraceMaxRecords)
+	if err != nil {
+		return Config{}, err
+	}
+	networkCaptureEnabled, err := getenvBool("AGENTDOCK_NETWORK_CAPTURE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	networkCaptureMax, err := getenvInt("AGENTDOCK_NETWORK_CAPTURE_MAX", defaultNetworkCaptureMax)
 	if err != nil {
 		return Config{}, err
 	}
@@ -268,6 +283,8 @@ func FromEnv() (Config, error) {
 		TraceBufferSize:              traceBufferSize,
 		TraceFlushMS:                 traceFlushMS,
 		TraceMaxRecords:              traceMaxRecords,
+		NetworkCaptureEnabled:        networkCaptureEnabled,
+		NetworkCaptureMax:            networkCaptureMax,
 	}, nil
 }
 
@@ -329,6 +346,12 @@ func (c *Config) Normalize() error {
 	}
 	if c.TraceMaxRecords == 0 {
 		c.TraceMaxRecords = defaultTraceMaxRecords
+	}
+	if c.NetworkCaptureMax == 0 {
+		c.NetworkCaptureMax = defaultNetworkCaptureMax
+	}
+	if c.NetworkCaptureMax < 1 || c.NetworkCaptureMax > maxNetworkCaptureMax {
+		return fmt.Errorf("AGENTDOCK_NETWORK_CAPTURE_MAX must be between 1 and %d: %d", maxNetworkCaptureMax, c.NetworkCaptureMax)
 	}
 	c.TraceMode = TraceMode(strings.ToLower(strings.TrimSpace(string(c.TraceMode))))
 	if c.TraceMode == "" {

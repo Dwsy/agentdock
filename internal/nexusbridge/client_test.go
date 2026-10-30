@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -311,6 +312,123 @@ func TestBridgeToolInvokeContinuesTraceContextIntoRuntime(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("bridge did not stop after cancellation")
+	}
+}
+
+// TestBridgeToolInvokeRecordsNetworkCapture 验证 WebSocket 桥接的节点操作会进网络
+// 抓包环：这条链路不走本地 HTTP 端口，HTTP 中间件看不到它。
+func TestBridgeToolInvokeRecordsNetworkCapture(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Config{
+		AgentDockDefaultDir:   filepath.Join(root, "workspace"),
+		AgentDockHome:         filepath.Join(root, ".agentdock"),
+		NetworkCaptureEnabled: true,
+		NetworkCaptureMax:     10,
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	node := mcp.NewServer(runtime, cfg)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	responseCh := make(chan protocol.Message, 1)
+	serverErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		socket, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer socket.Close()
+		var hello protocol.Message
+		if err := socket.ReadJSON(&hello); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := socket.WriteJSON(protocol.Message{Type: protocol.MessageNodeReady, ProtocolVersion: protocol.ConnectionProtocolVersion, HeartbeatMS: 60_000}); err != nil {
+			serverErr <- err
+			return
+		}
+		arguments, _ := json.Marshal(map[string]any{"tool": "agentdock_context", "arguments": map[string]any{}})
+		if err := socket.WriteJSON(protocol.Message{
+			Type: protocol.MessageToolInvoke, RequestID: "capture-call", Operation: protocol.OperationToolCall, Arguments: arguments,
+		}); err != nil {
+			serverErr <- err
+			return
+		}
+		var response protocol.Message
+		if err := socket.ReadJSON(&response); err != nil {
+			serverErr <- err
+			return
+		}
+		responseCh <- response
+		for {
+			if _, _, err := socket.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := NewClient(
+		Identity{Endpoint: server.URL, NodeID: "node-capture", DeviceID: "device-capture", DeviceToken: "capture-token"},
+		node, runtime, publicartifacts.Store{}, &ConnectionState{},
+	)
+	done := make(chan struct{})
+	go func() {
+		client.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("bridge did not stop after cancellation")
+		}
+	}()
+
+	select {
+	case response := <-responseCh:
+		if response.Type != protocol.MessageToolResult || response.RequestID != "capture-call" {
+			t.Fatalf("response = %#v", response)
+		}
+	case err := <-serverErr:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for bridge response")
+	}
+
+	store := runtime.NetworkCapture()
+	records := store.Query(observability.CaptureQuery{Channel: string(observability.CaptureChannelNexus)})
+	if len(records) != 1 {
+		t.Fatalf("captured %d nexus records, want 1", len(records))
+	}
+	record := records[0]
+	if record.Channel != observability.CaptureChannelNexus {
+		t.Fatalf("channel = %q, want %q", record.Channel, observability.CaptureChannelNexus)
+	}
+	if record.Method != string(protocol.OperationToolCall) || record.Path != "agentdock_context" {
+		t.Fatalf("method/path = %q/%q, want tool.call/agentdock_context", record.Method, record.Path)
+	}
+	if record.RequestID != "capture-call" || record.Proto != "WebSocket" {
+		t.Fatalf("request id/proto = %q/%q", record.RequestID, record.Proto)
+	}
+	if record.Outcome != observability.CaptureOutcomeOK || record.Status != 0 {
+		t.Fatalf("outcome/status = %q/%d, want ok/0", record.Outcome, record.Status)
+	}
+	if !strings.Contains(record.Request.Body, `"tool":"agentdock_context"`) {
+		t.Fatalf("request body = %q, want the original arguments", record.Request.Body)
+	}
+	if record.Response.Body == "" || record.Response.Bytes == 0 {
+		t.Fatalf("response = %+v, want the marshaled tool result", record.Response)
 	}
 }
 

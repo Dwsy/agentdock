@@ -331,6 +331,10 @@ func bridgeHello(identity Identity, tools []string, descriptors []protocol.ToolD
 
 func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming protocol.Message, cancels *invocationCancels) {
 	ctx := extractBridgeTraceContext(parent, &incoming)
+	started := time.Now()
+	// 声明先于 defer：闭包要在 panic 与正常路径都拿到最终的 result/err。
+	var result map[string]any
+	var err error
 	defer func() {
 		recovered := recover()
 		// 旧调用可能在重连之后才退出。这里只能注销本连接的项。
@@ -339,16 +343,17 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 			// Nexus Bridge 是远程 RPC 边界。单次工具 panic 只结束当前请求，
 			// 避免把整个 AgentDock 守护进程和其他本地会话一并带崩。
 			slog.Error("NexusDock node operation panicked", "request_id", incoming.RequestID, "operation", incoming.Operation, "panic", recovered, "stack", string(debug.Stack()))
+			err = fmt.Errorf("node operation panicked: %v", recovered)
 			_ = c.write(socket, protocol.Message{
 				Type:      protocol.MessageToolError,
 				RequestID: incoming.RequestID,
 				Error:     &protocol.RemoteError{Code: "NODE_OPERATION_FAILED", Message: "AgentDock node operation failed", Category: "internal"},
 			})
 		}
+		// 抓包走 defer：正常返回与 panic 都要在网络面板留下证据。
+		c.captureNodeOperation(incoming, started, result, err)
 	}()
 
-	var result map[string]any
-	var err error
 	switch incoming.Operation {
 	case protocol.OperationRuntimeRequest:
 		var request runtimeapi.Request
@@ -409,10 +414,86 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 	}
 	encoded, encodeErr := json.Marshal(result)
 	if encodeErr != nil {
-		_ = c.write(socket, protocol.Message{Type: protocol.MessageToolError, RequestID: incoming.RequestID, Error: bridgeError(fmt.Errorf("编码节点结果: %w", encodeErr))})
+		err = fmt.Errorf("编码节点结果: %w", encodeErr)
+		_ = c.write(socket, protocol.Message{Type: protocol.MessageToolError, RequestID: incoming.RequestID, Error: bridgeError(err)})
 		return
 	}
 	_ = c.write(socket, protocol.Message{Type: protocol.MessageToolResult, RequestID: incoming.RequestID, Result: encoded})
+}
+
+// captureNodeOperation 把 Nexus 桥接的节点操作写进网络抓包环。这条链路走
+// WebSocket 长连接，不经本地 HTTP 端口，HTTP 中间件看不到它，必须在桥接侧记。
+// 只存内存、不脱敏，与 HTTP 通道同一套取舍。
+func (c *Client) captureNodeOperation(incoming protocol.Message, started time.Time, result map[string]any, callErr error) {
+	source, ok := c.runtime.(runtimeapi.CaptureSource)
+	if !ok {
+		return
+	}
+	store := source.NetworkCapture()
+	if !store.Enabled() {
+		return
+	}
+
+	arguments := string(incoming.Arguments)
+	requestBody, requestTruncated := observability.CaptureText(arguments, observability.CaptureBodyBytes)
+	responseBody, responseTruncated := "", false
+	responseBytes := int64(0)
+	if result != nil {
+		// 结果已经整份在内存里，再编一次只为给面板看；留存上限由 CaptureText 控制。
+		if encoded, encodeErr := json.Marshal(result); encodeErr == nil {
+			responseBytes = int64(len(encoded))
+			responseBody, responseTruncated = observability.CaptureText(string(encoded), observability.CaptureBodyBytes)
+		}
+	}
+	outcome := observability.CaptureOutcomeOK
+	errorCode := ""
+	if callErr != nil {
+		outcome = observability.CaptureOutcomeError
+		errorCode = "INTERNAL"
+		var toolErr *app.ToolError
+		if errors.As(callErr, &toolErr) && toolErr.Code != "" {
+			errorCode = toolErr.Code
+		}
+	}
+	name := nodeOperationName(incoming)
+	store.Record(observability.CaptureRecord{
+		Channel:    observability.CaptureChannelNexus,
+		StartedAt:  started.UTC(),
+		DurationMS: float64(time.Since(started)) / float64(time.Millisecond),
+		Method:     string(incoming.Operation),
+		Host:       c.identity.Endpoint,
+		Path:       name,
+		RawURL:     "nexus://" + name,
+		Proto:      "WebSocket",
+		UserAgent:  "nexus-bridge",
+		RequestID:  incoming.RequestID,
+		Outcome:    outcome,
+		ErrorCode:  errorCode,
+		Request:    observability.CaptureMessage{Bytes: int64(len(arguments)), Body: requestBody, Truncated: requestTruncated},
+		Response:   observability.CaptureMessage{Bytes: responseBytes, Body: responseBody, Truncated: responseTruncated},
+	})
+}
+
+// nodeOperationName 给列表一个可读的名字：工具调用用工具名，其他操作用
+// Runtime 路径或操作名。只取一个字符串字段，不重复整份参数解析。
+func nodeOperationName(incoming protocol.Message) string {
+	switch incoming.Operation {
+	case protocol.OperationToolCall:
+		var request struct {
+			Tool string `json:"tool"`
+		}
+		if json.Unmarshal(incoming.Arguments, &request) == nil && request.Tool != "" {
+			return request.Tool
+		}
+	case protocol.OperationRuntimeRequest:
+		var request struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(incoming.Arguments, &request) == nil && request.Path != "" {
+			return request.Path
+		}
+	}
+	return string(incoming.Operation)
 }
 
 func (c *Client) dispatchRuntimeRequest(ctx context.Context, request runtimeapi.Request) (map[string]any, error) {

@@ -56,6 +56,7 @@ type Runtime struct {
 	events         *observability.EventBus
 	alerts         alertTracker
 	traces         *observability.TraceStore
+	networkCapture *observability.CaptureStore
 	artifacts      publicartifacts.Store
 	tracing        *observability.Tracing
 	resourceOnce   sync.Once
@@ -158,6 +159,9 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 		return nil, fmt.Errorf("initialize trace store: %w", err)
 	}
 	runtime.traces = traces
+	// HTTP 抓包是独立开关：默认关闭时 store 为 nil，中间件直接透传，
+	// 不给每条请求加一层包装。
+	runtime.networkCapture = observability.NewCaptureStore(cfg.NetworkCaptureEnabled, cfg.NetworkCaptureMax)
 	// 公开文件与 HTTP 服务共用同一目录与签名密钥；store 无内存状态，重复构造安全。
 	runtime.artifacts = publicartifacts.New(cfg.AgentDockHome, cfg.OAuthServerURL, cfg.Port)
 	if err := runtime.artifacts.EnsureSecret(); err != nil {

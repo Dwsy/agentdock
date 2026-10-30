@@ -65,6 +65,30 @@ type FileChangeRuntime interface {
 	RuntimeFileChanges(query string, limit int) (app.Result, error)
 }
 
+// CaptureSource 是网络抓包环的持有者。采集器（HTTP 中间件、Nexus 桥接）与
+// 查询 API 必须共用同一实例，否则面板看到的不是自己抓到的流量。
+type CaptureSource interface {
+	NetworkCapture() *observability.CaptureStore
+}
+
+// NetworkRuntime 是网络抓包面板的只读列表能力；采集关闭时实现仍返回
+// enabled=false。过滤条件沿用 observability.CaptureQuery，与 trace 同理：
+// 不给每个传输层重复改一遍参数列表。
+type NetworkRuntime interface {
+	RuntimeNetwork(observability.CaptureQuery) (app.Result, error)
+}
+
+// NetworkDetailRuntime 是抓包详情能力：列表只带摘要，选中记录后按 ID 拉取
+// 完整 header 与 body。独立于列表能力，旧实现可以明确报“不支持”。
+type NetworkDetailRuntime interface {
+	RuntimeNetworkDetail(id uint64) (app.Result, error)
+}
+
+// NetworkClearRuntime 是抓包清空能力：只清内存环。
+type NetworkClearRuntime interface {
+	RuntimeNetworkClear() (app.Result, error)
+}
+
 // ArtifactRuntime 是公开文件发布记录的只读列表。
 type ArtifactRuntime interface {
 	RuntimeArtifacts(context.Context) (app.Result, error)

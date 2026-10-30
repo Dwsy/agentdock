@@ -43,6 +43,10 @@ func MethodAllowed(method, path string) bool {
 		// 查询是 GET，清空是 DELETE；两条语义共用一条路由。
 		return method == http.MethodGet || method == http.MethodDelete
 	}
+	if cleanPath == "/internal/runtime/network" {
+		// 与 traces 同形：查询是 GET，清空是 DELETE。
+		return method == http.MethodGet || method == http.MethodDelete
+	}
 	if cleanPath == "/internal/runtime/events" {
 		// SSE 事件流是只读长连接。
 		return method == http.MethodGet
@@ -74,7 +78,7 @@ func AllowHeader(path string) string {
 		}
 		return "DELETE"
 	}
-	if cleanPath == "/internal/runtime/traces" {
+	if cleanPath == "/internal/runtime/traces" || cleanPath == "/internal/runtime/network" {
 		return "GET, DELETE"
 	}
 	if cleanPath == "/internal/runtime/events" || cleanPath == "/internal/runtime/alerts" {
@@ -152,6 +156,61 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			}
 		}
 		result, err := catalog.RuntimeCatalog(ctx)
+		return map[string]any(result), err
+	case path == "/internal/runtime/network" && method == http.MethodDelete:
+		clearRuntime, ok := runtime.(NetworkClearRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "NETWORK_CLEAR_UNSUPPORTED", Message: "runtime does not support clearing network capture records", Category: "not_found",
+			}
+		}
+		result, err := clearRuntime.RuntimeNetworkClear()
+		return map[string]any(result), err
+	case path == "/internal/runtime/network/detail":
+		detailRuntime, ok := runtime.(NetworkDetailRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "NETWORK_DETAIL_UNSUPPORTED", Message: "runtime does not support network capture detail lookups", Category: "not_found",
+			}
+		}
+		id, parseErr := strconv.ParseUint(strings.TrimSpace(request.queryValue("id")), 10, 64)
+		if parseErr != nil || id == 0 {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "network capture id must be a positive integer", Category: "validation"}
+		}
+		result, err := detailRuntime.RuntimeNetworkDetail(id)
+		return map[string]any(result), err
+	case path == "/internal/runtime/network":
+		captureRuntime, ok := runtime.(NetworkRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "NETWORK_UNSUPPORTED", Message: "runtime does not support network capture records", Category: "not_found",
+			}
+		}
+		limit := 0
+		if raw := strings.TrimSpace(request.queryValue("limit")); raw != "" {
+			parsed, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || parsed < 0 {
+				return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "network capture limit must be a non-negative integer", Category: "validation"}
+			}
+			limit = parsed
+		}
+		// 与 trace 同约定：view=summary 只下发列表摘要，正文由 detail 接口拉。
+		summary := false
+		switch view := strings.ToLower(strings.TrimSpace(request.queryValue("view"))); view {
+		case "", "full":
+		case "summary":
+			summary = true
+		default:
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "network capture view must be full or summary", Category: "validation"}
+		}
+		result, err := captureRuntime.RuntimeNetwork(observability.CaptureQuery{
+			Query:   request.queryValue("q"),
+			Channel: request.queryValue("channel"),
+			Method:  request.queryValue("method"),
+			Status:  request.queryValue("status"),
+			Limit:   limit,
+			Summary: summary,
+		})
 		return map[string]any(result), err
 	case path == "/internal/runtime/traces" && method == http.MethodDelete:
 		clearRuntime, ok := runtime.(TraceClearRuntime)

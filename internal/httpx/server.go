@@ -13,6 +13,7 @@ import (
 	"github.com/uvwt/agentdock/internal/buildinfo"
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/mcp"
+	"github.com/uvwt/agentdock/internal/observability"
 	"github.com/uvwt/agentdock/internal/publicartifacts"
 	"github.com/uvwt/agentdock/internal/runtimeapi"
 	"github.com/uvwt/agentdock/internal/startupdiag"
@@ -59,11 +60,21 @@ func Serve(ctx context.Context, server *mcp.Server, runtime runtimeapi.Runtime, 
 	mux.HandleFunc("/mcp", mcpEndpointHandler(server, cfg, oauthStore))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
-	httpServer := newHTTPServer(addr, loggingMiddleware(mux))
+	httpServer := newHTTPServer(addr, captureHandler(loggingMiddleware(mux), networkCaptureStore(runtime)))
 	startupdiag.Log(slog.Default(), "core", "http_listen", listenStartedAt, slog.String("addr", addr))
 	slog.Info("http server listening", "addr", addr)
 	return serveHTTP(ctx, httpServer)
 }
+
+// networkCaptureStore 取出抓包环。接口契约在 runtimeapi：HTTP 中间件与 Nexus
+// 桥接都要拿到同一个实例，否则面板看到的不是自己抓到的流量。
+func networkCaptureStore(runtime runtimeapi.Runtime) *observability.CaptureStore {
+	if source, ok := runtime.(runtimeapi.CaptureSource); ok {
+		return source.NetworkCapture()
+	}
+	return nil
+}
+
 func serveHTTP(ctx context.Context, server *http.Server) error {
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()

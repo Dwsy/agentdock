@@ -12,18 +12,13 @@ func TestRecorderKeepsBoundedNewestFirstHistory(t *testing.T) {
 	recorder := NewRecorder(3)
 	for index := 1; index <= 5; index++ {
 		recorder.BeginTool()
-		recorder.EndTool(
-			"tool",
-			SourceMCP,
-			time.Unix(int64(index), 0),
-			time.Duration(index)*time.Millisecond,
-			true,
-			"",
-			"", "", "",
-			"",
-			"",
-			nil,
-		)
+		recorder.EndTool(CallMeta{
+			Tool:      "tool",
+			Source:    SourceMCP,
+			StartedAt: time.Unix(int64(index), 0),
+			Duration:  time.Duration(index) * time.Millisecond,
+			Success:   true,
+		})
 	}
 
 	snapshot := recorder.Snapshot()
@@ -52,18 +47,15 @@ func TestRecorderAggregatesNearestRankPercentilesAndErrors(t *testing.T) {
 			code = "TIMEOUT"
 			category = "runtime"
 		}
-		recorder.EndTool(
-			"exec_command",
-			SourceNexus,
-			time.Now(),
-			time.Duration(index)*time.Millisecond,
-			success,
-			code,
-			category, "", "",
-			"",
-			"",
-			nil,
-		)
+		recorder.EndTool(CallMeta{
+			Tool:          "exec_command",
+			Source:        SourceNexus,
+			StartedAt:     time.Now(),
+			Duration:      time.Duration(index) * time.Millisecond,
+			Success:       success,
+			ErrorCode:     code,
+			ErrorCategory: category,
+		})
 	}
 
 	snapshot := recorder.Snapshot()
@@ -85,7 +77,13 @@ func TestRecorderAggregatesNearestRankPercentilesAndErrors(t *testing.T) {
 func TestRecorderZeroValueDoesNotPanicOrLeakActiveCount(t *testing.T) {
 	recorder := &Recorder{}
 	recorder.BeginTool()
-	recorder.EndTool("tool", SourceInternal, time.Now(), time.Millisecond, true, "", "", "", "", "", "", nil)
+	recorder.EndTool(CallMeta{
+		Tool:      "tool",
+		Source:    SourceInternal,
+		StartedAt: time.Now(),
+		Duration:  time.Millisecond,
+		Success:   true,
+	})
 
 	snapshot := recorder.Snapshot()
 	if snapshot.ActiveCalls != 0 {
@@ -105,7 +103,13 @@ func TestRecorderConcurrentWritesStayConsistent(t *testing.T) {
 			defer wait.Done()
 			for call := 0; call < callsPerWriter; call++ {
 				recorder.BeginTool()
-				recorder.EndTool("tool", SourceMCP, time.Now(), time.Millisecond, true, "", "", "", "", "", "", nil)
+				recorder.EndTool(CallMeta{
+					Tool:      "tool",
+					Source:    SourceMCP,
+					StartedAt: time.Now(),
+					Duration:  time.Millisecond,
+					Success:   true,
+				})
 			}
 		}()
 	}
@@ -124,7 +128,15 @@ func TestRecorderConcurrentWritesStayConsistent(t *testing.T) {
 func TestSnapshotJSONIsZeroPayload(t *testing.T) {
 	recorder := NewRecorder(10)
 	recorder.BeginTool()
-	recorder.EndTool("read_file", SourceMCP, time.Now(), 2*time.Millisecond, false, "DENIED", "permission", "", "", "", "", nil)
+	recorder.EndTool(CallMeta{
+		Tool:          "read_file",
+		Source:        SourceMCP,
+		StartedAt:     time.Now(),
+		Duration:      2 * time.Millisecond,
+		Success:       false,
+		ErrorCode:     "DENIED",
+		ErrorCategory: "permission",
+	})
 
 	encoded, err := json.Marshal(recorder.Snapshot())
 	if err != nil {
@@ -147,5 +159,37 @@ func TestSourceContextUsesClosedSet(t *testing.T) {
 	}
 	if got := SourceFromContext(WithSource(nil, Source("user-data"))); got != SourceInternal {
 		t.Fatalf("unexpected source = %q", got)
+	}
+}
+
+func TestRecorderAggregatesCodeLineChanges(t *testing.T) {
+	recorder := NewRecorder(10)
+	for _, change := range []CallMeta{
+		{Tool: "file_edit", Source: SourceMCP, Insertions: 12, Deletions: 3},
+		{Tool: "file_edit", Source: SourceMCP, Insertions: 5, Deletions: 1},
+		{Tool: "read_file", Source: SourceMCP},
+	} {
+		change.StartedAt = time.Now()
+		change.Duration = time.Millisecond
+		change.Success = true
+		recorder.BeginTool()
+		recorder.EndTool(change)
+	}
+
+	snapshot := recorder.Snapshot()
+	if snapshot.TotalInsertions != 17 || snapshot.TotalDeletions != 4 {
+		t.Fatalf("totals = +%d -%d, want +17 -4", snapshot.TotalInsertions, snapshot.TotalDeletions)
+	}
+	if len(snapshot.ToolStats) != 2 {
+		t.Fatalf("tool stats = %#v", snapshot.ToolStats)
+	}
+	// 按调用次数排序：file_edit(2) 在前，read_file(1) 在后。
+	edit := snapshot.ToolStats[0]
+	if edit.Tool != "file_edit" || edit.Insertions != 17 || edit.Deletions != 4 {
+		t.Fatalf("file_edit stats = %#v", edit)
+	}
+	read := snapshot.ToolStats[1]
+	if read.Tool != "read_file" || read.Insertions != 0 || read.Deletions != 0 {
+		t.Fatalf("read_file stats = %#v", read)
 	}
 }

@@ -93,6 +93,23 @@ func traceFileChanges(tool string, args map[string]any, result *Result, success 
 	return changes
 }
 
+// traceCodeChangeCounts 提取 file_edit 调用级的增删行数。
+// 调用分析用它统计代码行数变动：与历史层的逐文件统计不同，这里要的是
+// 一次调用的总量，且不依赖 trace 开关（trace 关闭时统计依然要成立）。
+func traceCodeChangeCounts(tool string, result *Result, success bool) (int, int) {
+	if tool != "file_edit" || !success || result == nil {
+		return 0, 0
+	}
+	payload := *result
+	if dryRun, _ := payload["dry_run"].(bool); dryRun {
+		return 0, 0
+	}
+	if changed, ok := payload["changed"].(bool); ok && !changed {
+		return 0, 0
+	}
+	return traceIntValue(payload["insertions"]), traceIntValue(payload["deletions"])
+}
+
 // traceAffectedFiles 解析 affected_files 的三种形态；无法识别时返回 nil，
 // 由调用方回退到单文件 path。
 func traceAffectedFiles(value any, callAction string) []affectedFile {

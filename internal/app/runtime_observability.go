@@ -57,7 +57,24 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	}
 	recordID := uint64(0)
 	if r != nil && r.observer != nil {
-		recordID = r.observer.EndTool(toolName, source, startedAt, duration, success, errorCode, errorCategory, userAgent, taskID, traceID, spanID, stages)
+		// 代码行数变动不依赖 trace 开关：分析页要在 trace 关闭时也能统计。
+		insertions, deletions := traceCodeChangeCounts(toolName, result, success)
+		recordID = r.observer.EndTool(observability.CallMeta{
+			Tool:          toolName,
+			Source:        source,
+			StartedAt:     startedAt,
+			Duration:      duration,
+			Success:       success,
+			ErrorCode:     errorCode,
+			ErrorCategory: errorCategory,
+			UserAgent:     userAgent,
+			TaskID:        taskID,
+			TraceID:       traceID,
+			SpanID:        spanID,
+			Stages:        stages,
+			Insertions:    insertions,
+			Deletions:     deletions,
+		})
 	}
 	// call 事件与 recorder 同源同步：发布非阻塞，事件里同样只有白名单元数据。
 	if r != nil {
@@ -141,13 +158,55 @@ func tracePayload(value any) string {
 // exec_command 的 Result 含最多 max_output_bytes（上限 4 MiB）的 stdout/stderr，
 // 整份序列化再脱敏会让工具返回路径多花几十到几百毫秒；正文已经由
 // CommandTrace 分字段保存，所以这里只留规模与退出状态。
-func traceResultText(result any, command *observability.CommandTrace) string {
+//
+// 图像类结果（view_image）同理：内联 base64 是几百 KB 到 2 MB，且按 key
+// 字典序排在最前（'_' < 字母），会占满 8 KiB 预览把 source/image 元数据
+// 整段挤掉，控制面板只能看到一串编码。剥掉 base64 并记录省略字节数，
+// 元数据就能完整保留。
+func traceResultText(result *Result, command *observability.CommandTrace) string {
 	if command != nil {
 		if summary, ok := command.ResultSummary(); ok {
 			return summary
 		}
 	}
+	if result != nil {
+		if payload, ok := traceImageResultText(*result); ok {
+			return payload
+		}
+	}
 	return tracePayload(result)
+}
+
+// traceImageResultText 剥离内联图像 base64，返回剩余元数据的 JSON。
+// ok=false 表示结果里没有内联图像，调用方回退到通用序列化。
+func traceImageResultText(result Result) (string, bool) {
+	encoded, exists := result["_mcp_image_base64"].(string)
+	if !exists || encoded == "" {
+		return "", false
+	}
+	// 复制后剥离：工具返回的原 Result 仍在调用方手里，不能被 trace 改写。
+	trimmed := make(map[string]any, len(result))
+	for key, value := range result {
+		if key == "_mcp_image_base64" {
+			continue
+		}
+		trimmed[key] = value
+	}
+	// 记录原始字节数，UI 才能说明“省略了多大的图片”。
+	trimmed["image_bytes_omitted"] = base64DecodedLen(encoded)
+	return tracePayload(trimmed), true
+}
+
+// base64DecodedLen 由编码长度推算原始字节数，不真正解码：这里只用于展示。
+func base64DecodedLen(encoded string) int {
+	size := len(encoded) / 4 * 3
+	if padding := len(encoded) % 4; padding > 0 {
+		size += padding - 1
+	}
+	for index := len(encoded) - 1; index >= 0 && encoded[index] == '='; index-- {
+		size--
+	}
+	return max(size, 0)
 }
 
 func traceErrorText(callErr *error) string {

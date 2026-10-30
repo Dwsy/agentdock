@@ -548,8 +548,8 @@ func (s *TraceStore) Clear() (int, error) {
 	return cleared, errors.Join(clearErrs...)
 }
 
-// traceSummaryRecord 去掉正文只保留摘要。这里复制 Command 而不是原地修改：
-// 记录本身仍在保留窗口里，摘要投影不能破坏后续详情读取。
+// traceSummaryRecord 去掉正文只保留摘要。这里复制 Command 与 FileChanges
+// 而不是原地修改：记录本身仍在保留窗口里，摘要投影不能破坏后续详情读取。
 func traceSummaryRecord(record TraceRecord) TraceRecord {
 	record.Arguments = ""
 	record.Result = ""
@@ -559,6 +559,17 @@ func traceSummaryRecord(record TraceRecord) TraceRecord {
 		command.Stdout = ""
 		command.Stderr = ""
 		record.Command = &command
+	}
+	// FileChanges 的 Diff 与命令输出同属正文：列表页只需要路径与增删计数，
+	// 保留 diff 会让 100 条记录多传几百 KB，违背 summary 模式的体积约定。
+	// Truncated 保留，UI 据此知道详情里还有被截断的 diff 可看。
+	if len(record.FileChanges) > 0 {
+		changes := make([]FileChange, len(record.FileChanges))
+		copy(changes, record.FileChanges)
+		for index := range changes {
+			changes[index].Diff = ""
+		}
+		record.FileChanges = changes
 	}
 	return record
 }

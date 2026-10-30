@@ -26,6 +26,9 @@ type ExecutionRecord struct {
 	ErrorCode     string        `json:"error_code,omitempty"`
 	ErrorCategory string        `json:"error_category,omitempty"`
 	Stages        []StageRecord `json:"stages,omitempty"`
+	// Insertions/Deletions 是本次调用造成的代码行数变动，只有文件编辑类调用非零。
+	Insertions int `json:"insertions,omitempty"`
+	Deletions  int `json:"deletions,omitempty"`
 }
 
 type ToolStats struct {
@@ -36,6 +39,9 @@ type ToolStats struct {
 	P50DurationMS float64 `json:"p50_duration_ms"`
 	P95DurationMS float64 `json:"p95_duration_ms"`
 	P99DurationMS float64 `json:"p99_duration_ms"`
+	// Insertions/Deletions 是该工具在窗口内造成的代码行数变动。
+	Insertions int `json:"insertions"`
+	Deletions  int `json:"deletions"`
 }
 
 type ProcessSnapshot struct {
@@ -48,15 +54,37 @@ type ProcessSnapshot struct {
 }
 
 type Snapshot struct {
-	StartedAt      time.Time         `json:"started_at"`
-	RecentCapacity int               `json:"recent_capacity"`
-	WindowCalls    int               `json:"window_calls"`
-	TotalCalls     uint64            `json:"total_calls"`
-	TotalErrors    uint64            `json:"total_errors"`
-	ActiveCalls    int               `json:"active_calls"`
-	ToolStats      []ToolStats       `json:"tool_stats"`
-	RecentCalls    []ExecutionRecord `json:"recent_calls"`
-	Process        ProcessSnapshot   `json:"process"`
+	StartedAt       time.Time         `json:"started_at"`
+	RecentCapacity  int               `json:"recent_capacity"`
+	WindowCalls     int               `json:"window_calls"`
+	TotalCalls      uint64            `json:"total_calls"`
+	TotalErrors     uint64            `json:"total_errors"`
+	ActiveCalls     int               `json:"active_calls"`
+	TotalInsertions uint64            `json:"total_insertions"`
+	TotalDeletions  uint64            `json:"total_deletions"`
+	ToolStats       []ToolStats       `json:"tool_stats"`
+	RecentCalls     []ExecutionRecord `json:"recent_calls"`
+	Process         ProcessSnapshot   `json:"process"`
+}
+
+// CallMeta 是一次工具调用的白名单元数据。
+// 用结构体而不是位置参数：字段已经超过十个，再追加代码变动统计只会更难读。
+type CallMeta struct {
+	Tool          string
+	Source        Source
+	StartedAt     time.Time
+	Duration      time.Duration
+	Success       bool
+	ErrorCode     string
+	ErrorCategory string
+	UserAgent     string
+	TaskID        string
+	TraceID       string
+	SpanID        string
+	Stages        []StageRecord
+	// Insertions/Deletions 是本次调用造成的代码行数变动，只有文件编辑类调用非零。
+	Insertions int
+	Deletions  int
 }
 
 type Recorder struct {
@@ -72,6 +100,9 @@ type Recorder struct {
 	totalCalls  uint64
 	totalErrors uint64
 	activeCalls int
+	// totalInsertions/totalDeletions 是进程启动以来的代码行数变动累计值。
+	totalInsertions uint64
+	totalDeletions  uint64
 }
 
 func NewRecorder(capacity int) *Recorder {
@@ -96,26 +127,15 @@ func (r *Recorder) BeginTool() {
 
 // EndTool 记录一次工具调用并返回分配的记录 ID（未记录时为 0）。
 // 返回值供事件流把 call 事件与 analytics 记录对齐。
-func (r *Recorder) EndTool(
-	tool string,
-	source Source,
-	startedAt time.Time,
-	duration time.Duration,
-	success bool,
-	errorCode string,
-	errorCategory string,
-	userAgent string,
-	taskID string,
-	traceID string,
-	spanID string,
-	stages []StageRecord,
-) uint64 {
+func (r *Recorder) EndTool(meta CallMeta) uint64 {
 	if r == nil {
 		return 0
 	}
+	startedAt := meta.StartedAt
 	if startedAt.IsZero() {
 		startedAt = time.Now()
 	}
+	duration := meta.Duration
 	if duration < 0 {
 		duration = 0
 	}
@@ -132,24 +152,28 @@ func (r *Recorder) EndTool(
 
 	r.nextID++
 	r.totalCalls++
-	if !success {
+	if !meta.Success {
 		r.totalErrors++
 	}
+	r.totalInsertions += uint64(maxInt(meta.Insertions, 0))
+	r.totalDeletions += uint64(maxInt(meta.Deletions, 0))
 
 	record := ExecutionRecord{
 		ID:            r.nextID,
-		Tool:          tool,
-		Source:        normalizedSource(source),
-		UserAgent:     normalizeUserAgent(userAgent),
-		TaskID:        normalizeTaskID(taskID),
+		Tool:          meta.Tool,
+		Source:        normalizedSource(meta.Source),
+		UserAgent:     normalizeUserAgent(meta.UserAgent),
+		TaskID:        normalizeTaskID(meta.TaskID),
 		StartedAt:     startedAt.UTC(),
 		DurationMS:    durationMilliseconds(duration),
-		Success:       success,
-		ErrorCode:     errorCode,
-		ErrorCategory: errorCategory,
-		TraceID:       traceID,
-		SpanID:        spanID,
-		Stages:        append([]StageRecord(nil), stages...),
+		Success:       meta.Success,
+		ErrorCode:     meta.ErrorCode,
+		ErrorCategory: meta.ErrorCategory,
+		TraceID:       meta.TraceID,
+		SpanID:        meta.SpanID,
+		Stages:        append([]StageRecord(nil), meta.Stages...),
+		Insertions:    maxInt(meta.Insertions, 0),
+		Deletions:     maxInt(meta.Deletions, 0),
 	}
 	r.records[r.next] = record
 	r.next = (r.next + 1) % r.capacity
@@ -184,6 +208,8 @@ func (r *Recorder) Snapshot() Snapshot {
 	totalCalls := r.totalCalls
 	totalErrors := r.totalErrors
 	activeCalls := r.activeCalls
+	totalInsertions := r.totalInsertions
+	totalDeletions := r.totalDeletions
 	recent := r.recentLocked()
 	r.mu.RUnlock()
 
@@ -191,14 +217,16 @@ func (r *Recorder) Snapshot() Snapshot {
 	runtime.ReadMemStats(&memory)
 
 	return Snapshot{
-		StartedAt:      startedAt.UTC(),
-		RecentCapacity: capacity,
-		WindowCalls:    len(recent),
-		TotalCalls:     totalCalls,
-		TotalErrors:    totalErrors,
-		ActiveCalls:    activeCalls,
-		ToolStats:      aggregateToolStats(recent),
-		RecentCalls:    recent,
+		StartedAt:       startedAt.UTC(),
+		RecentCapacity:  capacity,
+		WindowCalls:     len(recent),
+		TotalCalls:      totalCalls,
+		TotalErrors:     totalErrors,
+		ActiveCalls:     activeCalls,
+		TotalInsertions: totalInsertions,
+		TotalDeletions:  totalDeletions,
+		ToolStats:       aggregateToolStats(recent),
+		RecentCalls:     recent,
 		Process: ProcessSnapshot{
 			Goroutines:     runtime.NumGoroutine(),
 			HeapAllocBytes: memory.HeapAlloc,
@@ -227,6 +255,8 @@ func aggregateToolStats(records []ExecutionRecord) []ToolStats {
 		count      int
 		errorCount int
 		durations  []float64
+		insertions int
+		deletions  int
 	}
 	byTool := make(map[string]*accumulator)
 	for _, record := range records {
@@ -240,6 +270,8 @@ func aggregateToolStats(records []ExecutionRecord) []ToolStats {
 			current.errorCount++
 		}
 		current.durations = append(current.durations, record.DurationMS)
+		current.insertions += record.Insertions
+		current.deletions += record.Deletions
 	}
 
 	stats := make([]ToolStats, 0, len(byTool))
@@ -253,6 +285,8 @@ func aggregateToolStats(records []ExecutionRecord) []ToolStats {
 			P50DurationMS: percentile(current.durations, 0.50),
 			P95DurationMS: percentile(current.durations, 0.95),
 			P99DurationMS: percentile(current.durations, 0.99),
+			Insertions:    current.insertions,
+			Deletions:     current.deletions,
 		})
 	}
 	sort.Slice(stats, func(i, j int) bool {
@@ -304,4 +338,11 @@ func maxInt64(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+func maxInt(value, floor int) int {
+	if value > floor {
+		return value
+	}
+	return floor
 }

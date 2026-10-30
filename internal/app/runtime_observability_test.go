@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"testing"
 
+	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/observability"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -159,5 +162,85 @@ func TestRuntimeDiagnosticsExposeOnlyRemoteSafeRecentCalls(t *testing.T) {
 	}
 	if !strings.Contains(body, `"error_code":"invalid_argument"`) {
 		t.Fatalf("runtime diagnostics missing stable error code: %s", body)
+	}
+}
+
+// 调用分析要统计代码行数变动：file_edit 的增删行数进入 analytics 负载，
+// 与 trace 开关无关（trace 关闭时统计依然成立）。
+func TestRuntimeAnalyticsCountsCodeLineChanges(t *testing.T) {
+	runtime := newTraceTestRuntime(t, config.TraceModeMemory)
+	target := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Call(context.Background(), "file_edit", map[string]any{
+		"action": "replace", "path": target, "old": "two", "new": "three\nfour",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runtime.RuntimeAnalytics()
+	if result["total_insertions"] != uint64(2) || result["total_deletions"] != uint64(1) {
+		t.Fatalf("analytics totals = +%v -%v, want +2 -1", result["total_insertions"], result["total_deletions"])
+	}
+	stats, ok := result["tool_stats"].([]observability.ToolStats)
+	if !ok || len(stats) == 0 {
+		t.Fatalf("tool stats = %#v", result["tool_stats"])
+	}
+	found := false
+	for _, stat := range stats {
+		if stat.Tool != "file_edit" {
+			continue
+		}
+		found = true
+		if stat.Insertions != 2 || stat.Deletions != 1 {
+			t.Fatalf("file_edit stats = %#v", stat)
+		}
+	}
+	if !found {
+		t.Fatalf("file_edit missing from tool stats: %#v", stats)
+	}
+}
+
+// view_image 的 Result 带几百 KB 内联 base64，按 key 字典序排在最前，
+// 会把 8 KiB 预览整段占满，让 source/image 元数据完全丢失。
+// traceResultText 必须剥离 base64 并保留元数据，控制面板才能渲染。
+func TestTraceResultTextStripsInlineImageBase64(t *testing.T) {
+	encoded := strings.Repeat("/9j/4AAQ", 100000)
+	result := Result{
+		"source":               "/tmp/payment-state-desktop.png",
+		"image":                map[string]any{"filename": "payment-state-desktop.png", "mime_type": "image/jpeg", "size_bytes": 750000, "width": 1280, "height": 720},
+		"original":             map[string]any{"size_bytes": 900000, "width": 1600, "height": 900, "mime_type": "image/png"},
+		"resized":              true,
+		"warnings":             []string{},
+		"_mcp_image_base64":    encoded,
+		"_mcp_image_mime_type": "image/jpeg",
+	}
+
+	text := traceResultText(&result, nil)
+	if strings.Contains(text, "/9j/4AAQ") {
+		t.Fatal("trace result still contains inline image base64")
+	}
+	if len(text) > 1<<10 {
+		t.Fatalf("trace result = %d bytes, want metadata only", len(text))
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		t.Fatalf("trace result is not valid JSON: %v\n%s", err, text)
+	}
+	if decoded["source"] != "/tmp/payment-state-desktop.png" {
+		t.Fatalf("trace result lost source: %#v", decoded["source"])
+	}
+	if _, ok := decoded["image"]; !ok {
+		t.Fatalf("trace result lost image metadata: %#v", decoded)
+	}
+	omitted, _ := decoded["image_bytes_omitted"].(float64)
+	if omitted <= 0 {
+		t.Fatalf("trace result lost omitted size: %#v", decoded["image_bytes_omitted"])
+	}
+	// 原 Result 不能被 trace 改写：调用方还要把 base64 交给 MCP 传输层。
+	if result["_mcp_image_base64"] != encoded {
+		t.Fatal("trace result mutated the original Result")
 	}
 }

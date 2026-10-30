@@ -10,18 +10,18 @@ import (
 func TestRecentCallsAndDiagnosticsProjectionStayZeroPayload(t *testing.T) {
 	recorder := NewRecorder(4)
 	recorder.BeginTool()
-	recorder.EndTool(
-		"exec_command",
-		SourceNexus,
-		time.Unix(10, 0),
-		25*time.Millisecond,
-		false,
-		"COMMAND_FAILED",
-		"runtime", "", "",
-		"4bf92f3577b34da6a3ce929d0e0e4736",
-		"00f067aa0ba902b7",
-		[]StageRecord{{Name: StageCommandStart, StartedOffsetMS: 2, DurationMS: 3, Success: true}},
-	)
+	recorder.EndTool(CallMeta{
+		Tool:          "exec_command",
+		Source:        SourceNexus,
+		StartedAt:     time.Unix(10, 0),
+		Duration:      25 * time.Millisecond,
+		Success:       false,
+		ErrorCode:     "COMMAND_FAILED",
+		ErrorCategory: "runtime",
+		TraceID:       "4bf92f3577b34da6a3ce929d0e0e4736",
+		SpanID:        "00f067aa0ba902b7",
+		Stages:        []StageRecord{{Name: StageCommandStart, StartedOffsetMS: 2, DurationMS: 3, Success: true}},
+	})
 
 	projected := ProjectDiagnostics(recorder.RecentCalls())
 	if len(projected) != 1 {
@@ -50,10 +50,14 @@ func TestRecentCallsAndDiagnosticsProjectionStayZeroPayload(t *testing.T) {
 func TestRecentCallsReturnsIndependentStageCopy(t *testing.T) {
 	recorder := NewRecorder(2)
 	recorder.BeginTool()
-	recorder.EndTool(
-		"tool", SourceMCP, time.Now(), time.Millisecond, true, "", "", "", "", "", "",
-		[]StageRecord{{Name: StageMCPRefresh, DurationMS: 1, Success: true}},
-	)
+	recorder.EndTool(CallMeta{
+		Tool:      "tool",
+		Source:    SourceMCP,
+		StartedAt: time.Now(),
+		Duration:  time.Millisecond,
+		Success:   true,
+		Stages:    []StageRecord{{Name: StageMCPRefresh, DurationMS: 1, Success: true}},
+	})
 	first := recorder.RecentCalls()
 	first[0].Stages[0].DurationMS = 999
 	second := recorder.RecentCalls()

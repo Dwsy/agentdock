@@ -24,8 +24,15 @@ func recordCalls(rt *Runtime, total, failures int) {
 			errorCode, errorCategory = "TIMEOUT", "runtime"
 		}
 		rt.observer.BeginTool()
-		rt.observer.EndTool("tool", observability.SourceInternal, time.Now(), time.Millisecond,
-			success, errorCode, errorCategory, "", "", "", "", nil)
+		rt.observer.EndTool(observability.CallMeta{
+			Tool:          "tool",
+			Source:        observability.SourceInternal,
+			StartedAt:     time.Now(),
+			Duration:      time.Millisecond,
+			Success:       success,
+			ErrorCode:     errorCode,
+			ErrorCategory: errorCategory,
+		})
 	}
 }
 

@@ -204,6 +204,46 @@ func TestTraceStoreOffReturnsNil(t *testing.T) {
 	}
 }
 
+// summary 视图必须把 FileChanges 的 Diff 当正文清掉：列表页只用得上路径与
+// 增删计数，保留 diff 会让 100 条 file_edit 记录多传数百 KB。
+func TestTraceStoreSummaryDropsFileChangeDiff(t *testing.T) {
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	diff := strings.Repeat("+line\n", 1024)
+	store.Record(TraceRecord{
+		Tool: "file_edit", Source: "mcp", Success: true, StartedAt: time.Now(),
+		FileChanges: []FileChange{{
+			Path: "/tmp/project/a.go", Action: "replace",
+			Insertions: 1024, Deletions: 3, Diff: diff, Truncated: true,
+		}},
+	})
+
+	summary := store.Query(TraceQuery{Summary: true})
+	if len(summary) != 1 {
+		t.Fatalf("summary query = %d records", len(summary))
+	}
+	if len(summary[0].FileChanges) != 1 {
+		t.Fatalf("summary lost file change metadata: %#v", summary[0].FileChanges)
+	}
+	change := summary[0].FileChanges[0]
+	if change.Diff != "" {
+		t.Fatalf("summary kept file diff (%d bytes)", len(change.Diff))
+	}
+	if change.Path != "/tmp/project/a.go" || change.Insertions != 1024 || change.Deletions != 3 || !change.Truncated {
+		t.Fatalf("summary lost file change metadata: %#v", change)
+	}
+
+	// 摘要投影不能破坏保留窗口里的完整记录。
+	full := store.Query(TraceQuery{})
+	if len(full[0].FileChanges) != 1 || full[0].FileChanges[0].Diff != diff {
+		t.Fatalf("full record was mutated: %d bytes", len(full[0].FileChanges[0].Diff))
+	}
+}
+
 func TestTraceStoreFileChangesProjection(t *testing.T) {
 	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
 	if err != nil {

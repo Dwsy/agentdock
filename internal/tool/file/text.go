@@ -1,6 +1,7 @@
 package file
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/uvwt/agentdock/internal/textutil"
@@ -82,13 +83,15 @@ func looksBinary(data []byte) bool {
 	return false
 }
 
+// skippedDirNames 是两个目录内核（fd 与 Go 回退）共用的固定跳过名单：
+// include_ignored=false 时这些名字的条目既不进结果也不下钻。
+var skippedDirNames = []string{
+	".git", ".reference", "node_modules", "target", "dist", "build",
+	".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__",
+}
+
 func shouldSkipDir(name string) bool {
-	switch name {
-	case ".git", ".reference", "node_modules", "target", "dist", "build", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(skippedDirNames, name)
 }
 
 func matchesAny(path string, patterns []string) bool {

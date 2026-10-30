@@ -149,6 +149,15 @@ func (svc *Service) ListDir(ctx context.Context, request ListRequest) (Result, e
 		return nil, toolError("NOT_A_DIRECTORY", "list_dir path is not a directory", "validation")
 	}
 
+	if result, available, err := svc.listDirFD(ctx, root, opts); available {
+		return addFileRuntimeResult(result, selection), err
+	}
+	result, err := svc.listDirGo(ctx, root, opts)
+	return addFileRuntimeResult(result, selection), err
+}
+
+// listDirGo 是 list_dir 的 Go 回退内核，也是 fd 不可用时的回滚路径。
+func (svc *Service) listDirGo(ctx context.Context, root workspace.Path, opts listDirOptions) (Result, error) {
 	ignore := loadIgnoreMatcher(svc.ws.Root())
 
 	items := make([]map[string]any, 0, min(opts.MaxEntries, 200))
@@ -252,14 +261,14 @@ func (svc *Service) ListDir(ctx context.Context, request ListRequest) (Result, e
 	}
 
 	sort.Slice(items, func(i, j int) bool { return fmt.Sprint(items[i]["path"]) < fmt.Sprint(items[j]["path"]) })
-	result := Result{
+	return Result{
 		"path":          root.Display,
+		"engine":        "go_fallback",
 		"entries":       items,
 		"truncated":     truncated,
 		"partial":       len(skippedPaths) > 0,
 		"skipped_paths": skippedPaths,
-	}
-	return addFileRuntimeResult(result, selection), nil
+	}, nil
 }
 
 func hiddenRelativePath(rel string) bool {

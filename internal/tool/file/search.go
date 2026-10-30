@@ -100,7 +100,9 @@ func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts Sea
 	if err != nil {
 		return nil, false, nil
 	}
-	args := []string{"--json", "--line-number", "--column", "--color", "never"}
+	// --no-config: 工具契约不能被 RIPGREP_CONFIG_PATH 之类的环境配置改变（与 pi 的
+	// grep 内核一致）；用户自定义 rg 行为应走 exec_command。
+	args := []string{"--no-config", "--json", "--line-number", "--column", "--color", "never"}
 	if !opts.Regex {
 		args = append(args, "--fixed-strings")
 	}
@@ -124,7 +126,7 @@ func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts Sea
 	cmd.Dir = p.Abs
 	info, err := os.Stat(p.Abs)
 	if err != nil {
-		return nil, true, searchExecutionError(ctx, "rg", err)
+		return nil, true, kernelExecutionError(ctx, "rg", "text search", err)
 	}
 	if !info.IsDir() {
 		cmd.Dir = filepath.Dir(p.Abs)
@@ -135,7 +137,7 @@ func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts Sea
 		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
 			return Result{"query": opts.Query, "engine": "rg", "matches": []map[string]any{}, "total_matches": 0, "truncated": false}, true, nil
 		}
-		return nil, true, searchExecutionError(ctx, "rg", err)
+		return nil, true, kernelExecutionError(ctx, "rg", "text search", err)
 	}
 	matches, truncated, ok := svc.parseRGJSON(output, p.Abs, opts)
 	if !ok {
@@ -390,7 +392,7 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 				"resource": limitResource, "entries_visited": entriesVisited, "files_scanned": filesScanned, "bytes_scanned": bytesScanned,
 			}, walkErr)
 		}
-		return nil, searchExecutionError(ctx, "go_fallback", walkErr)
+		return nil, kernelExecutionError(ctx, "go_fallback", "text search", walkErr)
 	}
 	return Result{
 		"query": opts.Query, "engine": "go_fallback", "matches": matches, "total_matches": len(matches),
@@ -399,12 +401,12 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 	}, nil
 }
 
-func searchExecutionError(ctx context.Context, engine string, err error) error {
+func kernelExecutionError(ctx context.Context, engine, subject string, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-		return toolErrorCause("SEARCH_CANCELED", "text search was canceled", "runtime", map[string]any{"engine": engine}, err)
+		return toolErrorCause("SEARCH_CANCELED", subject+" was canceled", "runtime", map[string]any{"engine": engine}, err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return toolErrorCause("RESOURCE_LIMIT", "text search exceeded its time limit", "runtime", map[string]any{"engine": engine, "resource": "time"}, err)
+		return toolErrorCause("RESOURCE_LIMIT", subject+" exceeded its time limit", "runtime", map[string]any{"engine": engine, "resource": "time"}, err)
 	}
-	return toolErrorCause("SEARCH_FAILED", "text search failed", "runtime", map[string]any{"engine": engine}, err)
+	return toolErrorCause("SEARCH_FAILED", subject+" failed", "runtime", map[string]any{"engine": engine}, err)
 }

@@ -110,6 +110,7 @@ func OutputSchema(name string) (map[string]any, bool) {
 		props["total_lines"] = intProp("Total line count.")
 	case ToolListDir:
 		props["path"] = stringProp("Listed Host directory path. Relative paths resolve from ~/AgentDock.")
+		props["engine"] = stringProp("Directory listing engine used: fd or go_fallback.")
 		props["entries"] = map[string]any{
 			"type":        "array",
 			"description": "Matched directory entries. Each entry path is slash-normalized and relative to the requested path.",

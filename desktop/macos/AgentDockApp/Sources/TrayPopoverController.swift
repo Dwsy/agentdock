@@ -21,7 +21,8 @@ final class TrayPopoverController: NSObject, NSPopoverDelegate {
         onOpenAgentDock: @escaping () -> Void,
         onOpenSettings: @escaping () -> Void,
         onRunServiceAction: @escaping (TrayServiceAction) -> Void,
-        onShowUpdateProgress: @escaping () -> Void
+        onShowUpdateProgress: @escaping () -> Void,
+        onOpenAlertDetail: @escaping (ControlPanelTarget) -> Void
     ) {
         model = TrayPopoverModel(service: service)
         self.onRequestStatusRefresh = onRequestStatusRefresh
@@ -35,7 +36,8 @@ final class TrayPopoverController: NSObject, NSPopoverDelegate {
                 onOpenAgentDock: onOpenAgentDock,
                 onOpenSettings: onOpenSettings,
                 onRunServiceAction: onRunServiceAction,
-                onShowUpdateProgress: onShowUpdateProgress
+                onShowUpdateProgress: onShowUpdateProgress,
+                onOpenAlertDetail: onOpenAlertDetail
             )
         )
         // 面板高度随「最近调用」条数变化。写死 contentSize 会在数据不足时留出空白，
@@ -44,9 +46,14 @@ final class TrayPopoverController: NSObject, NSPopoverDelegate {
         popover.contentViewController = hostingController
     }
 
-    /// AppDelegate 每 15 秒回灌一次服务状态；面板打开时才顺带刷新运行态数据（内部节流）。
-    func update(status: ServiceStatus, isUpdating: Bool, isCheckingForUpdate: Bool) {
-        model.apply(status: status, isUpdating: isUpdating, isCheckingForUpdate: isCheckingForUpdate)
+    /// AppDelegate 每 15 秒回灌一次服务状态与告警；面板打开时才顺带刷新运行态数据（内部节流）。
+    func update(status: ServiceStatus, isUpdating: Bool, isCheckingForUpdate: Bool, alerts: [RuntimeAlert]) {
+        model.apply(
+            status: status,
+            isUpdating: isUpdating,
+            isCheckingForUpdate: isCheckingForUpdate,
+            alerts: alerts
+        )
     }
 
     func toggle(relativeTo button: NSStatusBarButton) {
@@ -91,7 +98,13 @@ private struct TrayRuntimeSnapshot {
     let activeCalls: Int
     let activeTaskCount: Int?
     let blockedTaskCount: Int?
+    /// 进行中任务的最新 5 条（updatedAt 倒序）。托盘只展示这个切片，
+    /// 完整列表在控制面板 Tasks 页。
+    let activeTasks: [TrayActiveTask]
     let recentCalls: [TrayRecentCall]
+    /// codeInsertions/codeDeletions 是窗口内各工具造成的代码行数变动。
+    let codeInsertions: Int
+    let codeDeletions: Int
 
     /// windowCalls 与 recentCalls 来自同一个内存环，错误率直接由环内失败数计算，
     /// 不需要为了面板给 Runtime API 增加新字段。
@@ -106,6 +119,16 @@ private struct TrayRecentCall: Identifiable {
     let success: Bool
     let durationMS: Double
     let startedAt: String
+}
+
+/// 托盘展示的进行中任务切片。只留面板要显示的字段，
+/// 完整任务状态（steps/conditions/events）只在控制面板渲染。
+private struct TrayActiveTask: Identifiable {
+    let id: String
+    let title: String
+    let project: String?
+    let completedStepCount: Int
+    let stepCount: Int
 }
 
 /// 拉取失败的统一原因。
@@ -137,6 +160,8 @@ private final class TrayPopoverModel: ObservableObject {
     static let refreshInterval: TimeInterval = 5
     /// 面板高度有限，最近调用只展示最新几条。
     static let recentCallLimit = 5
+    /// 进行中任务同理：只给最新更新的几条，避免 popover 被长列表撑高。
+    static let visibleTaskLimit = 5
 
     @Published private(set) var status: ServiceStatus = .missing
     @Published private(set) var isUpdating = false
@@ -145,6 +170,9 @@ private final class TrayPopoverModel: ObservableObject {
     @Published private(set) var unavailable: TrayRuntimeUnavailable?
     @Published private(set) var tunnelMode: TunnelMode?
     @Published private(set) var isRefreshing = false
+    /// alerts 由 AppDelegate 的 15 秒轮询回灌：告警由后端惰性评估并去重，
+    /// 面板不必自己再拉一次。
+    @Published private(set) var alerts: [RuntimeAlert] = []
 
     private let service: ServiceController
     private var monitor: Task<Void, Never>?
@@ -154,10 +182,11 @@ private final class TrayPopoverModel: ObservableObject {
         self.service = service
     }
 
-    func apply(status: ServiceStatus, isUpdating: Bool, isCheckingForUpdate: Bool) {
+    func apply(status: ServiceStatus, isUpdating: Bool, isCheckingForUpdate: Bool, alerts: [RuntimeAlert]) {
         self.status = status
         self.isUpdating = isUpdating
         self.isCheckingForUpdate = isCheckingForUpdate
+        self.alerts = alerts.filter(\.active)
         // Core 刚启动/刚停止时，面板上的结论会瞬间过期；面板没打开就不额外请求。
         guard monitor != nil else { return }
         // 结论变了必须立刻重拉，不能被 3 秒节流挡住，否则面板会先显示上一轮的「未安装/已停止」。
@@ -250,6 +279,21 @@ private final class TrayPopoverModel: ObservableObject {
             blockedTaskCount: tasks.map { payload in
                 payload.tasks.filter { $0.status == "blocked" }.count
             },
+            activeTasks: tasks.map { payload in
+                payload.tasks
+                    .filter { $0.status == "active" }
+                    .sorted { $0.updatedAt > $1.updatedAt }
+                    .prefix(Self.visibleTaskLimit)
+                    .map { task in
+                        TrayActiveTask(
+                            id: task.id,
+                            title: task.title,
+                            project: task.project,
+                            completedStepCount: task.completedStepCount,
+                            stepCount: task.stepCount
+                        )
+                    }
+            } ?? [],
             recentCalls: analytics.recentCalls.prefix(Self.recentCallLimit).map { call in
                 TrayRecentCall(
                     id: call.id,
@@ -258,6 +302,12 @@ private final class TrayPopoverModel: ObservableObject {
                     durationMS: call.durationMS,
                     startedAt: call.startedAt
                 )
+            },
+            codeInsertions: analytics.toolStats.reduce(into: 0) { total, stat in
+                total += stat.insertions
+            },
+            codeDeletions: analytics.toolStats.reduce(into: 0) { total, stat in
+                total += stat.deletions
             }
         )
         unavailable = nil
@@ -294,6 +344,7 @@ private struct TrayPopoverView: View {
     let onOpenSettings: () -> Void
     let onRunServiceAction: (TrayServiceAction) -> Void
     let onShowUpdateProgress: () -> Void
+    let onOpenAlertDetail: (ControlPanelTarget) -> Void
 
     private static let width: CGFloat = 350
     private static let cardRadius: CGFloat = 12
@@ -301,6 +352,8 @@ private struct TrayPopoverView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             header
+            alertsCard
+            activeTasksCard
             statusCard
             recentCallsCard
             actionButtons
@@ -374,6 +427,98 @@ private struct TrayPopoverView: View {
         }
     }
 
+    // MARK: Alerts
+
+    /// 托盘不展示 task_blocked 告警：阻塞任务按任务逐条生成，几十个阻塞任务
+    /// 会把 popover 撑出屏幕。阻塞状态已在状态卡「Active tasks」行体现
+    /// （活跃数 · 阻塞数，tone 同时转为 attention），完整告警列表在控制面板。
+    private var trayAlerts: [RuntimeAlert] {
+        model.alerts.filter { $0.kind != "task_blocked" }
+    }
+
+    /// 告警卡只在有活跃告警时出现：没告警时不该占面板高度。
+    /// 标题按种类本地化，message 保留后端原文（detail 放 tooltip）。
+    @ViewBuilder
+    private var alertsCard: some View {
+        if !trayAlerts.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text(L10n.text("Alerts"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Spacer(minLength: 6)
+                    Text(L10n.format("%d active", trayAlerts.count))
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 3)
+
+                ForEach(Array(trayAlerts.enumerated()), id: \.element.id) { index, alert in
+                    if index > 0 {
+                        Divider().padding(.leading, 24)
+                    }
+                    alertRow(alert)
+                }
+            }
+            .padding(.bottom, 6)
+            .background(cardFill)
+            .overlay(cardStroke)
+        }
+    }
+
+    private func alertRow(_ alert: RuntimeAlert) -> some View {
+        Button {
+            onOpenAlertDetail(alertTarget(alert.kind))
+        } label: {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(alert.severity == "danger" ? StatusTone.failure.color : StatusTone.attention.color)
+                    .frame(width: 6, height: 6)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(alertTitle(alert.kind))
+                        .font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(1)
+                    Text(alert.message)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(alert.detail.isEmpty ? alert.message : alert.detail)
+    }
+
+    /// 告警种类是后端固定集合；未知种类回退到通用标题，不丢内容。
+    private func alertTitle(_ kind: String) -> String {
+        switch kind {
+        case "error_rate": return L10n.text("Error rate alert")
+        case "trace_disk": return L10n.text("Trace disk alert")
+        case "task_blocked": return L10n.text("Blocked task alert")
+        default: return L10n.text("Alerts")
+        }
+    }
+
+    /// 告警种类对应控制面板页面：点告警直接落到能处理它的页面。
+    private func alertTarget(_ kind: String) -> ControlPanelTarget {
+        switch kind {
+        case "error_rate": return .analytics
+        case "trace_disk": return .traces
+        case "task_blocked": return .tasks
+        default: return .analytics
+        }
+    }
+
     // MARK: Status card
 
     private var statusCard: some View {
@@ -394,19 +539,19 @@ private struct TrayPopoverView: View {
             )
             rowDivider
             metricRow(
-                symbol: "checklist",
-                title: L10n.text("Active tasks"),
-                tone: tasksTone,
-                value: tasksText,
-                help: tasksText
-            )
-            rowDivider
-            metricRow(
                 symbol: "waveform.path.ecg",
                 title: L10n.text("Window calls"),
                 tone: callsTone,
                 value: callsText,
                 help: callsHelp
+            )
+            rowDivider
+            metricRow(
+                symbol: "arrow.up.arrow.down",
+                title: L10n.text("Code changes"),
+                tone: codeTone,
+                value: codeText,
+                help: codeHelp
             )
         }
         .background(cardFill)
@@ -467,16 +612,78 @@ private struct TrayPopoverView: View {
         }
     }
 
-    private var tasksText: String {
-        guard let active = model.snapshot?.activeTaskCount else { return L10n.text("Unavailable") }
-        guard let blocked = model.snapshot?.blockedTaskCount, blocked > 0 else { return "\(active)" }
-        return "\(active) · \(blocked) \(L10n.text("Blocked"))"
+    // MARK: Active tasks
+
+    /// 进行中任务卡：只列 status=active 且按 updatedAt 倒序的前 5 条。
+    /// blocked 任务不进托盘（它们只会在告警里变成噪音），完整列表在控制面板。
+    /// 没有进行中任务时整张卡不出现，不给面板加空高度。
+    @ViewBuilder
+    private var activeTasksCard: some View {
+        let tasks = model.snapshot?.activeTasks ?? []
+        if !tasks.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 6) {
+                    Text(L10n.text("Active tasks"))
+                        .font(.system(size: 11.5, weight: .semibold))
+                    Spacer(minLength: 6)
+                    Text("\(tasks.count)")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 3)
+
+                ForEach(Array(tasks.enumerated()), id: \.element.id) { index, task in
+                    if index > 0 {
+                        Divider().padding(.leading, 12)
+                    }
+                    activeTaskRow(task)
+                }
+            }
+            .padding(.bottom, 6)
+            .background(cardFill)
+            .overlay(cardStroke)
+        }
     }
 
-    private var tasksTone: StatusTone {
-        guard let active = model.snapshot?.activeTaskCount else { return .stopped }
-        if let blocked = model.snapshot?.blockedTaskCount, blocked > 0 { return .attention }
-        return active > 0 ? .normal : .stopped
+    private func activeTaskRow(_ task: TrayActiveTask) -> some View {
+        Button {
+            onOpenAlertDetail(.tasks)
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Circle()
+                    .fill(StatusTone.normal.color)
+                    .frame(width: 6, height: 6)
+                    .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 3 }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(task.title)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let project = task.project, !project.isEmpty {
+                        Text(project)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+                Spacer(minLength: 8)
+                if task.stepCount > 0 {
+                    Text("\(task.completedStepCount)/\(task.stepCount)")
+                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(task.title)
     }
 
     private var callsText: String {
@@ -498,6 +705,24 @@ private struct TrayPopoverView: View {
             text += " · " + L10n.format("%d running", snapshot.activeCalls)
         }
         return text
+    }
+
+    /// 代码变动：窗口内各工具造成的增删行数。
+    private var codeText: String {
+        guard let snapshot = model.snapshot else { return L10n.text("Unavailable") }
+        if snapshot.codeInsertions == 0 && snapshot.codeDeletions == 0 { return "—" }
+        return "+\(snapshot.codeInsertions) · -\(snapshot.codeDeletions)"
+    }
+
+    private var codeTone: StatusTone {
+        guard let snapshot = model.snapshot else { return .stopped }
+        if snapshot.codeInsertions == 0 && snapshot.codeDeletions == 0 { return .stopped }
+        return .normal
+    }
+
+    private var codeHelp: String {
+        guard let snapshot = model.snapshot else { return L10n.text("Unavailable") }
+        return L10n.format("+%d added · -%d deleted", snapshot.codeInsertions, snapshot.codeDeletions)
     }
 
     private func percent(_ ratio: Double) -> String {

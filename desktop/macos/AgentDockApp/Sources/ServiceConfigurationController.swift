@@ -13,6 +13,8 @@ struct EditableServiceSettings {
     let acpDefaultProfile: String
     let traceMode: TraceMode
     let traceRetentionDays: Int
+    let networkCaptureEnabled: Bool
+    let networkCaptureMax: Int
 
     init(
         port: Int,
@@ -25,7 +27,9 @@ struct EditableServiceSettings {
         acpProfiles: [ACPProfileConfiguration] = [],
         acpDefaultProfile: String = "",
         traceMode: TraceMode,
-        traceRetentionDays: Int
+        traceRetentionDays: Int,
+        networkCaptureEnabled: Bool,
+        networkCaptureMax: Int
     ) {
         self.port = port
         self.logLevel = logLevel
@@ -38,12 +42,19 @@ struct EditableServiceSettings {
         self.acpDefaultProfile = acpDefaultProfile
         self.traceMode = traceMode
         self.traceRetentionDays = traceRetentionDays
+        self.networkCaptureEnabled = networkCaptureEnabled
+        self.networkCaptureMax = networkCaptureMax
     }
 
     func validated() throws -> EditableServiceSettings {
         try ServicePortValidation.validate(port)
         guard (1...30).contains(traceRetentionDays) else {
             throw ValidationError(L10n.text("Trace retention must be between 1 and 30 days."))
+        }
+        // 与 Go 侧 AGENTDOCK_NETWORK_CAPTURE_MAX 的边界保持一致，避免写进 env 的值
+        // 在 Core 启动时才报错。
+        guard (1...2000).contains(networkCaptureMax) else {
+            throw ValidationError(L10n.text("Network capture entries must be between 1 and 2000."))
         }
         let normalizedLogLevel = ServiceConfiguration.normalizedLogLevel(logLevel)
         guard ["debug", "info", "warn", "error"].contains(normalizedLogLevel) else {
@@ -126,7 +137,9 @@ struct EditableServiceSettings {
             acpProfiles: profiles,
             acpDefaultProfile: defaultProfileID,
             traceMode: traceMode,
-            traceRetentionDays: traceRetentionDays
+            traceRetentionDays: traceRetentionDays,
+            networkCaptureEnabled: networkCaptureEnabled,
+            networkCaptureMax: networkCaptureMax
         )
     }
 
@@ -191,6 +204,8 @@ final class ServiceConfigurationController {
             "AGENTDOCK_ACP_DEFAULT_PROFILE": settings.acpDefaultProfile,
             "AGENTDOCK_TRACE_MODE": settings.traceMode.rawValue,
             "AGENTDOCK_TRACE_RETENTION_DAYS": String(settings.traceRetentionDays),
+            "AGENTDOCK_NETWORK_CAPTURE_ENABLED": settings.networkCaptureEnabled ? "true" : "false",
+            "AGENTDOCK_NETWORK_CAPTURE_MAX": String(settings.networkCaptureMax),
         ]
         let updatedData = try environment.dataByUpdating(replacements, removing: ServiceConfiguration.removableLegacyKeys)
         try await service.runInBackground {

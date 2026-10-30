@@ -24,6 +24,8 @@ private enum RuntimeAPIPath {
     static let tasks = "/internal/runtime/tasks"
     static let traces = "/internal/runtime/traces"
     static let traceDetail = "/internal/runtime/traces/detail"
+    static let networkCapture = "/internal/runtime/network"
+    static let networkCaptureDetail = "/internal/runtime/network/detail"
     static let fileChanges = "/internal/runtime/file-changes"
     static let artifacts = "/internal/runtime/artifacts"
 }
@@ -359,11 +361,13 @@ struct RuntimeTaskReview: Decodable {
     let summary: String
     let verifiedFacts: [String]?
     let openRisks: [String]?
+    let missingChecks: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case status, summary
         case verifiedFacts = "verified_facts"
         case openRisks = "open_risks"
+        case missingChecks = "missing_checks"
     }
 }
 
@@ -413,6 +417,9 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
     let truncated: Bool?
     /// 命令类工具的结构化入参/出参；其他工具为 nil。
     let command: RuntimeTraceCommand?
+    /// file_edit 成功时的文件级变更摘要；其他工具为 nil。摘要投影不会剥离它，
+    /// 所以列表行也能拿到变更计数。
+    let fileChanges: [RuntimeFileChange]?
 
     private enum CodingKeys: String, CodingKey {
         case id, tool, source, success, arguments, result, error, truncated, command
@@ -420,6 +427,28 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
         case startedAt = "started_at"
         case durationMS = "duration_ms"
         case errorCode = "error_code"
+        case fileChanges = "file_changes"
+    }
+}
+
+/// 单个文件的一次变更（与 Go 侧 observability.FileChange 对应）。
+/// insertions/deletions 在 Go 侧是 omitempty 的 int，缺失时为 nil。
+struct RuntimeFileChange: Decodable, Identifiable {
+    let path: String
+    let action: String
+    let moveTo: String?
+    let projectRoot: String?
+    let insertions: Int?
+    let deletions: Int?
+    let diff: String?
+    let truncated: Bool?
+
+    var id: String { action + "\u{0}" + path + "\u{0}" + (moveTo ?? "") }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, action, insertions, deletions, diff, truncated
+        case moveTo = "move_to"
+        case projectRoot = "project_root"
     }
 }
 
@@ -517,6 +546,86 @@ struct RuntimeTracesPayload: Decodable {
     let tools: [String]
 
     var effectiveMode: String { status?.mode ?? mode ?? "off" }
+}
+
+// MARK: - Network capture
+
+struct RuntimeNetworkHeader: Decodable {
+    let name: String
+    let value: String
+}
+
+/// 请求或响应的一侧快照。body 是原始文本投影，超限时 truncated 为 true。
+struct RuntimeNetworkMessage: Decodable {
+    let headers: [RuntimeNetworkHeader]?
+    let bytes: Int64
+    let body: String?
+    let truncated: Bool?
+}
+
+struct RuntimeNetworkRecord: Decodable, Identifiable {
+    let id: UInt64
+    /// http = 本地 HTTP 服务入站流量；nexus = 桥接 WebSocket 上的节点操作。
+    let channel: String
+    let startedAt: String
+    let durationMS: Double
+    let method: String
+    let host: String
+    let path: String
+    let query: String?
+    let rawURL: String
+    let httpProtocol: String
+    let remoteAddr: String
+    let userAgent: String?
+    let requestID: String?
+    /// HTTP 状态码；nexus 通道为 0，结果看 outcome。
+    let status: Int
+    /// 两通道统一的结果键：ok / error。
+    let outcome: String
+    let errorCode: String?
+    let request: RuntimeNetworkMessage
+    let response: RuntimeNetworkMessage
+
+    var isNexus: Bool { channel == "nexus" }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, channel, method, host, path, query, status, outcome, request, response
+        case startedAt = "started_at"
+        case durationMS = "duration_ms"
+        case rawURL = "raw_url"
+        case httpProtocol = "proto"
+        case remoteAddr = "remote_addr"
+        case userAgent = "user_agent"
+        case requestID = "request_id"
+        case errorCode = "error_code"
+    }
+}
+
+struct RuntimeNetworkStatus: Decodable {
+    let enabled: Bool
+    let maxRecords: Int
+    let count: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, count
+        case maxRecords = "max_records"
+    }
+}
+
+struct RuntimeNetworkPayload: Decodable {
+    let enabled: Bool
+    let status: RuntimeNetworkStatus?
+    let count: Int
+    let records: [RuntimeNetworkRecord]
+}
+
+struct RuntimeNetworkDetailPayload: Decodable {
+    let record: RuntimeNetworkRecord
+}
+
+struct RuntimeNetworkClearPayload: Decodable {
+    let enabled: Bool
+    let cleared: Int
 }
 
 /// 任务与 trace 的时间戳可能带 6~9 位小数，ISO8601DateFormatter 只稳定支持 3 位，
@@ -796,6 +905,9 @@ struct RuntimeToolStats: Decodable, Identifiable {
     let p50DurationMS: Double
     let p95DurationMS: Double
     let p99DurationMS: Double
+    /// insertions/deletions 是该工具在窗口内造成的代码行数变动。
+    let insertions: Int
+    let deletions: Int
 
     var id: String { tool }
 
@@ -806,6 +918,37 @@ struct RuntimeToolStats: Decodable, Identifiable {
         case p50DurationMS = "p50_duration_ms"
         case p95DurationMS = "p95_duration_ms"
         case p99DurationMS = "p99_duration_ms"
+        case insertions, deletions
+    }
+}
+
+/// RuntimeAlert 是后端阈值告警的一条活跃告警。
+/// 告警种类是固定集合（error_rate / trace_disk / task_blocked），
+/// 展示层把种类映射成本地化标题，message/detail 保留后端原文。
+struct RuntimeAlert: Decodable, Identifiable {
+    let id: String
+    let severity: String
+    let kind: String
+    let message: String
+    let detail: String
+    let firstSeen: String
+    let lastSeen: String
+    let active: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id, severity, kind, message, detail, active
+        case firstSeen = "first_seen"
+        case lastSeen = "last_seen"
+    }
+}
+
+struct RuntimeAlertsPayload: Decodable {
+    let alerts: [RuntimeAlert]
+    let resolvedCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case alerts
+        case resolvedCount = "resolved_count"
     }
 }
 
@@ -834,6 +977,9 @@ struct RuntimeAnalyticsPayload: Decodable {
     let totalCalls: UInt64
     let totalErrors: UInt64
     let activeCalls: Int
+    /// totalInsertions/totalDeletions 是进程启动以来的代码行数变动累计值。
+    let totalInsertions: UInt64
+    let totalDeletions: UInt64
     let toolStats: [RuntimeToolStats]
     let recentCalls: [RuntimeAnalyticsCall]
     let process: RuntimeProcessSnapshot
@@ -846,6 +992,8 @@ struct RuntimeAnalyticsPayload: Decodable {
         case totalCalls = "total_calls"
         case totalErrors = "total_errors"
         case activeCalls = "active_calls"
+        case totalInsertions = "total_insertions"
+        case totalDeletions = "total_deletions"
         case toolStats = "tool_stats"
         case recentCalls = "recent_calls"
     }
@@ -995,6 +1143,18 @@ final class ServiceController: @unchecked Sendable {
         )
     }
 
+    /// runtimeAlerts 拉取当前活跃的阈值告警。告警由后端惰性评估并去重，
+    /// 客户端只读不写：关掉告警不会影响采集。
+    func runtimeAlerts(configuration: ServiceConfiguration?) async -> RuntimeAlertsPayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeAlertsPayload.self,
+            configuration: configuration,
+            path: "/internal/runtime/alerts",
+            timeout: 5
+        )
+    }
+
     func runtimeCatalog(configuration: ServiceConfiguration?) async -> RuntimeCatalogPayload? {
         guard let configuration else { return nil }
         // 全量工具 Schema 比状态查询重得多，给独立更宽的超时。
@@ -1119,6 +1279,53 @@ final class ServiceController: @unchecked Sendable {
             queryItems: items,
             timeout: 5
         )
+    }
+
+    /// 列表默认 summary：每条记录单侧正文可达 32 KiB，首屏只拉摘要，
+    /// 正文由 runtimeNetworkDetail 按需取。
+    func runtimeNetwork(
+        query: String = "",
+        channel: String = "",
+        status: String = "",
+        limit: Int = 0,
+        configuration: ServiceConfiguration?
+    ) async -> RuntimeNetworkPayload? {
+        guard let configuration else { return nil }
+        var items = [URLQueryItem(name: "view", value: "summary")]
+        if !query.isEmpty { items.append(URLQueryItem(name: "q", value: query)) }
+        if !channel.isEmpty { items.append(URLQueryItem(name: "channel", value: channel)) }
+        if !status.isEmpty { items.append(URLQueryItem(name: "status", value: status)) }
+        if limit > 0 { items.append(URLQueryItem(name: "limit", value: String(limit))) }
+        return await fetchRuntimePayload(
+            RuntimeNetworkPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.networkCapture,
+            queryItems: items,
+            timeout: 5
+        )
+    }
+
+    func runtimeNetworkDetail(id: UInt64, configuration: ServiceConfiguration?) async -> RuntimeNetworkDetailPayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeNetworkDetailPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.networkCaptureDetail,
+            queryItems: [URLQueryItem(name: "id", value: String(id))],
+            timeout: 5
+        )
+    }
+
+    func runtimeNetworkClear(configuration: ServiceConfiguration?) async -> Bool {
+        guard let configuration else { return false }
+        guard let payload = await fetchRuntimePayload(
+            RuntimeNetworkClearPayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.networkCapture,
+            method: "DELETE",
+            timeout: 5
+        ) else { return false }
+        return payload.enabled
     }
 
     func start() async throws -> BackgroundServiceLifecycleResult {
@@ -2118,6 +2325,7 @@ final class ServiceController: @unchecked Sendable {
         configuration: ServiceConfiguration,
         path: String,
         queryItems: [URLQueryItem] = [],
+        method: String = "GET",
         timeout: TimeInterval = 2.5
     ) async -> T? {
         guard let localMCPURL = configuration.localMCPURL,
@@ -2134,6 +2342,7 @@ final class ServiceController: @unchecked Sendable {
         do {
             var request = URLRequest(url: url)
             request.timeoutInterval = timeout
+            request.httpMethod = method
             if !configuration.authToken.isEmpty {
                 request.setValue("Bearer \(configuration.authToken)", forHTTPHeaderField: "Authorization")
             }

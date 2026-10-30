@@ -111,9 +111,10 @@ private struct TraceToken {
     let kind: TraceTokenKind
 }
 
-private enum TraceCodeHighlighter {
-    /// 用 Text 拼接而不是 AttributedString 累加：AttributedString 在不同字体/
-    /// 颜色的 run 之间合并时会吞掉相邻空白，命令与输出会被拼成 “echotrace-…”。
+/// 非 private：TraceResultCards.swift 的带行号代码块复用同一套高亮。
+enum TraceCodeHighlighter {
+    /// 用 Text 拼接而不是 AttributedString 累加：两种写法渲染结果一致，
+    /// 选 Text 是为了少一层 AttributedString 转换开销。
     static func styled(_ line: String, language: TraceCodeLanguage) -> Text {
         tokens(line, language: language).reduce(Text("")) { partial, token in
             var piece = Text(token.text).font(font(for: token.kind))
@@ -241,6 +242,9 @@ private enum TraceCodeHighlighter {
                 index += 1
                 continue
             }
+            // 词之前必须先吐出待发空白：否则空白会堆到后面的引号/操作符之前，
+            // 渲染出来变成 “lib.tssearch  'x'”——参数之间的空格消失。
+            flushPlain()
             tokens.append(TraceToken(text: word, kind: shellWordKind(word, wordIndex: wordIndex)))
             wordIndex += 1
         }
@@ -432,15 +436,27 @@ struct TraceCodeBlock: View {
 
 /// 与 CatalogCard 视觉一致；CatalogCard 是控制面板主文件的 fileprivate 组件，
 /// trace 渲染单独成文件时不能复用，只能复制同一份样式。
-private struct TraceSurfaceCard<Content: View>: View {
+/// 非 private：TraceResultCards.swift 的专用结果卡共用同一套外观。
+struct TraceSurfaceCard<Trailing: View, Content: View>: View {
     let title: String
+    var trailing: Trailing
     @ViewBuilder var content: () -> Content
+
+    init(title: String, trailing: Trailing, @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.trailing = trailing
+        self.content = content
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 12)
+                trailing
+            }
             content()
         }
         .padding(14)
@@ -454,7 +470,128 @@ private struct TraceSurfaceCard<Content: View>: View {
     }
 }
 
-private struct TraceMetadataRow: View {
+extension TraceSurfaceCard where Trailing == EmptyView {
+    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, trailing: EmptyView(), content: content)
+    }
+}
+
+/// 一次解析的结果：值树 + 叶子计数。解析在 TraceDetailView init 完成，
+/// body 重估与开关切换不再重复 parse；叶子数用于超大正文回退分页代码块。
+struct TraceJSONDocument {
+    let value: Any
+    let valueCount: Int
+
+    static func parse(_ text: String?) -> TraceJSONDocument? {
+        guard let text, !text.isEmpty, let data = text.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else { return nil }
+        return TraceJSONDocument(value: value, valueCount: countLeaves(value))
+    }
+
+    private static func countLeaves(_ value: Any) -> Int {
+        switch value {
+        case let nested as [String: Any]:
+            return nested.values.reduce(1) { $0 + countLeaves($1) }
+        case let array as [Any]:
+            return array.reduce(1) { $0 + countLeaves($1) }
+        default:
+            return 1
+        }
+    }
+}
+
+/// JSON 结构化卡片：把 Arguments/Result 的 JSON 文本解析成键值卡片，
+/// 对象/数组递归展开并缩进。截断预览可能不是合法 JSON，解析失败时
+/// 回退到原始代码块渲染，保证任何内容都可见。
+private struct TraceJSONCardView: View {
+    /// 卡片渲染的叶子值上限。全文旁路单侧可达 256 KiB，递归 VStack 一次性
+    /// 构造上千个 Text 会卡详情页；超限回退到分页代码块。
+    private static let maxRenderedValues = 600
+
+    let document: TraceJSONDocument?
+    let fallbackText: String
+
+    var body: some View {
+        if let document, document.valueCount <= Self.maxRenderedValues {
+            VStack(alignment: .leading, spacing: 4) {
+                TraceJSONValueView(key: nil, value: document.value)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
+        } else {
+            TraceCodeBlock(text: fallbackText, language: .json)
+        }
+    }
+}
+
+/// 递归键值行：标量渲染成 label + value 一行（复用 TraceMetadataRow 的
+/// 固定标签宽度，与命令卡元数据视觉一致）；容器按键名/索引展开为嵌套块。
+private struct TraceJSONValueView: View {
+    let key: String?
+    let value: Any
+
+    var body: some View {
+        switch value {
+        case let nested as [String: Any]:
+            container(key: key, isEmpty: nested.isEmpty, emptyText: "{}") {
+                ForEach(nested.keys.sorted(), id: \.self) { childKey in
+                    TraceJSONValueView(key: childKey, value: nested[childKey].map { $0 as Any } ?? NSNull())
+                }
+            }
+        case let array as [Any]:
+            container(key: key, isEmpty: array.isEmpty, emptyText: "[]") {
+                ForEach(array.indices, id: \.self) { index in
+                    TraceJSONValueView(key: "[\(index)]", value: array[index])
+                }
+            }
+        default:
+            TraceMetadataRow(label: key ?? "", value: Self.scalarText(value))
+        }
+    }
+
+    @ViewBuilder private func container(
+        key: String?, isEmpty: Bool, emptyText: String,
+        @ViewBuilder children: () -> some View
+    ) -> some View {
+        if isEmpty {
+            TraceMetadataRow(label: key ?? "", value: emptyText)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                if let key {
+                    Text(key)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                children()
+            }
+            .padding(.leading, key == nil ? 0 : 14)
+            .overlay(alignment: .leading) {
+                // 嵌套层级用左侧竖线标记，缩进过深时仍能看出归属。
+                if key != nil {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 1)
+                        .padding(.leading, 4)
+                }
+            }
+        }
+    }
+
+    private static func scalarText(_ value: Any) -> String {
+        switch value {
+        case is NSNull:
+            return "null"
+        case let flag as Bool:
+            return flag ? "true" : "false"
+        case let number as NSNumber:
+            return number.stringValue
+        default:
+            return "\(value)"
+        }
+    }
+}
+
+struct TraceMetadataRow: View {
     let label: String
     let value: String
     var mono = true
@@ -473,7 +610,7 @@ private struct TraceMetadataRow: View {
     }
 }
 
-private struct TraceBadge: View {
+struct TraceBadge: View {
     let text: String
     var color: Color = .secondary
 
@@ -488,9 +625,14 @@ private struct TraceBadge: View {
     }
 }
 
-private enum TraceFormat {
+enum TraceFormat {
     static func bytes(_ value: Int) -> String {
         ByteCountFormatter.string(fromByteCount: Int64(value), countStyle: .memory)
+    }
+
+    static func duration(milliseconds: Int) -> String {
+        if milliseconds < 1_000 { return "\(milliseconds) ms" }
+        return String(format: "%.2f s", Double(milliseconds) / 1_000)
     }
 }
 
@@ -593,7 +735,7 @@ struct TraceCommandCard: View {
     }
 }
 
-private struct TraceOutputSection: View {
+struct TraceOutputSection: View {
     let title: String
     let text: String?
     let totalBytes: Int?
@@ -630,13 +772,6 @@ private struct TraceOutputSection: View {
     }
 }
 
-private extension TraceFormat {
-    static func duration(milliseconds: Int) -> String {
-        if milliseconds < 1_000 { return "\(milliseconds) ms" }
-        return String(format: "%.2f s", Double(milliseconds) / 1_000)
-    }
-}
-
 // MARK: - Trace detail
 
 /// 调用追踪详情页。record 可能是列表摘要（正文还没回来）也可能是完整详情；
@@ -649,6 +784,37 @@ struct TraceDetailView: View {
     var fullUnavailable = false
     var fullLoading = false
     var onLoadFull: (() -> Void)? = nil
+
+    /// Arguments/Result 的渲染模式开关：卡片（结构化键值）还是原始 JSON 文本。
+    /// 用户级配置，跨详情页与启动会话持久化。
+    @AppStorage("TraceRenderJSONAsCards") private var renderJSONAsCards = true
+
+    /// 解析/解码只在视图重建时执行一次；body 重估（开关切换、加载态变化）
+    /// 直接复用，不再对同一份正文反复 parse/decode。
+    private let argumentsJSON: TraceJSONDocument?
+    private let resultJSON: TraceJSONDocument?
+    /// 已知工具的 Result 专用卡片模型；非专用工具或解析失败时为 nil。
+    private let typedResult: TraceTypedResult?
+
+    init(
+        record: RuntimeTraceRecord,
+        loadingDetail: Bool = false,
+        full: RuntimeTraceFullRecord? = nil,
+        fullUnavailable: Bool = false,
+        fullLoading: Bool = false,
+        onLoadFull: (() -> Void)? = nil
+    ) {
+        self.record = record
+        self.loadingDetail = loadingDetail
+        self.full = full
+        self.fullUnavailable = fullUnavailable
+        self.fullLoading = fullLoading
+        self.onLoadFull = onLoadFull
+        let resultText = full?.result ?? record.result
+        self.argumentsJSON = TraceJSONDocument.parse(full?.arguments ?? record.arguments)
+        self.resultJSON = TraceJSONDocument.parse(resultText)
+        self.typedResult = TraceTypedResult.decode(tool: record.tool, text: resultText)
+    }
 
     private var command: RuntimeTraceCommand? { record.command }
 
@@ -677,8 +843,8 @@ struct TraceDetailView: View {
                     TraceCommandCard(command: command, full: full?.command)
                 }
 
-                payloadCard(L10n.text("Arguments"), argumentsText, language: .json)
-                payloadCard(L10n.text("Result"), resultText, language: .log)
+                payloadCard(L10n.text("Arguments"), argumentsText, document: argumentsJSON, language: .json)
+                resultSection
 
                 if loadingDetail {
                     ProgressView()
@@ -746,16 +912,39 @@ struct TraceDetailView: View {
         }
     }
 
-    @ViewBuilder private func payloadCard(_ title: String, _ text: String?, language: TraceCodeLanguage) -> some View {
-        TraceSurfaceCard(title: title) {
+    /// 结果区：优先工具专用卡（文件变更 / 任务状态 / 能力索引 / 文件操作），
+    /// 无专用卡或关闭卡片模式时回退通用 JSON 渲染。
+    @ViewBuilder private var resultSection: some View {
+        if renderJSONAsCards, let changes = record.fileChanges, !changes.isEmpty {
+            TraceFileChangesCard(changes: changes, rawText: resultText ?? "")
+        } else if renderJSONAsCards, let typedResult {
+            TraceTypedResultCard(result: typedResult, rawText: resultText ?? "")
+        } else {
+            payloadCard(L10n.text("Result"), resultText, document: resultJSON, language: .log)
+        }
+    }
+
+    @ViewBuilder private func payloadCard(_ title: String, _ text: String?, document: TraceJSONDocument?, language: TraceCodeLanguage) -> some View {
+        TraceSurfaceCard(title: title, trailing: renderModeToggle) {
             if let text, !text.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
-                    TraceCodeBlock(text: text, language: language)
+                    if renderJSONAsCards {
+                        TraceJSONCardView(document: document, fallbackText: text)
+                    } else {
+                        TraceCodeBlock(text: text, language: language)
+                    }
                     CopyButton(text: text)
                 }
             } else {
                 Text("—").foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var renderModeToggle: some View {
+        Toggle(L10n.text("Render as cards"), isOn: $renderJSONAsCards)
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .font(.system(size: 11))
     }
 }

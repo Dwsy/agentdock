@@ -1,6 +1,14 @@
 import AppKit
 import SwiftUI
 
+/// ControlPanelTarget 是控制面板的可跳转页面。
+/// 定义在控制器文件里对外暴露，页面枚举本身保持文件私有。
+enum ControlPanelTarget {
+    case analytics
+    case traces
+    case tasks
+}
+
 @MainActor
 final class NativeControlPanelWindowController: NSWindowController, NSWindowDelegate {
     private let model: ControlPanelModel
@@ -72,6 +80,17 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
         present(status: status)
     }
 
+    /// present(target:) 把控制面板切到指定页面后拉起窗口。
+    /// 托盘告警据此把用户带到对应页面，而不是只打开首页。
+    func present(target: ControlPanelTarget, status: ServiceStatus) {
+        switch target {
+        case .analytics: model.page = .analytics
+        case .traces: model.page = .traces
+        case .tasks: model.page = .tasks
+        }
+        present(status: status)
+    }
+
     func presentSettings(status: ServiceStatus) {
         model.page = .settings
         present(status: status)
@@ -91,7 +110,7 @@ final class NativeControlPanelWindowController: NSWindowController, NSWindowDele
 @MainActor
 private final class ControlPanelModel: ObservableObject {
     enum Page: String, CaseIterable, Identifiable {
-        case home, connections, capabilities, tasks, files, published, traces, analytics, activity, settings
+        case home, connections, capabilities, tasks, files, published, traces, network, analytics, activity, settings
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -102,6 +121,7 @@ private final class ControlPanelModel: ObservableObject {
             case .files: return L10n.text("Files")
             case .published: return L10n.text("Published")
             case .traces: return L10n.text("Traces")
+            case .network: return L10n.text("Network")
             case .analytics: return L10n.text("Analytics")
             case .activity: return L10n.text("Activity")
             case .settings: return L10n.text("Settings")
@@ -116,6 +136,7 @@ private final class ControlPanelModel: ObservableObject {
             case .files: return "folder"
             case .published: return "link"
             case .traces: return "waveform.path.ecg"
+            case .network: return "network"
             case .analytics: return "chart.bar.xaxis"
             case .activity: return "clock.arrow.circlepath"
             case .settings: return "gearshape"
@@ -169,7 +190,7 @@ private final class ControlPanelModel: ObservableObject {
     }
 
     enum SettingsPage: String, CaseIterable, Identifiable {
-        case appearance, permissions, startup, logs, traces, advancedConnection, about
+        case appearance, permissions, startup, logs, traces, networkCapture, advancedConnection, about
 
         var id: String { rawValue }
         var title: String {
@@ -178,6 +199,7 @@ private final class ControlPanelModel: ObservableObject {
             case .startup: return L10n.text("Startup")
             case .logs: return L10n.text("Logs")
             case .traces: return L10n.text("Call tracing")
+        case .networkCapture: return L10n.text("Network capture")
 
             case .advancedConnection: return L10n.text("Advanced connection")
             case .appearance: return L10n.text("Appearance")
@@ -333,6 +355,27 @@ private final class ControlPanelModel: ObservableObject {
     /// full=true 时附带旁路全文副本；副本缺失时 payload.full_available=false。
     func loadTraceDetail(id: UInt64, full: Bool = false) async -> RuntimeTraceDetailPayload? {
         await service.runtimeTraceDetail(id: id, full: full, configuration: status.configuration)
+    }
+
+    /// 抓包列表同样只拉摘要：每条记录单侧正文可达 32 KiB，完整记录由详情接口按需取。
+    /// 方法不单独传：搜索框已经按方法/路径/地址匹配。
+    func loadNetwork(query: String, channel: String, status filter: String) async -> RuntimeNetworkPayload? {
+        await service.runtimeNetwork(
+            query: query,
+            channel: channel,
+            status: filter,
+            limit: 500,
+            configuration: status.configuration
+        )
+    }
+
+    func loadNetworkDetail(id: UInt64) async -> RuntimeNetworkDetailPayload? {
+        await service.runtimeNetworkDetail(id: id, configuration: status.configuration)
+    }
+
+    /// 清空只作用于内存环：抓包从不落盘，没有需要同步清理的副本。
+    func clearNetwork() async -> Bool {
+        await service.runtimeNetworkClear(configuration: status.configuration)
     }
 
     func loadArtifacts() async -> RuntimeArtifactsPayload? {
@@ -650,6 +693,7 @@ private struct ControlPanelRootView: View {
         case .files: FilesView(model: model)
         case .published: PublishedView(model: model)
         case .traces: TracesView(model: model)
+        case .network: NetworkView(model: model)
         case .analytics: AnalyticsView(model: model)
         case .activity: ActivityView(model: model)
         }
@@ -933,7 +977,7 @@ private struct HomeView: View {
                             value: nexusText,
                             detail: remoteConnectionDetail
                         )
-                        .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+                        .frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -946,7 +990,7 @@ private struct HomeView: View {
                         value: dashboardCount(model.dashboard.skillCount),
                         detail: L10n.text("Installed")
                     )
-                    .frame(width: 120)
+                    .frame(minWidth: 96, maxWidth: .infinity)
 
                     metricDivider
 
@@ -955,7 +999,7 @@ private struct HomeView: View {
                         value: dashboardCount(model.dashboard.mcpCount),
                         detail: L10n.text("Configured")
                     )
-                    .frame(width: 120)
+                    .frame(minWidth: 96, maxWidth: .infinity)
 
                     metricDivider
 
@@ -964,7 +1008,7 @@ private struct HomeView: View {
                         value: dashboardCount(model.dashboard.pluginCount),
                         detail: L10n.text("Installed")
                     )
-                    .frame(width: 120)
+                    .frame(minWidth: 96, maxWidth: .infinity)
                 }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
@@ -1023,7 +1067,7 @@ private struct HomeView: View {
     private var metricDivider: some View {
         Divider()
             .frame(height: 56)
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 12)
     }
 
     @ViewBuilder
@@ -1510,7 +1554,9 @@ private struct CapabilitiesView: View {
                         acpProfiles: profiles,
                         acpDefaultProfile: defaultProfile,
                         traceMode: configuration?.traceMode ?? .off,
-                        traceRetentionDays: configuration?.traceRetentionDays ?? 3
+                        traceRetentionDays: configuration?.traceRetentionDays ?? 3,
+                        networkCaptureEnabled: configuration?.networkCaptureEnabled ?? false,
+                        networkCaptureMax: configuration?.networkCaptureMax ?? 200
                     )
                     Task {
                         if await model.applySettings(settings) { loadConfiguration() }
@@ -1879,7 +1925,103 @@ private struct SettingsTracesView: View {
             acpProfiles: current?.acpProfiles ?? [],
             acpDefaultProfile: current?.acpDefaultProfile ?? "",
             traceMode: traceMode,
-            traceRetentionDays: traceRetentionDays
+            traceRetentionDays: traceRetentionDays,
+            // HTTP 抓包不是本页的编辑范围：从当前配置回填，避免覆盖用户的抓包设置。
+            networkCaptureEnabled: current?.networkCaptureEnabled ?? false,
+            networkCaptureMax: current?.networkCaptureMax ?? 200
+        )
+    }
+}
+
+/// HTTP 抓包是独立于调用追踪的采集开关：同样只写 agentdock.env，
+/// 由用户显式重启 Core 后生效，保存时不顺带重启。
+private struct SettingsNetworkView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var captureEnabled = false
+    @State private var captureMax = 200
+    @State private var initialized = false
+
+    private var configuration: ServiceConfiguration? { model.status.configuration }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            PageHeader(
+                title: L10n.text("Network capture"),
+                detail: L10n.text("Record network calls in memory.")
+            )
+
+            SettingsSection(L10n.text("Network capture")) {
+                SettingsRow(
+                    L10n.text("Network capture"),
+                    detail: L10n.text("Record network calls in memory.")
+                ) {
+                    Toggle(L10n.text("Network capture"), isOn: $captureEnabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+                if captureEnabled {
+                    RowDivider()
+                    SettingsRow(
+                        L10n.text("Keep entries"),
+                        detail: L10n.text("Oldest entries are dropped after this many records.")
+                    ) {
+                        Stepper(value: $captureMax, in: 1...2000, step: 100) {
+                            Text(L10n.format("%d entries", captureMax))
+                                .monospacedDigit()
+                        }
+                        .frame(width: 140, alignment: .trailing)
+                    }
+                }
+            }
+
+            Text(L10n.text("Changes take effect after AgentDock Core restarts."))
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Button(L10n.text("Save")) {
+                Task {
+                    if await model.applySettings(editableSettings()) {
+                        loadConfiguration()
+                    }
+                }
+            }
+            .disabled(model.isBusy)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+
+            if let message = model.message {
+                Text(message).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 650, alignment: .leading)
+        .task(id: model.statusUpdatedAt) {
+            if !initialized { loadConfiguration() }
+        }
+    }
+
+    private func loadConfiguration() {
+        guard let configuration else { return }
+        captureEnabled = configuration.networkCaptureEnabled
+        captureMax = configuration.networkCaptureMax
+        initialized = true
+    }
+
+    /// 只改抓包字段，其余配置从当前环境回填，避免覆盖用户在其他页面的修改。
+    private func editableSettings() -> EditableServiceSettings {
+        let current = configuration
+        return EditableServiceSettings(
+            port: current?.port ?? 8765,
+            logLevel: current?.logLevel ?? "info",
+            mcpAppsMode: current?.mcpAppsMode ?? .full,
+            browserEnabled: current?.browserEnabled ?? false,
+            browserCDPURL: current?.browserCDPURL ?? "",
+            browserReuseExistingCDP: current?.browserReuseExistingCDP ?? false,
+            acpEnabled: current?.acpEnabled ?? false,
+            acpProfiles: current?.acpProfiles ?? [],
+            acpDefaultProfile: current?.acpDefaultProfile ?? "",
+            traceMode: current?.traceMode ?? .off,
+            traceRetentionDays: current?.traceRetentionDays ?? 3,
+            networkCaptureEnabled: captureEnabled,
+            networkCaptureMax: captureMax
         )
     }
 }
@@ -2093,6 +2235,8 @@ private struct SettingsView: View {
             }
         case .traces:
             SettingsTracesView(model: model)
+        case .networkCapture:
+            SettingsNetworkView(model: model)
         case .permissions:
             VStack(alignment: .leading, spacing: 20) {
                 PageHeader(title: L10n.text("Permissions"), detail: L10n.text("Review macOS permissions required by enabled capabilities."))
@@ -2267,7 +2411,9 @@ private struct SettingsView: View {
                                         acpProfiles: configuration.acpProfiles,
                                         acpDefaultProfile: configuration.acpDefaultProfile,
                                         traceMode: configuration.traceMode,
-                                        traceRetentionDays: configuration.traceRetentionDays
+                                        traceRetentionDays: configuration.traceRetentionDays,
+                                        networkCaptureEnabled: configuration.networkCaptureEnabled,
+                                        networkCaptureMax: configuration.networkCaptureMax
                                     )
                                     Task {
                                         if await model.applySettings(settings) {
@@ -2486,7 +2632,9 @@ private struct SettingsView: View {
             acpProfiles: configuration.acpProfiles,
             acpDefaultProfile: configuration.acpDefaultProfile,
             traceMode: configuration.traceMode,
-            traceRetentionDays: configuration.traceRetentionDays
+            traceRetentionDays: configuration.traceRetentionDays,
+            networkCaptureEnabled: configuration.networkCaptureEnabled,
+            networkCaptureMax: configuration.networkCaptureMax
         )
         Task { await model.applySettings(settings) }
     }
@@ -3636,6 +3784,26 @@ private struct TraceRowView: View {
                         .truncationMode(.middle)
                         .help(summary)
                 }
+                // 文件变更摘要：summary 视图会清掉 diff 但保留计数，
+                // 所以列表行能白拿一行“改了哪些文件、增删多少”。
+                if let changes = record.fileChanges, !changes.isEmpty {
+                    HStack(spacing: 6) {
+                        Text(changes.count == 1 ? (changes[0].path) : L10n.format("%d files", changes.count))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        ForEach(changes.indices, id: \.self) { index in
+                            if let insertions = changes[index].insertions, insertions > 0 {
+                                Text("+\(insertions)").foregroundStyle(.green)
+                            }
+                            if let deletions = changes[index].deletions, deletions > 0 {
+                                Text("−\(deletions)").foregroundStyle(.red)
+                            }
+                        }
+                    }
+                    .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                }
                 if let code = record.errorCode, !code.isEmpty {
                     Text(code).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.red)
                 }
@@ -3646,6 +3814,465 @@ private struct TraceRowView: View {
             Button(L10n.text("Copy tool name")) { copyToPasteboard(record.tool) }
             Button(L10n.text("Copy trace ID")) { copyToPasteboard(String(record.id)) }
         }
+    }
+}
+
+// MARK: - Network capture
+
+/// Network 面板按 Chrome DevTools 的形态：左侧请求列表，右侧选中请求的
+/// Headers / Response / Timing 分页。抓包只存内存，因此没有导出与全文旁路。
+private struct NetworkView: View {
+    @ObservedObject var model: ControlPanelModel
+    @State private var query = ""
+    @State private var channelFilter = ""
+    @State private var statusFilter = "all"
+    @State private var payload: RuntimeNetworkPayload?
+    @State private var selectedID: UInt64?
+    @State private var detailRecord: RuntimeNetworkRecord?
+    @State private var detailLoading = false
+    @State private var loading = false
+    @State private var clearing = false
+    @State private var autoRefresh = true
+    @State private var visibleCount = ListChunk.initial
+    @State private var reloadTask: Task<Void, Never>?
+
+    private var records: [RuntimeNetworkRecord] { payload?.records ?? [] }
+    private var visibleRecords: [RuntimeNetworkRecord] { Array(records.prefix(visibleCount)) }
+
+    /// 详情回读完成前先用列表摘要渲染元数据，避免选中后出现空白等待。
+    private var selectedRecord: RuntimeNetworkRecord? {
+        if let detailRecord, detailRecord.id == selectedID {
+            return detailRecord
+        }
+        return records.first { $0.id == selectedID }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                PageHeader(title: L10n.text("Network"), detail: statusDetail)
+                HStack(spacing: 10) {
+                    SearchField(placeholder: L10n.text("Search method, path, or address"), text: $query)
+                    // 方法不做下拉：HTTP 方法与 Nexus 操作名不同源，搜索框已经匹配 method。
+                    Picker(L10n.text("Channel"), selection: $channelFilter) {
+                        Text(L10n.text("All")).tag("")
+                        Text("HTTP").tag("http")
+                        Text("Nexus").tag("nexus")
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                    Picker(L10n.text("Status"), selection: $statusFilter) {
+                        Text(L10n.text("All")).tag("all")
+                        Text(L10n.text("Success")).tag("ok")
+                        Text(L10n.text("Error")).tag("error")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 210)
+                    Spacer()
+                    AutoRefreshToggle(enabled: $autoRefresh)
+                    Button(L10n.text("Clear")) {
+                        Task {
+                            clearing = true
+                            _ = await model.clearNetwork()
+                            selectedID = nil
+                            detailRecord = nil
+                            await reload()
+                            clearing = false
+                        }
+                    }
+                    .disabled(clearing || model.isBusy)
+                    Button(L10n.text("Refresh")) { Task { await reload() } }
+                        .disabled(loading)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
+
+            Divider()
+
+            if payload == nil {
+                CatalogUnavailable(reason: L10n.text("Network capture is unavailable while AgentDock Core is not running."))
+            } else if payload?.enabled != true {
+                CatalogUnavailable(reason: L10n.text("Network capture is off. Set AGENTDOCK_NETWORK_CAPTURE_ENABLED to true and restart AgentDock Core."))
+            } else {
+                HStack(spacing: 0) {
+                    List(selection: $selectedID) {
+                        ForEach(Array(visibleRecords.enumerated()), id: \.element.id) { index, record in
+                            NetworkRowView(record: record)
+                                .tag(record.id)
+                                // 滚动到末行自动渲染下一批，大列表首帧只建 50 行。
+                                .onAppear {
+                                    if index == visibleRecords.count - 1 {
+                                        visibleCount += ListChunk.size
+                                    }
+                                }
+                        }
+                    }
+                    .listStyle(.inset)
+                    .frame(minWidth: 380, idealWidth: 460, maxWidth: 620)
+
+                    Divider()
+
+                    detailPane
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+        }
+        .task { await reload() }
+        .task(id: selectedID) { await loadDetail() }
+        .onChange(of: query) { _ in scheduleReload() }
+        .onChange(of: channelFilter) { _ in scheduleReload() }
+        .onChange(of: statusFilter) { _ in scheduleReload() }
+        .autoRefresh(enabled: autoRefresh) { await reload() }
+    }
+
+    private var running: Bool { model.status.loaded && model.status.healthy }
+    private var statusDetail: String {
+        guard let payload else { return "" }
+        let status = payload.status
+        return L10n.format("%d entries · up to %d", payload.count, status?.maxRecords ?? 0)
+    }
+
+    @ViewBuilder private var detailPane: some View {
+        if let record = selectedRecord {
+            NetworkDetailView(record: record, loading: detailLoading)
+        } else {
+            Text(L10n.text("Select a request"))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// 搜索输入防抖：过滤条件是 API 侧查询，不能每个按键打一次后端。
+    private func scheduleReload() {
+        reloadTask?.cancel()
+        visibleCount = ListChunk.initial
+        reloadTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
+            await reload()
+        }
+    }
+
+    /// 自动刷新只在列表头部变化时替换数据：不能把用户正要点击的行换掉。
+    private func reload() async {
+        guard running else {
+            if payload != nil { payload = nil }
+            return
+        }
+        loading = true
+        defer { loading = false }
+        let next = await model.loadNetwork(
+            query: query,
+            channel: channelFilter,
+            status: statusFilter == "all" ? "" : statusFilter
+        )
+        guard let next else { return }
+        let currentLatestID = payload?.records.first?.id
+        if payload == nil || next.records.first?.id != currentLatestID || next.count != payload?.count {
+            payload = next
+        }
+        if let selectedID, !next.records.contains(where: { $0.id == selectedID }) {
+            self.selectedID = nil
+            detailRecord = nil
+        }
+    }
+
+    /// 选中行只回读一次详情；自动刷新不会重新拉正文。
+    private func loadDetail() async {
+        guard let id = selectedID else {
+            detailRecord = nil
+            return
+        }
+        detailLoading = true
+        defer { detailLoading = false }
+        guard let loaded = await model.loadNetworkDetail(id: id) else { return }
+        if selectedID == id {
+            detailRecord = loaded.record
+        }
+    }
+}
+
+private struct NetworkRowView: View {
+    let record: RuntimeNetworkRecord
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(record.path.isEmpty ? "/" : record.path)
+                .font(.system(size: 12.5, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // Nexus 通道没有 HTTP 方法，列里放的是操作名。
+            Text(record.method)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 62, alignment: .leading)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(statusText)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(statusColor)
+                .frame(width: 44, alignment: .trailing)
+            Text(NetworkByteFormat.string(record.response.bytes))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 68, alignment: .trailing)
+            Text(NetworkByteFormat.duration(record.durationMS))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 62, alignment: .trailing)
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// HTTP 显示状态码，Nexus 用 OK/ERR 表达结果：两者没有共同的码表。
+    private var statusText: String {
+        if record.isNexus {
+            return record.outcome == "ok" ? "OK" : (record.errorCode ?? "ERR")
+        }
+        return String(record.status)
+    }
+
+    private var statusColor: Color {
+        if record.outcome == "error" { return .red }
+        switch record.status {
+        case 200..<300: return .green
+        case 300..<400: return .orange
+        case 400...: return .red
+        default: return .green
+        }
+    }
+}
+
+private enum NetworkDetailTab: String, CaseIterable, Identifiable {
+    case headers, response, timing
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .headers: return L10n.text("Overview")
+        case .response: return L10n.text("Response")
+        case .timing: return L10n.text("Timing")
+        }
+    }
+}
+
+private struct NetworkDetailView: View {
+    let record: RuntimeNetworkRecord
+    var loading = false
+    @State private var tab: NetworkDetailTab = .headers
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text(record.method)
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                Text(record.rawURL)
+                    .font(.system(size: 12, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Spacer()
+                if loading { ProgressView().controlSize(.small) }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+
+            Divider()
+
+            Picker(L10n.text("Detail"), selection: $tab) {
+                ForEach(NetworkDetailTab.allCases) { item in
+                    Text(item.title).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(width: 280)
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    switch tab {
+                    case .headers: headersTab
+                    case .response: responseTab
+                    case .timing: timingTab
+                    }
+                }
+                .padding(18)
+                .frame(maxWidth: 760, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var headersTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            section(L10n.text("General")) {
+                NetworkMetadataRow(label: L10n.text("Request URL"), value: record.rawURL)
+                NetworkMetadataRow(
+                    label: record.isNexus ? L10n.text("Operation") : L10n.text("Method"),
+                    value: record.method
+                )
+                NetworkMetadataRow(label: L10n.text("Status"), value: statusText)
+                NetworkMetadataRow(label: L10n.text("Protocol"), value: record.httpProtocol)
+                // Nexus 通道没有对端 socket 地址，展示的是 Nexus 服务端点。
+                NetworkMetadataRow(
+                    label: L10n.text("Remote"),
+                    value: record.remoteAddr.isEmpty ? record.host : record.remoteAddr
+                )
+                if let userAgent = record.userAgent, !userAgent.isEmpty {
+                    NetworkMetadataRow(label: L10n.text("User agent"), value: userAgent)
+                }
+                if let requestID = record.requestID, !requestID.isEmpty {
+                    NetworkMetadataRow(label: L10n.text("Request ID"), value: requestID)
+                }
+            }
+            if !record.isNexus {
+                // WebSocket 帧没有 header，Nexus 通道只有正文。
+                section(L10n.text("Request headers"), truncated: record.request.truncated == true) {
+                    NetworkHeaderList(headers: record.request.headers ?? [])
+                }
+                section(L10n.text("Response headers"), truncated: record.response.truncated == true) {
+                    NetworkHeaderList(headers: record.response.headers ?? [])
+                }
+            }
+        }
+    }
+
+    /// HTTP 显示状态码与错误码，Nexus 用 OK/ERR 表达结果：两者没有共同的码表。
+    private var statusText: String {
+        if record.isNexus {
+            return record.outcome == "ok" ? "OK" : (record.errorCode ?? "ERR")
+        }
+        return String(record.status)
+    }
+
+    private var responseTab: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            section(
+                L10n.text("Request body"),
+                detail: L10n.format("%d bytes", record.request.bytes),
+                truncated: record.request.truncated == true
+            ) {
+                bodyBlock(record.request.body)
+            }
+            section(
+                L10n.text("Response body"),
+                detail: L10n.format("%d bytes", record.response.bytes),
+                truncated: record.response.truncated == true
+            ) {
+                bodyBlock(record.response.body)
+            }
+        }
+    }
+
+    private var timingTab: some View {
+        section(L10n.text("Timing")) {
+            NetworkMetadataRow(label: L10n.text("Started"), value: RuntimeTimestamp.precise(record.startedAt))
+            NetworkMetadataRow(label: L10n.text("Duration"), value: NetworkByteFormat.duration(record.durationMS))
+            NetworkMetadataRow(label: L10n.text("Request size"), value: NetworkByteFormat.string(record.request.bytes))
+            NetworkMetadataRow(label: L10n.text("Response size"), value: NetworkByteFormat.string(record.response.bytes))
+        }
+    }
+
+    @ViewBuilder private func bodyBlock(_ body: String?) -> some View {
+        if let body, !body.isEmpty {
+            HStack(alignment: .top, spacing: 8) {
+                TraceCodeBlock(text: body, language: .plain)
+                CopyButton(text: body)
+            }
+        } else {
+            Text(L10n.text("Empty"))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func section<Content: View>(
+        _ title: String,
+        detail: String? = nil,
+        truncated: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                if let detail {
+                    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            content()
+            if truncated {
+                Text(L10n.text("Body and headers are truncated to the in-memory capture limit."))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct NetworkHeaderList: View {
+    let headers: [RuntimeNetworkHeader]
+
+    var body: some View {
+        if headers.isEmpty {
+            Text(L10n.text("Empty"))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(Array(headers.enumerated()), id: \.offset) { _, header in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(header.name)
+                            .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 180, alignment: .leading)
+                        Text(header.value)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct NetworkMetadataRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .frame(width: 120, alignment: .leading)
+            Text(value)
+                .font(.system(size: 11.5, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// 字节与耗时的展示格式。不走 L10n：单位是技术符号，不随语言变化。
+private enum NetworkByteFormat {
+    static func string(_ bytes: Int64) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return String(format: "%.1f KB", Double(bytes) / 1024) }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
+
+    static func duration(_ milliseconds: Double) -> String {
+        if milliseconds < 1000 { return String(format: "%.0f ms", milliseconds) }
+        return String(format: "%.2f s", milliseconds / 1000)
     }
 }
 
@@ -3744,7 +4371,9 @@ private struct AnalyticsView: View {
         let errorRate = payload.totalCalls == 0
             ? 0
             : Double(payload.totalErrors) / Double(payload.totalCalls)
-        return HStack(spacing: 10) {
+        // 自适应列数：7 个指标在 680pt 内容区放不下，固定 HStack 会把
+        // 父 VStack 撑宽，连带整页卡片被窗口右缘裁掉。
+        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 10)], spacing: 10) {
             AnalyticsMetric(
                 title: L10n.text("Window calls"),
                 value: "\(payload.windowCalls)",
@@ -3774,6 +4403,18 @@ private struct AnalyticsView: View {
                 icon: "bolt.horizontal",
                 tint: payload.activeCalls > 0 ? .accentColor : .secondary
             )
+            AnalyticsMetric(
+                title: L10n.text("Added lines"),
+                value: "\(payload.totalInsertions)",
+                icon: "plus",
+                tint: payload.totalInsertions > 0 ? .green : .secondary
+            )
+            AnalyticsMetric(
+                title: L10n.text("Deleted lines"),
+                value: "\(payload.totalDeletions)",
+                icon: "minus",
+                tint: payload.totalDeletions > 0 ? .orange : .secondary
+            )
         }
     }
 
@@ -3788,8 +4429,7 @@ private struct AnalyticsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 300)
-                Spacer()
+                .frame(minWidth: 180, idealWidth: 240, maxWidth: 300)
                 Text(L10n.format("%d tools", stats.count))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
@@ -3817,24 +4457,18 @@ private struct AnalyticsView: View {
         }
     }
 
+    /// 8 个固定列在窄窗口必然超宽；行内用 ScrollView(.horizontal) 兜底，
+    /// 表头与数据行共享同一份列宽定义，避免两处漂移。
     private var table: some View {
         CatalogCard(title: L10n.text("Details")) {
-            HStack(spacing: 8) {
-                Text(L10n.text("Tool")).frame(maxWidth: .infinity, alignment: .leading)
-                Text(L10n.text("Calls")).frame(width: 70, alignment: .trailing)
-                Text(L10n.text("Errors")).frame(width: 70, alignment: .trailing)
-                Text(L10n.text("Error rate")).frame(width: 90, alignment: .trailing)
-                Text("P50").frame(width: 70, alignment: .trailing)
-                Text("P95").frame(width: 70, alignment: .trailing)
-                Text("P99").frame(width: 70, alignment: .trailing)
-            }
-            .font(.system(size: 10.5, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 8)
-            .padding(.bottom, 4)
-            Divider()
-            ForEach(Array(stats.enumerated()), id: \.element.id) { index, item in
-                AnalyticsTableRow(stat: item, isEven: index.isMultiple(of: 2))
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    AnalyticsTableHeader()
+                    Divider()
+                    ForEach(Array(stats.enumerated()), id: \.element.id) { index, item in
+                        AnalyticsTableRow(stat: item, isEven: index.isMultiple(of: 2))
+                    }
+                }
             }
         }
     }
@@ -3939,28 +4573,71 @@ private struct AnalyticsBarRow: View {
     }
 }
 
+/// 明细表的列宽定义。表头与数据行共用同一份，避免两处漂移。
+/// 工具名列用固定最小宽度：横向滚动时列不能被压扁。
+private enum AnalyticsColumn {
+    static let spacing: CGFloat = 8
+    static let horizontalPadding: CGFloat = 8
+    static let toolMinWidth: CGFloat = 140
+    static let calls: CGFloat = 62
+    static let errors: CGFloat = 62
+    static let errorRate: CGFloat = 78
+    static let insertions: CGFloat = 70
+    static let deletions: CGFloat = 70
+    static let p50: CGFloat = 64
+    static let p95: CGFloat = 64
+    static let p99: CGFloat = 64
+}
+
+private struct AnalyticsTableHeader: View {
+    var body: some View {
+        HStack(spacing: AnalyticsColumn.spacing) {
+            Text(L10n.text("Tool"))
+                .frame(minWidth: AnalyticsColumn.toolMinWidth, maxWidth: .infinity, alignment: .leading)
+            Text(L10n.text("Calls")).frame(width: AnalyticsColumn.calls, alignment: .trailing)
+            Text(L10n.text("Errors")).frame(width: AnalyticsColumn.errors, alignment: .trailing)
+            Text(L10n.text("Error rate")).frame(width: AnalyticsColumn.errorRate, alignment: .trailing)
+            Text(L10n.text("Added lines")).frame(width: AnalyticsColumn.insertions, alignment: .trailing)
+            Text(L10n.text("Deleted lines")).frame(width: AnalyticsColumn.deletions, alignment: .trailing)
+            Text("P50").frame(width: AnalyticsColumn.p50, alignment: .trailing)
+            Text("P95").frame(width: AnalyticsColumn.p95, alignment: .trailing)
+            Text("P99").frame(width: AnalyticsColumn.p99, alignment: .trailing)
+        }
+        .font(.system(size: 10.5, weight: .semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, AnalyticsColumn.horizontalPadding)
+        .padding(.bottom, 4)
+    }
+}
+
 private struct AnalyticsTableRow: View {
     let stat: RuntimeToolStats
     let isEven: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: AnalyticsColumn.spacing) {
             Text(stat.tool)
                 .font(.system(size: 12, design: .monospaced))
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Text("\(stat.count)").frame(width: 70, alignment: .trailing)
+                .frame(minWidth: AnalyticsColumn.toolMinWidth, maxWidth: .infinity, alignment: .leading)
+            Text("\(stat.count)").frame(width: AnalyticsColumn.calls, alignment: .trailing)
             Text("\(stat.errorCount)")
                 .foregroundStyle(stat.errorCount > 0 ? Color.red : Color.secondary)
-                .frame(width: 70, alignment: .trailing)
+                .frame(width: AnalyticsColumn.errors, alignment: .trailing)
             Text(String(format: "%.1f%%", stat.errorRate * 100))
                 .foregroundStyle(stat.errorRate > 0 ? Color.red : Color.secondary)
-                .frame(width: 90, alignment: .trailing)
-            Text(analyticsDuration(stat.p50DurationMS)).frame(width: 70, alignment: .trailing)
-            Text(analyticsDuration(stat.p95DurationMS)).frame(width: 70, alignment: .trailing)
-            Text(analyticsDuration(stat.p99DurationMS)).frame(width: 70, alignment: .trailing)
+                .frame(width: AnalyticsColumn.errorRate, alignment: .trailing)
+            Text("\(stat.insertions)")
+                .foregroundStyle(stat.insertions > 0 ? Color.green : Color.secondary)
+                .frame(width: AnalyticsColumn.insertions, alignment: .trailing)
+            Text("\(stat.deletions)")
+                .foregroundStyle(stat.deletions > 0 ? Color.orange : Color.secondary)
+                .frame(width: AnalyticsColumn.deletions, alignment: .trailing)
+            Text(analyticsDuration(stat.p50DurationMS)).frame(width: AnalyticsColumn.p50, alignment: .trailing)
+            Text(analyticsDuration(stat.p95DurationMS)).frame(width: AnalyticsColumn.p95, alignment: .trailing)
+            Text(analyticsDuration(stat.p99DurationMS)).frame(width: AnalyticsColumn.p99, alignment: .trailing)
         }
         .font(.system(size: 11.5).monospacedDigit())
-        .padding(.horizontal, 8)
+        .padding(.horizontal, AnalyticsColumn.horizontalPadding)
         .padding(.vertical, 5)
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)

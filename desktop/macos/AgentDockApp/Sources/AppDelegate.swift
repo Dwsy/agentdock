@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let launchedInBackground = CommandLine.arguments.contains("--background")
     private var statusItem: NSStatusItem?
     private var currentStatus = ServiceStatus.missing
+    /// currentAlerts 是最近一次拉到的活跃告警，用于菜单栏徽标与托盘面板。
+    private var currentAlerts: [RuntimeAlert] = []
     private var timer: Timer?
     private var updateActivity: DesktopUpdateActivity = .idle
     private var trayServiceActionInProgress = false
@@ -41,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         },
         onShowUpdateProgress: { [weak self] in
             self?.showUpdateProgress()
+        },
+        onOpenAlertDetail: { [weak self] target in
+            self?.showControlPanel(target: target)
         }
     )
 
@@ -554,8 +559,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatus(showWindow: Bool = false) {
         Task {
             let status = await service.status()
+            // 告警与状态一起拉：菜单栏徽标需要在面板没打开时也能更新。
+            // 告警请求依赖状态里的连接配置，所以串行发，不猜配置。
+            let alerts = await service.runtimeAlerts(configuration: status.configuration)
             await MainActor.run {
                 self.currentStatus = status
+                self.currentAlerts = (alerts?.alerts ?? []).filter(\.active)
                 self.refreshTrayPresentation()
                 if showWindow {
                     self.setupWindow.present(status: status)
@@ -579,8 +588,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trayPopover.update(
             status: currentStatus,
             isUpdating: updateActivity.locksApplication,
-            isCheckingForUpdate: updateActivity == .checking
+            isCheckingForUpdate: updateActivity == .checking,
+            alerts: currentAlerts
         )
+        refreshStatusItemBadge()
+    }
+
+    /// 菜单栏徽标：活跃告警数以文字形式挂在图标旁（macOS 邮件未读数的惯例）。
+    /// 图标保持模板图，徽标颜色跟随菜单栏前景色，避免深浅色外观失配。
+    private func refreshStatusItemBadge() {
+        guard let button = statusItem?.button else { return }
+        let count = currentAlerts.count
+        button.title = count > 0 ? "\(count)" : ""
+        button.toolTip = count > 0
+            ? L10n.format("%d active alerts", count)
+            : "AgentDock"
     }
 
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
@@ -649,6 +671,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showSetup() { setupWindow.present(status: currentStatus) }
+
+    /// showControlPanel(target:) 从托盘告警跳到控制面板的对应页面。
+    private func showControlPanel(target: ControlPanelTarget) {
+        trayPopover.close()
+        setupWindow.present(target: target, status: currentStatus)
+    }
 
     @objc private func showSettings() {
         setupWindow.presentSettings(status: currentStatus)

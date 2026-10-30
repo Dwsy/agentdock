@@ -67,6 +67,8 @@ struct ServiceConfiguration: Equatable {
         "AGENTDOCK_ACP_DEFAULT_PROFILE",
         "AGENTDOCK_TRACE_MODE",
         "AGENTDOCK_TRACE_RETENTION_DAYS",
+        "AGENTDOCK_NETWORK_CAPTURE_ENABLED",
+        "AGENTDOCK_NETWORK_CAPTURE_MAX",
     ]
     // 旧配置键只用于读取迁移或已停止使用；新版保存时统一清除，避免继续形成双写状态。
     static let removableLegacyKeys: Set<String> = [
@@ -78,6 +80,8 @@ struct ServiceConfiguration: Equatable {
         "AGENTDOCK_ACP_ENV_FROM_ENV_JSON",
         "AGENTDOCK_NEXUS_ENDPOINT",
         "AGENTDOCK_NEXUS_TOKEN",
+        "AGENTDOCK_HTTP_CAPTURE_ENABLED",
+        "AGENTDOCK_HTTP_CAPTURE_MAX",
     ]
 
     let host: String
@@ -95,6 +99,9 @@ struct ServiceConfiguration: Equatable {
     let acpDefaultProfile: String
     let traceMode: TraceMode
     let traceRetentionDays: Int
+    /// HTTP 抓包只存内存，开关与保留条数都写进 agentdock.env，下次 Core 启动生效。
+    let networkCaptureEnabled: Bool
+    let networkCaptureMax: Int
 
     var healthHost: String {
         switch host {
@@ -158,6 +165,9 @@ struct ServiceConfiguration: Equatable {
         // 未知 trace 值按 off 展示；Core 自己会在启动时严格校验，UI 不放大错误。
         let traceMode = TraceMode(rawValue: (values["AGENTDOCK_TRACE_MODE"] ?? "off").lowercased()) ?? .off
         let traceRetentionDays = Int(values["AGENTDOCK_TRACE_RETENTION_DAYS"] ?? "3") ?? 3
+        // 未知/越界的抓包配置回退到默认值；Core 启动时会严格校验，UI 不放大错误。
+        let networkCaptureEnabled = parseBool(values["AGENTDOCK_NETWORK_CAPTURE_ENABLED"])
+        let networkCaptureMax = Int(values["AGENTDOCK_NETWORK_CAPTURE_MAX"] ?? "200") ?? 200
         return ServiceConfiguration(
             host: host,
             port: port,
@@ -173,7 +183,9 @@ struct ServiceConfiguration: Equatable {
             acpProfiles: acpProfiles,
             acpDefaultProfile: acpDefaultProfile,
             traceMode: traceMode,
-            traceRetentionDays: traceRetentionDays
+            traceRetentionDays: traceRetentionDays,
+            networkCaptureEnabled: networkCaptureEnabled,
+            networkCaptureMax: (1...2000).contains(networkCaptureMax) ? networkCaptureMax : 200
         )
     }
 

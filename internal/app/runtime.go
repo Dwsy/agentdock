@@ -104,7 +104,7 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 	runtime := &Runtime{
 		cfg: cfg, ws: ws, skills: skills,
 		toolNames: toolNames, toolValidators: toolValidators,
-		observer:   observability.NewRecorder(observability.DefaultRecentCapacity),
+		observer:   observability.NewRecorder(observability.DefaultRecentCapacity, filepath.Join(cfg.AgentDockHome, "analytics-state.json")),
 		events:     observability.NewEventBus(),
 		commandCtx: commandCtx, commandCancel: commandCancel,
 	}
@@ -277,6 +277,10 @@ func (r *Runtime) Close() error {
 		}
 		if r.events != nil {
 			r.events.Close()
+		}
+		// 优雅退出前补齐节流窗口内未落盘的统计增量。
+		if r.observer != nil {
+			r.observer.Flush()
 		}
 		if r.traces != nil {
 			if err := r.traces.Close(); err != nil {

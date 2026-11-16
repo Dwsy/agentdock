@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -59,6 +60,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	if r != nil && r.observer != nil {
 		// 代码行数变动不依赖 trace 开关：分析页要在 trace 关闭时也能统计。
 		insertions, deletions := traceCodeChangeCounts(toolName, result, success)
+		inputTokens, outputTokens := toolTokenCounts(args, result)
 		recordID = r.observer.EndTool(observability.CallMeta{
 			Tool:          toolName,
 			Source:        source,
@@ -74,6 +76,8 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			Stages:        stages,
 			Insertions:    insertions,
 			Deletions:     deletions,
+			InputTokens:   inputTokens,
+			OutputTokens:  outputTokens,
 		})
 	}
 	// call 事件与 recorder 同源同步：发布非阻塞，事件里同样只有白名单元数据。
@@ -96,22 +100,25 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			resultMap = *result
 		}
 		command := observability.CommandTraceFrom(toolName, args, resultMap)
+		imagePreviewData, imagePreviewMimeType := traceImagePreviewPayload(result)
 		r.traces.Record(observability.TraceRecord{
-			Tool:          toolName,
-			Source:        string(source),
-			UserAgent:     userAgent,
-			TaskID:        taskID,
-			StartedAt:     startedAt.UTC(),
-			DurationMS:    float64(duration) / float64(time.Millisecond),
-			Success:       success,
-			ErrorCode:     errorCode,
-			ErrorCategory: errorCategory,
-			TraceID:       traceID,
-			Arguments:     tracePayload(args),
-			Result:        traceResultText(result, command),
-			Error:         traceErrorText(callErr),
-			Command:       command,
-			FileChanges:   traceFileChanges(toolName, args, result, success),
+			Tool:                 toolName,
+			Source:               string(source),
+			UserAgent:            userAgent,
+			TaskID:               taskID,
+			StartedAt:            startedAt.UTC(),
+			DurationMS:           float64(duration) / float64(time.Millisecond),
+			Success:              success,
+			ErrorCode:            errorCode,
+			ErrorCategory:        errorCategory,
+			TraceID:              traceID,
+			Arguments:            tracePayload(args),
+			Result:               traceResultText(result, command),
+			Error:                traceErrorText(callErr),
+			Command:              command,
+			FileChanges:          traceFileChanges(toolName, args, result, success),
+			ImagePreviewData:     imagePreviewData,
+			ImagePreviewMimeType: imagePreviewMimeType,
 		})
 	}
 
@@ -139,6 +146,20 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	if recovered != nil {
 		panic(recovered)
 	}
+}
+
+// toolTokenCounts 统计一次调用入参与结果的 token 数。结果为空（调用失败、
+// 工具未返回）时输出计 0；这里只累加计数，不保存任何正文。
+func toolTokenCounts(args map[string]any, result *Result) (int, int) {
+	input := 0
+	if args != nil {
+		input = observability.CountJSONTokens(args)
+	}
+	output := 0
+	if result != nil {
+		output = observability.CountJSONTokens(*result)
+	}
+	return input, output
 }
 
 // tracePayload 只负责把 Payload 变成文本；截断与脱敏由 TraceStore 统一完成，
@@ -175,6 +196,27 @@ func traceResultText(result *Result, command *observability.CommandTrace) string
 		}
 	}
 	return tracePayload(result)
+}
+
+// traceImagePreviewPayload 提取 view_image 的处理后字节，交给 TraceStore 私有 sidecar。
+// 图片不进入 JSON 文本预览，也不经过公开 Artifact URL。
+func traceImagePreviewPayload(result *Result) ([]byte, string) {
+	if result == nil {
+		return nil, ""
+	}
+	encoded, ok := (*result)["_mcp_image_base64"].(string)
+	if !ok || encoded == "" || len(encoded) > 3<<20 {
+		return nil, ""
+	}
+	mimeType, ok := (*result)["_mcp_image_mime_type"].(string)
+	if !ok || (mimeType != "image/jpeg" && mimeType != "image/png") {
+		return nil, ""
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) > 2<<20 {
+		return nil, ""
+	}
+	return data, mimeType
 }
 
 // traceImageResultText 剥离内联图像 base64，返回剩余元数据的 JSON。

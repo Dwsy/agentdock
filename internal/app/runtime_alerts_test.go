@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +78,7 @@ func requireSingleAlert(t *testing.T, alerts []alertEntry, id, kind, severity st
 
 func TestRuntimeAlertsErrorRateHitsWithWarningAndDanger(t *testing.T) {
 	// 20 次调用 3 次失败 = 15% > 10%，但未到 2 倍阈值 → warning。
-	warningRT := &Runtime{observer: observability.NewRecorder(100)}
+	warningRT := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(warningRT, 20, 3)
 	alerts, resolved, rules := mustAlerts(t, warningRT)
 	entry := requireSingleAlert(t, alerts, "error_rate:window", "error_rate", "warning")
@@ -92,7 +93,7 @@ func TestRuntimeAlertsErrorRateHitsWithWarningAndDanger(t *testing.T) {
 	}
 
 	// 20 次调用 5 次失败 = 25% > 2×10% → danger。
-	dangerRT := &Runtime{observer: observability.NewRecorder(100)}
+	dangerRT := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(dangerRT, 20, 5)
 	alerts, _, _ = mustAlerts(t, dangerRT)
 	requireSingleAlert(t, alerts, "error_rate:window", "error_rate", "danger")
@@ -100,7 +101,7 @@ func TestRuntimeAlertsErrorRateHitsWithWarningAndDanger(t *testing.T) {
 
 func TestRuntimeAlertsErrorRateSkipsSmallWindowAndLowRate(t *testing.T) {
 	// 窗口调用数 19 < 20：即使全失败也不评估。
-	small := &Runtime{observer: observability.NewRecorder(100)}
+	small := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(small, 19, 19)
 	alerts, _, _ := mustAlerts(t, small)
 	if len(alerts) != 0 {
@@ -108,7 +109,7 @@ func TestRuntimeAlertsErrorRateSkipsSmallWindowAndLowRate(t *testing.T) {
 	}
 
 	// 30 次调用 1 次失败 ≈ 3.3% ≤ 10%：不命中。
-	quiet := &Runtime{observer: observability.NewRecorder(100)}
+	quiet := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(quiet, 30, 1)
 	alerts, _, _ = mustAlerts(t, quiet)
 	if len(alerts) != 0 {
@@ -119,7 +120,7 @@ func TestRuntimeAlertsErrorRateSkipsSmallWindowAndLowRate(t *testing.T) {
 func TestRuntimeAlertsErrorRateThresholdEnvOverride(t *testing.T) {
 	t.Setenv("AGENTDOCK_ALERT_ERROR_RATE", "0.4")
 	// 25% 超过默认 10% 但不超过覆盖后的 40%。
-	rt := &Runtime{observer: observability.NewRecorder(100)}
+	rt := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(rt, 20, 5)
 	alerts, _, rules := mustAlerts(t, rt)
 	if len(alerts) != 0 {
@@ -129,13 +130,13 @@ func TestRuntimeAlertsErrorRateThresholdEnvOverride(t *testing.T) {
 		t.Fatalf("rule threshold = %#v, want 0.4", rules[0])
 	}
 
-	hot := &Runtime{observer: observability.NewRecorder(100)}
+	hot := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(hot, 20, 11) // 55% > 40%，未到 2 倍阈值 → warning。
 	alerts, _, _ = mustAlerts(t, hot)
 	requireSingleAlert(t, alerts, "error_rate:window", "error_rate", "warning")
 
 	// 20 次调用 19 次失败 = 95% > 2×40% → danger。
-	danger := &Runtime{observer: observability.NewRecorder(100)}
+	danger := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(danger, 20, 19)
 	alerts, _, _ = mustAlerts(t, danger)
 	requireSingleAlert(t, alerts, "error_rate:window", "error_rate", "danger")
@@ -282,7 +283,7 @@ func TestRuntimeAlertsTaskBlockedSkipsFreshBlocksAndHonorsEnv(t *testing.T) {
 }
 
 func TestRuntimeAlertsDedupKeepsFirstSeenStable(t *testing.T) {
-	rt := &Runtime{observer: observability.NewRecorder(100)}
+	rt := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(rt, 20, 5)
 
 	firstAlerts, _, _ := mustAlerts(t, rt)
@@ -302,13 +303,14 @@ func TestRuntimeAlertsDedupKeepsFirstSeenStable(t *testing.T) {
 }
 
 func TestRuntimeAlertsRecoveryRemovesAlertAndCountsResolved(t *testing.T) {
-	rt := &Runtime{observer: observability.NewRecorder(25)}
+	rt := &Runtime{observer: observability.NewRecorder(25, "")}
 	recordCalls(rt, 21, 21)
 	alerts, resolved, _ := mustAlerts(t, rt)
 	requireSingleAlert(t, alerts, "error_rate:window", "error_rate", "danger")
 
-	// 25 次成功调用把失败调用挤出窗口：告警恢复。
-	recordCalls(rt, 25, 0)
+	// 窗口是时间滚动的：失败调用要等出窗口才会消失，后续成功调用不会把它们
+	// 挤出去。换成空窗口的 recorder 等价于窗口过期。
+	rt.observer = observability.NewRecorder(25, "")
 	alerts, resolved, _ = mustAlerts(t, rt)
 	if len(alerts) != 0 {
 		t.Fatalf("alerts after recovery = %#v", alerts)
@@ -324,8 +326,21 @@ func TestRuntimeAlertsRecoveryRemovesAlertAndCountsResolved(t *testing.T) {
 	}
 }
 
+// 窗口内的失败还在时，后续成功调用不会让错误率告警消失。
+func TestRuntimeAlertsErrorRateSurvivesLaterSuccesses(t *testing.T) {
+	rt := &Runtime{observer: observability.NewRecorder(100, "")}
+	recordCalls(rt, 21, 21)
+	recordCalls(rt, 25, 0)
+
+	alerts, _, _ := mustAlerts(t, rt)
+	entry := requireSingleAlert(t, alerts, "error_rate:window", "error_rate", "danger")
+	if !strings.Contains(entry.Detail, "最近 5 分钟内 46 次工具调用中 21 次失败") {
+		t.Fatalf("detail = %q", entry.Detail)
+	}
+}
+
 func TestRuntimeAlertsEmptyArrayAndContractShape(t *testing.T) {
-	rt := &Runtime{observer: observability.NewRecorder(100)}
+	rt := &Runtime{observer: observability.NewRecorder(100, "")}
 	recordCalls(rt, 5, 0)
 	result, err := rt.RuntimeAlerts()
 	if err != nil {

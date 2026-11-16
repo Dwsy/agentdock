@@ -24,6 +24,8 @@ var traceExportCSVHeader = []string{
 	"duration_ms", "success", "error_code", "arguments", "result", "error",
 	// 命令证据追加在末尾：既有列位置不变，旧解析器可以忽略新增列。
 	"command", "stdout", "stderr", "exit_code",
+	// 图片字节不导出；只保留 sidecar 的类型与大小索引。
+	"image_preview_mime_type", "image_preview_size_bytes",
 }
 
 // RuntimeTracesExport 按与 RuntimeTraces 相同的过滤语义导出记录。
@@ -83,6 +85,11 @@ func traceCSVRow(record observability.TraceRecord) []string {
 			exitCode = strconv.Itoa(*record.Command.ExitCode)
 		}
 	}
+	imagePreviewMimeType, imagePreviewSize := "", ""
+	if record.ImagePreview != nil {
+		imagePreviewMimeType = record.ImagePreview.MimeType
+		imagePreviewSize = strconv.Itoa(record.ImagePreview.SizeBytes)
+	}
 	return []string{
 		strconv.FormatUint(record.ID, 10),
 		record.StartedAt.UTC().Format(time.RFC3339Nano),
@@ -96,7 +103,7 @@ func traceCSVRow(record observability.TraceRecord) []string {
 		traceCSVSingleLine(record.Arguments),
 		traceCSVSingleLine(record.Result),
 		record.Error,
-		command, stdout, stderr, exitCode,
+		command, stdout, stderr, exitCode, imagePreviewMimeType, imagePreviewSize,
 	}
 }
 

@@ -155,15 +155,11 @@ func (r *Runtime) RuntimeAlerts() (Result, error) {
 	current := make([]alertEntry, 0, 3)
 
 	// 规则一：analytics 窗口错误率。窗口调用数不足下限时不评估。
+	// 窗口口径与 analytics 页一致：最近 WindowMinutes 分钟内完成的调用。
 	var windowCalls, windowErrors int
 	var windowRate float64
 	if r != nil && r.observer != nil {
-		for _, record := range r.observer.RecentCalls() {
-			windowCalls++
-			if !record.Success {
-				windowErrors++
-			}
-		}
+		windowCalls, windowErrors = r.observer.WindowErrorStats()
 	}
 	if windowCalls >= alertErrorRateMinWindow {
 		windowRate = float64(windowErrors) / float64(windowCalls)
@@ -177,7 +173,7 @@ func (r *Runtime) RuntimeAlerts() (Result, error) {
 				Severity: severity,
 				Kind:     alertKindErrorRate,
 				Message:  fmt.Sprintf("错误率 %s 超过阈值 %s", formatAlertPercent(windowRate), formatAlertPercent(thresholds.errorRate)),
-				Detail:   fmt.Sprintf("最近 %d 次工具调用中 %d 次失败，窗口错误率 %s 超过阈值 %s", windowCalls, windowErrors, formatAlertPercent(windowRate), formatAlertPercent(thresholds.errorRate)),
+				Detail:   fmt.Sprintf("最近 %d 分钟内 %d 次工具调用中 %d 次失败，窗口错误率 %s 超过阈值 %s", observability.WindowMinutes, windowCalls, windowErrors, formatAlertPercent(windowRate), formatAlertPercent(thresholds.errorRate)),
 			})
 		}
 	}

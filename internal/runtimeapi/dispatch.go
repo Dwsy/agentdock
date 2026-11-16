@@ -39,6 +39,9 @@ func MethodAllowed(method, path string) bool {
 		}
 		return method == http.MethodDelete
 	}
+	if cleanPath == "/internal/runtime/traces/image" {
+		return method == http.MethodGet
+	}
 	if cleanPath == "/internal/runtime/traces" {
 		// 查询是 GET，清空是 DELETE；两条语义共用一条路由。
 		return method == http.MethodGet || method == http.MethodDelete
@@ -77,6 +80,9 @@ func AllowHeader(path string) string {
 			return "POST"
 		}
 		return "DELETE"
+	}
+	if cleanPath == "/internal/runtime/traces/image" {
+		return "GET"
 	}
 	if cleanPath == "/internal/runtime/traces" || cleanPath == "/internal/runtime/network" {
 		return "GET, DELETE"
@@ -258,6 +264,19 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			"ok": true, "source": app.RuntimeAPISource, "action": "export",
 			"format": format, "content_type": contentType, "filename": filename, "body": string(body),
 		}, nil
+	case path == "/internal/runtime/traces/image":
+		imageRuntime, ok := runtime.(TraceImageRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "TRACE_IMAGE_UNSUPPORTED", Message: "runtime does not support trace image previews", Category: "not_found",
+			}
+		}
+		id, parseErr := strconv.ParseUint(strings.TrimSpace(request.queryValue("id")), 10, 64)
+		if parseErr != nil || id == 0 {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace id must be a positive integer", Category: "validation"}
+		}
+		result, err := imageRuntime.RuntimeTraceImage(id)
+		return map[string]any(result), err
 	case path == "/internal/runtime/traces/detail":
 		detailRuntime, ok := runtime.(TraceDetailRuntime)
 		if !ok {

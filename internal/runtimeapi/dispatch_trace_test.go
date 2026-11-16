@@ -25,6 +25,59 @@ func (r *traceDetailRuntimeStub) RuntimeTraceDetail(id uint64, full bool) (app.R
 	return app.Result{"ok": true, "record": map[string]any{"id": id}}, nil
 }
 
+type traceImageRuntimeStub struct {
+	runtimeStub
+	imageID uint64
+}
+
+func (r *traceImageRuntimeStub) RuntimeTraceImage(id uint64) (app.Result, error) {
+	r.imageID = id
+	return app.Result{"ok": true, "mime_type": "image/png", "data": []byte("png")}, nil
+}
+
+func TestDispatchTraceImage(t *testing.T) {
+	stub := &traceImageRuntimeStub{}
+	result, err := Dispatch(context.Background(), stub, Request{
+		Method: http.MethodGet,
+		Path:   "/internal/runtime/traces/image",
+		Query:  url.Values{"id": {"42"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stub.imageID != 42 || result["mime_type"] != "image/png" {
+		t.Fatalf("image result = %#v, id = %d", result, stub.imageID)
+	}
+	if !MethodAllowed(http.MethodGet, "/internal/runtime/traces/image") || MethodAllowed(http.MethodPost, "/internal/runtime/traces/image") {
+		t.Fatal("trace image route must be GET-only")
+	}
+	if AllowHeader("/internal/runtime/traces/image") != "GET" {
+		t.Fatalf("AllowHeader = %q", AllowHeader("/internal/runtime/traces/image"))
+	}
+
+	for _, rawID := range []string{"", "0", "abc", "-1"} {
+		_, err := Dispatch(context.Background(), &traceImageRuntimeStub{}, Request{
+			Method: http.MethodGet,
+			Path:   "/internal/runtime/traces/image",
+			Query:  url.Values{"id": {rawID}},
+		})
+		var toolErr *app.ToolError
+		if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" {
+			t.Fatalf("id %q error = %#v", rawID, err)
+		}
+	}
+
+	_, err = Dispatch(context.Background(), &runtimeStub{}, Request{
+		Method: http.MethodGet,
+		Path:   "/internal/runtime/traces/image",
+		Query:  url.Values{"id": {"42"}},
+	})
+	var toolErr *app.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "TRACE_IMAGE_UNSUPPORTED" {
+		t.Fatalf("unsupported runtime error = %#v", err)
+	}
+}
+
 func TestDispatchTraceViewModes(t *testing.T) {
 	tests := []struct {
 		name    string

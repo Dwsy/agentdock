@@ -2,6 +2,7 @@ package observability
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -9,7 +10,7 @@ import (
 )
 
 func TestRecorderKeepsBoundedNewestFirstHistory(t *testing.T) {
-	recorder := NewRecorder(3)
+	recorder := NewRecorder(3, "")
 	for index := 1; index <= 5; index++ {
 		recorder.BeginTool()
 		recorder.EndTool(CallMeta{
@@ -22,8 +23,12 @@ func TestRecorderKeepsBoundedNewestFirstHistory(t *testing.T) {
 	}
 
 	snapshot := recorder.Snapshot()
-	if snapshot.RecentCapacity != 3 || snapshot.WindowCalls != 3 {
-		t.Fatalf("snapshot capacity/window = %d/%d, want 3/3", snapshot.RecentCapacity, snapshot.WindowCalls)
+	if snapshot.RecentCapacity != 3 || len(snapshot.RecentCalls) != 3 {
+		t.Fatalf("snapshot capacity/recent = %d/%d, want 3/3", snapshot.RecentCapacity, len(snapshot.RecentCalls))
+	}
+	// 窗口调用数按时间窗口统计，不受最近调用环的容量限制。
+	if snapshot.WindowCalls != 5 {
+		t.Fatalf("snapshot window = %d, want 5", snapshot.WindowCalls)
 	}
 	if snapshot.TotalCalls != 5 || snapshot.TotalErrors != 0 || snapshot.ActiveCalls != 0 {
 		t.Fatalf("snapshot totals = calls %d errors %d active %d", snapshot.TotalCalls, snapshot.TotalErrors, snapshot.ActiveCalls)
@@ -37,7 +42,7 @@ func TestRecorderKeepsBoundedNewestFirstHistory(t *testing.T) {
 }
 
 func TestRecorderAggregatesNearestRankPercentilesAndErrors(t *testing.T) {
-	recorder := NewRecorder(200)
+	recorder := NewRecorder(200, "")
 	for index := 1; index <= 100; index++ {
 		recorder.BeginTool()
 		success := index != 100
@@ -92,7 +97,7 @@ func TestRecorderZeroValueDoesNotPanicOrLeakActiveCount(t *testing.T) {
 }
 
 func TestRecorderConcurrentWritesStayConsistent(t *testing.T) {
-	recorder := NewRecorder(500)
+	recorder := NewRecorder(500, "")
 	const writers = 16
 	const callsPerWriter = 100
 
@@ -120,13 +125,69 @@ func TestRecorderConcurrentWritesStayConsistent(t *testing.T) {
 	if snapshot.TotalCalls != wantTotal {
 		t.Fatalf("total calls = %d, want %d", snapshot.TotalCalls, wantTotal)
 	}
-	if snapshot.WindowCalls != 500 || snapshot.ActiveCalls != 0 {
-		t.Fatalf("window/active = %d/%d, want 500/0", snapshot.WindowCalls, snapshot.ActiveCalls)
+	if snapshot.WindowCalls != int(wantTotal) || snapshot.ActiveCalls != 0 {
+		t.Fatalf("window/active = %d/%d, want %d/0", snapshot.WindowCalls, snapshot.ActiveCalls, wantTotal)
+	}
+}
+
+// 窗口统计不被最近调用环的容量截断：环只有 3 条时，窗口仍要看到全部调用。
+func TestRecorderWindowAggregatesBeyondRingCapacity(t *testing.T) {
+	recorder := NewRecorder(3, "")
+	for index := 0; index < 5; index++ {
+		recorder.BeginTool()
+		recorder.EndTool(CallMeta{
+			Tool:      "exec_command",
+			Source:    SourceMCP,
+			StartedAt: time.Now(),
+			Duration:  time.Duration(index+1) * time.Millisecond,
+			Success:   true,
+		})
+	}
+
+	snapshot := recorder.Snapshot()
+	if snapshot.WindowCalls != 5 {
+		t.Fatalf("window calls = %d, want 5", snapshot.WindowCalls)
+	}
+	if len(snapshot.ToolStats) != 1 || snapshot.ToolStats[0].Count != 5 {
+		t.Fatalf("tool stats = %#v, want exec_command count 5", snapshot.ToolStats)
+	}
+}
+
+// 窗口按时间淘汰：超过窗口长度的调用不再计入窗口调用数与工具聚合。
+func TestRecorderWindowDropsExpiredCalls(t *testing.T) {
+	recorder := NewRecorder(500, "")
+	for index := 0; index < 3; index++ {
+		recorder.BeginTool()
+		recorder.EndTool(CallMeta{
+			Tool:      "read_file",
+			Source:    SourceMCP,
+			StartedAt: time.Now(),
+			Duration:  time.Millisecond,
+			Success:   true,
+		})
+	}
+
+	// 把窗口里的条目推到窗口之外，再取一次快照。
+	recorder.mu.Lock()
+	for index := range recorder.window {
+		recorder.window[index].completedAt = time.Now().Add(-2 * windowDuration)
+	}
+	recorder.mu.Unlock()
+
+	snapshot := recorder.Snapshot()
+	if snapshot.WindowCalls != 0 {
+		t.Fatalf("window calls = %d, want 0", snapshot.WindowCalls)
+	}
+	if len(snapshot.ToolStats) != 0 {
+		t.Fatalf("tool stats = %#v, want empty", snapshot.ToolStats)
+	}
+	if snapshot.TotalCalls != 3 {
+		t.Fatalf("total calls = %d, want 3", snapshot.TotalCalls)
 	}
 }
 
 func TestSnapshotJSONIsZeroPayload(t *testing.T) {
-	recorder := NewRecorder(10)
+	recorder := NewRecorder(10, "")
 	recorder.BeginTool()
 	recorder.EndTool(CallMeta{
 		Tool:          "read_file",
@@ -163,7 +224,7 @@ func TestSourceContextUsesClosedSet(t *testing.T) {
 }
 
 func TestRecorderAggregatesCodeLineChanges(t *testing.T) {
-	recorder := NewRecorder(10)
+	recorder := NewRecorder(10, "")
 	for _, change := range []CallMeta{
 		{Tool: "file_edit", Source: SourceMCP, Insertions: 12, Deletions: 3},
 		{Tool: "file_edit", Source: SourceMCP, Insertions: 5, Deletions: 1},
@@ -191,5 +252,124 @@ func TestRecorderAggregatesCodeLineChanges(t *testing.T) {
 	read := snapshot.ToolStats[1]
 	if read.Tool != "read_file" || read.Insertions != 0 || read.Deletions != 0 {
 		t.Fatalf("read_file stats = %#v", read)
+	}
+}
+
+func TestRecorderAggregatesTokenUsage(t *testing.T) {
+	recorder := NewRecorder(10, "")
+	for _, call := range []CallMeta{
+		{Tool: "read_file", Source: SourceMCP, InputTokens: 120, OutputTokens: 340},
+		{Tool: "file_edit", Source: SourceMCP, InputTokens: 60, OutputTokens: 20},
+	} {
+		call.StartedAt = time.Now()
+		call.Duration = time.Millisecond
+		call.Success = true
+		recorder.BeginTool()
+		recorder.EndTool(call)
+	}
+
+	snapshot := recorder.Snapshot()
+	if snapshot.TotalInputTokens != 180 || snapshot.TotalOutputTokens != 360 {
+		t.Fatalf("token totals = in %d out %d, want 180/360", snapshot.TotalInputTokens, snapshot.TotalOutputTokens)
+	}
+	if snapshot.WindowInputTokens != 180 || snapshot.WindowOutputTokens != 360 {
+		t.Fatalf("token window = in %d out %d, want 180/360", snapshot.WindowInputTokens, snapshot.WindowOutputTokens)
+	}
+	if snapshot.TokenWindowSeconds != TokenSegmentMinutes*60 {
+		t.Fatalf("token window span = %ds, want %ds", snapshot.TokenWindowSeconds, TokenSegmentMinutes*60)
+	}
+	today := time.Now().Format("2006-01-02")
+	if len(snapshot.DailyTokens) != 1 || snapshot.DailyTokens[0].Date != today ||
+		snapshot.DailyTokens[0].InputTokens != 180 || snapshot.DailyTokens[0].OutputTokens != 360 {
+		t.Fatalf("daily tokens = %#v, want %s 180/360", snapshot.DailyTokens, today)
+	}
+	if len(snapshot.ToolStats) != 2 {
+		t.Fatalf("tool stats = %#v", snapshot.ToolStats)
+	}
+	// 按工具名查找：同调用次数时排序键是工具名，file_edit 在前。
+	for _, stat := range snapshot.ToolStats {
+		switch stat.Tool {
+		case "read_file":
+			if stat.InputTokens != 120 || stat.OutputTokens != 340 {
+				t.Fatalf("read_file stats = %#v", stat)
+			}
+		case "file_edit":
+			if stat.InputTokens != 60 || stat.OutputTokens != 20 {
+				t.Fatalf("file_edit stats = %#v", stat)
+			}
+		}
+	}
+}
+
+// 累计段按钟表半点对齐：段内持续累加，跨段清零重计，进程总量不丢。
+func TestRecorderTokenSegmentResetsAcrossSegments(t *testing.T) {
+	recorder := NewRecorder(10, "")
+	recorder.BeginTool()
+	recorder.EndTool(CallMeta{
+		Tool: "read_file", Source: SourceMCP, StartedAt: time.Now(),
+		Duration: time.Millisecond, Success: true, InputTokens: 10, OutputTokens: 20,
+	})
+
+	// 把当前段搬到上一段，模拟跨过半点边界。
+	recorder.mu.Lock()
+	recorder.segmentIndex--
+	recorder.mu.Unlock()
+
+	snapshot := recorder.Snapshot()
+	if snapshot.TotalInputTokens != 10 || snapshot.TotalOutputTokens != 20 {
+		t.Fatalf("token totals = in %d out %d, want 10/20", snapshot.TotalInputTokens, snapshot.TotalOutputTokens)
+	}
+	if snapshot.WindowInputTokens != 0 || snapshot.WindowOutputTokens != 0 {
+		t.Fatalf("token window = in %d out %d, want 0/0", snapshot.WindowInputTokens, snapshot.WindowOutputTokens)
+	}
+
+	// 新段的写入只累计新值，旧段的量留在进程总量与当日桶里。
+	recorder.BeginTool()
+	recorder.EndTool(CallMeta{
+		Tool: "read_file", Source: SourceMCP, StartedAt: time.Now(),
+		Duration: time.Millisecond, Success: true, InputTokens: 1, OutputTokens: 2,
+	})
+	snapshot = recorder.Snapshot()
+	if snapshot.WindowInputTokens != 1 || snapshot.WindowOutputTokens != 2 {
+		t.Fatalf("token window = in %d out %d, want 1/2", snapshot.WindowInputTokens, snapshot.WindowOutputTokens)
+	}
+	if snapshot.TotalInputTokens != 11 || snapshot.TotalOutputTokens != 22 {
+		t.Fatalf("token totals = in %d out %d, want 11/22", snapshot.TotalInputTokens, snapshot.TotalOutputTokens)
+	}
+}
+
+// 落盘状态在重启后恢复：总量、当日桶保留；未跨段的当前段也恢复。
+func TestRecorderPersistsAndRestoresAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "analytics-state.json")
+	recorder := NewRecorder(10, path)
+	recorder.BeginTool()
+	recorder.EndTool(CallMeta{
+		Tool: "file_edit", Source: SourceMCP, StartedAt: time.Now(),
+		Duration: time.Millisecond, Success: false, ErrorCode: "DENIED", ErrorCategory: "permission",
+		Insertions: 4, Deletions: 2, InputTokens: 10, OutputTokens: 20,
+	})
+
+	restored := NewRecorder(10, path)
+	snapshot := restored.Snapshot()
+	if snapshot.TotalCalls != 1 || snapshot.TotalErrors != 1 {
+		t.Fatalf("restored totals = calls %d errors %d, want 1/1", snapshot.TotalCalls, snapshot.TotalErrors)
+	}
+	if snapshot.TotalInsertions != 4 || snapshot.TotalDeletions != 2 {
+		t.Fatalf("restored line changes = +%d -%d, want +4 -2", snapshot.TotalInsertions, snapshot.TotalDeletions)
+	}
+	if snapshot.TotalInputTokens != 10 || snapshot.TotalOutputTokens != 20 {
+		t.Fatalf("restored token totals = in %d out %d, want 10/20", snapshot.TotalInputTokens, snapshot.TotalOutputTokens)
+	}
+	if snapshot.WindowInputTokens != 10 || snapshot.WindowOutputTokens != 20 {
+		t.Fatalf("restored token window = in %d out %d, want 10/20", snapshot.WindowInputTokens, snapshot.WindowOutputTokens)
+	}
+	today := time.Now().Format("2006-01-02")
+	if len(snapshot.DailyTokens) != 1 || snapshot.DailyTokens[0].Date != today ||
+		snapshot.DailyTokens[0].InputTokens != 10 {
+		t.Fatalf("restored daily tokens = %#v", snapshot.DailyTokens)
+	}
+	// 最近调用环是窗口视图，不跨重启恢复。
+	if snapshot.TotalCalls != 1 || len(snapshot.RecentCalls) != 0 {
+		t.Fatalf("restored recent calls = %#v, want empty", snapshot.RecentCalls)
 	}
 }

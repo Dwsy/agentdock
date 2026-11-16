@@ -61,6 +61,22 @@ func (r *Runtime) RuntimeTraceDetail(id uint64, full bool) (Result, error) {
 	return result, nil
 }
 
+// RuntimeTraceImage 按 trace ID 读取私有图片 sidecar。图片只在用户打开详情时
+// 通过受保护的本机 Runtime API 传输，不进入 trace JSON 预览或公开 Artifact。
+func (r *Runtime) RuntimeTraceImage(id uint64) (Result, error) {
+	if id == 0 {
+		return nil, toolErrorDetails("INVALID_ARGUMENT", "trace id must be a positive integer", "validation", map[string]any{"id": id})
+	}
+	if r.traces == nil {
+		return nil, toolErrorDetails("TRACE_IMAGE_NOT_FOUND", "trace capture is disabled", "not_found", map[string]any{"id": id})
+	}
+	data, mimeType, ok := r.traces.ImagePreview(id)
+	if !ok {
+		return nil, toolErrorDetails("TRACE_IMAGE_NOT_FOUND", "trace image preview is unavailable", "not_found", map[string]any{"id": id})
+	}
+	return Result{"ok": true, "mime_type": mimeType, "data": data}, nil
+}
+
 // RuntimeFileChanges 返回 trace 窗口内的文件创建/编辑历史。
 // trace 关闭时返回空集合并标记 mode=off，让 UI 区分“没开历史”和“没有变更”。
 func (r *Runtime) RuntimeFileChanges(query string, limit int) (Result, error) {

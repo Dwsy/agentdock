@@ -60,6 +60,11 @@ type TraceDetailRuntime interface {
 	RuntimeTraceDetail(id uint64, full bool) (app.Result, error)
 }
 
+// TraceImageRuntime 是按需读取 trace 图片 sidecar 的只读能力，独立于文本详情接口。
+type TraceImageRuntime interface {
+	RuntimeTraceImage(id uint64) (app.Result, error)
+}
+
 // FileChangeRuntime 是 trace 之上的文件历史投影，供控制面板构建目录树。
 type FileChangeRuntime interface {
 	RuntimeFileChanges(query string, limit int) (app.Result, error)

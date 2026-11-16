@@ -208,7 +208,7 @@ func TestRuntimeAnalyticsCountsCodeLineChanges(t *testing.T) {
 func TestTraceResultTextStripsInlineImageBase64(t *testing.T) {
 	encoded := strings.Repeat("/9j/4AAQ", 100000)
 	result := Result{
-		"source":               "/tmp/payment-state-desktop.png",
+		"source":               map[string]any{"type": "path", "path": "/tmp/payment-state-desktop.png", "size_bytes": 900000},
 		"image":                map[string]any{"filename": "payment-state-desktop.png", "mime_type": "image/jpeg", "size_bytes": 750000, "width": 1280, "height": 720},
 		"original":             map[string]any{"size_bytes": 900000, "width": 1600, "height": 900, "mime_type": "image/png"},
 		"resized":              true,
@@ -229,7 +229,8 @@ func TestTraceResultTextStripsInlineImageBase64(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
 		t.Fatalf("trace result is not valid JSON: %v\n%s", err, text)
 	}
-	if decoded["source"] != "/tmp/payment-state-desktop.png" {
+	source, ok := decoded["source"].(map[string]any)
+	if !ok || source["path"] != "/tmp/payment-state-desktop.png" {
 		t.Fatalf("trace result lost source: %#v", decoded["source"])
 	}
 	if _, ok := decoded["image"]; !ok {
@@ -243,4 +244,51 @@ func TestTraceResultTextStripsInlineImageBase64(t *testing.T) {
 	if result["_mcp_image_base64"] != encoded {
 		t.Fatal("trace result mutated the original Result")
 	}
+
+	preview, mimeType := traceImagePreviewPayload(&result)
+	if mimeType != "image/jpeg" || len(preview) == 0 {
+		t.Fatalf("image preview payload = %d bytes, %q", len(preview), mimeType)
+	}
+}
+
+// 调用分析要统计 token：入参与结果分开计数，进程总量与半小时区间同时累加，
+// 且不依赖 trace 开关（这里用 trace 关闭的运行时验证）。
+func TestRuntimeAnalyticsCountsTokens(t *testing.T) {
+	runtime := newRuntimeValidationTestRuntime(t)
+	target := filepath.Join(t.TempDir(), "note.txt")
+	if err := os.WriteFile(target, []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Call(context.Background(), "file_edit", map[string]any{
+		"action": "replace", "path": target, "old": "two", "new": "three\nfour",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result := runtime.RuntimeAnalytics()
+	for _, key := range []string{"total_input_tokens", "total_output_tokens", "window_input_tokens", "window_output_tokens"} {
+		if value, _ := result[key].(uint64); value == 0 {
+			t.Fatalf("analytics %s = %#v, want > 0", key, result[key])
+		}
+	}
+	if result["token_window_seconds"] != int64(observability.TokenSegmentMinutes*60) {
+		t.Fatalf("token window = %#v, want %ds", result["token_window_seconds"], observability.TokenSegmentMinutes*60)
+	}
+	if daily, ok := result["daily_tokens"].([]observability.DailyTokens); !ok || len(daily) == 0 {
+		t.Fatalf("daily tokens = %#v, want non-empty", result["daily_tokens"])
+	}
+	stats, ok := result["tool_stats"].([]observability.ToolStats)
+	if !ok || len(stats) == 0 {
+		t.Fatalf("tool stats = %#v", result["tool_stats"])
+	}
+	for _, stat := range stats {
+		if stat.Tool != "file_edit" {
+			continue
+		}
+		if stat.InputTokens <= 0 || stat.OutputTokens <= 0 {
+			t.Fatalf("file_edit token stats = %#v", stat)
+		}
+		return
+	}
+	t.Fatalf("file_edit missing from tool stats: %#v", stats)
 }

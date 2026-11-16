@@ -8,7 +8,7 @@ import (
 )
 
 func TestRecentCallsAndDiagnosticsProjectionStayZeroPayload(t *testing.T) {
-	recorder := NewRecorder(4)
+	recorder := NewRecorder(4, "")
 	recorder.BeginTool()
 	recorder.EndTool(CallMeta{
 		Tool:          "exec_command",
@@ -48,7 +48,7 @@ func TestRecentCallsAndDiagnosticsProjectionStayZeroPayload(t *testing.T) {
 }
 
 func TestRecentCallsReturnsIndependentStageCopy(t *testing.T) {
-	recorder := NewRecorder(2)
+	recorder := NewRecorder(2, "")
 	recorder.BeginTool()
 	recorder.EndTool(CallMeta{
 		Tool:      "tool",

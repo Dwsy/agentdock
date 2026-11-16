@@ -37,14 +37,18 @@ type TraceStore struct {
 	// 带正文会把常驻内存从 MB 级拉到 GB 级。
 	pendingFull      []TraceFullRecord
 	pendingFullBytes int
-	fullFile         *os.File
-	fullWriter       *bufio.Writer
-	fullDay          string
-	closed           bool
-	stop             chan struct{}
-	done             chan struct{}
-	closeOne         sync.Once
-	closeErr         error
+	// 图片预览与 JSON trace 分离保存：disk 模式写入私有 images/ sidecar，
+	// memory 模式只保留有总量上限的最近图片，避免大块二进制进入记录环。
+	imagePreviews     map[uint64]traceImagePreviewData
+	imagePreviewBytes int
+	fullFile          *os.File
+	fullWriter        *bufio.Writer
+	fullDay           string
+	closed            bool
+	stop              chan struct{}
+	done              chan struct{}
+	closeOne          sync.Once
+	closeErr          error
 
 	flushEvery time.Duration
 	bufferSize int
@@ -147,6 +151,11 @@ type TraceRecord struct {
 	Command *CommandTrace `json:"command,omitempty"`
 	// FileChanges 只在 file_edit 成功时非空；关闭 trace 时不产生。
 	FileChanges []FileChange `json:"file_changes,omitempty"`
+	// ImagePreview 是图片预览 sidecar 的轻量元数据；图片字节不进入 JSONL。
+	ImagePreview *TraceImagePreview `json:"image_preview,omitempty"`
+	// ImagePreviewData 与 ImagePreviewMimeType 仅供 Record 写入 sidecar，禁止序列化。
+	ImagePreviewData     []byte `json:"-"`
+	ImagePreviewMimeType string `json:"-"`
 }
 
 type TraceQuery struct {
@@ -184,10 +193,11 @@ func NewTraceStore(options TraceOptions) (*TraceStore, error) {
 		options.FlushInterval = time.Second
 	}
 	store := &TraceStore{
-		mode:       options.Mode,
-		max:        options.MaxRecords,
-		bufferSize: options.BufferSize,
-		flushEvery: options.FlushInterval,
+		mode:          options.Mode,
+		max:           options.MaxRecords,
+		bufferSize:    options.BufferSize,
+		flushEvery:    options.FlushInterval,
+		imagePreviews: make(map[uint64]traceImagePreviewData),
 	}
 	if options.Mode == TraceModeMemory {
 		return store, nil
@@ -277,9 +287,9 @@ func (s *TraceStore) Status() TraceStatus {
 
 // Record 只保存预览：两侧各最多 TracePreviewBytes，超限立即截断并标记。
 // 任何序列化/脱敏失败都不影响真实工具调用结果。
-func (s *TraceStore) Record(record TraceRecord) {
+func (s *TraceStore) Record(record TraceRecord) uint64 {
 	if s == nil {
-		return
+		return 0
 	}
 	// 全文副本必须在预览截断之前捕获；只给会被截断的记录写旁路，
 	// 小 payload 的预览本身就是全文。
@@ -300,18 +310,30 @@ func (s *TraceStore) Record(record TraceRecord) {
 	record.Error = toolcore.RedactSecrets(record.Error, nil)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
-		return
+		s.mu.Unlock()
+		return 0
 	}
 	s.nextID++
 	record.ID = s.nextID
+	if len(record.ImagePreviewData) > 0 && record.StartedAt.IsZero() {
+		record.StartedAt = time.Now().UTC()
+	}
+	record.ImagePreview = s.storeImagePreviewLocked(record.ID, record.StartedAt, record.ImagePreviewData, record.ImagePreviewMimeType)
+	record.ImagePreviewData = nil
+	record.ImagePreviewMimeType = ""
 	s.records = append(s.records, record)
 	if len(s.records) > s.max {
+		evicted := s.records[:len(s.records)-s.max]
+		for _, old := range evicted {
+			s.removeImagePreviewLocked(old)
+		}
 		s.records = append([]TraceRecord(nil), s.records[len(s.records)-s.max:]...)
 	}
 	if s.mode != TraceModeDisk {
-		return
+		id := record.ID
+		s.mu.Unlock()
+		return id
 	}
 	s.pending = append(s.pending, record)
 	if full != nil && s.pendingFullBytes < traceFullPendingBytes {
@@ -323,6 +345,9 @@ func (s *TraceStore) Record(record TraceRecord) {
 	if len(s.pending) >= s.bufferSize || s.pendingFullBytes >= traceFullPendingBytes {
 		s.flushLocked()
 	}
+	id := record.ID
+	s.mu.Unlock()
+	return id
 }
 
 // tracePreview 先裁扫描窗口再脱敏，最后裁到预览上限。顺序不能反：
@@ -506,6 +531,8 @@ func (s *TraceStore) Clear() (int, error) {
 	s.pending = nil
 	s.pendingFull = nil
 	s.pendingFullBytes = 0
+	s.imagePreviews = make(map[uint64]traceImagePreviewData)
+	s.imagePreviewBytes = 0
 	if s.mode != TraceModeDisk {
 		return cleared, nil
 	}
@@ -529,6 +556,9 @@ func (s *TraceStore) Clear() (int, error) {
 	s.fullDay = ""
 	// 全文旁路与预览同生命周期：清空保留窗口时不能留下可按 ID 回读的正文。
 	s.cleanFullFiles("")
+	if err := s.clearImagePreviewsLocked(); err != nil {
+		return cleared, err
+	}
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -887,6 +917,7 @@ func (s *TraceStore) loadRecent() error {
 		loaded = loaded[len(loaded)-s.max:]
 	}
 	s.records = loaded
+	s.cleanImagePreviewsForRecords()
 	for _, record := range loaded {
 		if record.ID > s.nextID {
 			s.nextID = record.ID
@@ -913,6 +944,7 @@ func (s *TraceStore) cleanupExpired() {
 		}
 	}
 	s.cleanFullFiles(cutoff)
+	s.cleanImagePreviews(cutoff)
 }
 
 func traceDay(t time.Time) string { return t.Format("2006-01-02") }

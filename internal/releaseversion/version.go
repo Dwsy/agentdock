@@ -40,6 +40,17 @@ func Normalize(value string) (string, bool) {
 	return value, true
 }
 
+// DevVersion 是未注入正式版本身份时的开发标识。它不是发布版本，也不属于灰度通道。
+const DevVersion = "0.0.0-dev"
+
+// IsDevelopment 报告版本是否为普通源码构建的开发身份。
+// 开发构建没有真实产品版本，任何依赖版本区间的判断都必须显式处理它，
+// 否则 0.0.0-dev 会被当成「比所有正式版本都旧」而挡掉全部候选。
+func IsDevelopment(value string) bool {
+	normalized, ok := Normalize(value)
+	return ok && normalized == "v"+DevVersion
+}
+
 // Compare 按 SemVer 2.0.0 比较版本，包括 prerelease 优先级。
 // 只有两侧都合法时 comparable 才为 true。
 func Compare(left, right string) (comparison int, comparable bool) {

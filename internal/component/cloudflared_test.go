@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/uvwt/agentdock/internal/releaseversion"
 )
 
 func TestDefaultCatalogUsesNexusDockDistribution(t *testing.T) {
@@ -25,6 +27,39 @@ func TestDefaultCatalogUsesNexusDockDistribution(t *testing.T) {
 	const prerelease = "https://download.nexusdock.co/releases/v1.0.0-rc.1/agentdock-component-catalog.json"
 	if got := defaultCatalogURLForVersion("1.0.0-rc.1"); got != prerelease {
 		t.Fatalf("prerelease catalog URL = %q, want %q", got, prerelease)
+	}
+	if got := defaultCatalogURLForVersion(releaseversion.DevVersion); got != stable {
+		t.Fatalf("development catalog URL = %q, want %q", got, stable)
+	}
+}
+
+func TestCloudflaredCompatibleSkipsVersionGateForDevelopmentBuild(t *testing.T) {
+	cases := []struct {
+		name string
+		min  string
+		max  string
+	}{
+		{name: "current compatibility window", min: "0.9.1", max: "2.0.0"},
+		{name: "window above published versions", min: "2.0.0", max: "3.0.0"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			entry := CatalogComponent{AgentDock: CatalogCompatibility{
+				MinVersion:          testCase.min,
+				MaxVersionExclusive: testCase.max,
+			}}
+			if !cloudflaredCompatible(entry, releaseversion.DevVersion) {
+				t.Fatal("development build must not be blocked by the version window")
+			}
+		})
+	}
+	invalid := CatalogComponent{AgentDock: CatalogCompatibility{MinVersion: "", MaxVersionExclusive: "2.0.0"}}
+	if cloudflaredCompatible(invalid, releaseversion.DevVersion) {
+		t.Fatal("development build accepted an invalid compatibility window")
+	}
+	compatible := CatalogComponent{AgentDock: CatalogCompatibility{MinVersion: "1.0.0", MaxVersionExclusive: "2.0.0"}}
+	if cloudflaredCompatible(compatible, "0.9.1") {
+		t.Fatal("published build below min_version must stay rejected")
 	}
 }
 

@@ -820,6 +820,12 @@ func readCloudflaredVersion(ctx context.Context, path string) (string, error) {
 }
 
 func defaultCatalogURLForVersion(agentdockVersion string) string {
+	if releaseversion.IsDevelopment(agentdockVersion) {
+		// 开发版本没有自己的不可变 Release，不能去 /releases/v0.0.0-dev/ 拄 URL：
+		// 那里必然 404，catalog 会退化到嵌入的 baseline。开发构建本来就是在验证
+		// 当前仓库的兼容性契约，直接读长期 component 仓库。
+		return componentRepositoryCatalogURL
+	}
 	if normalized, ok := releaseversion.Normalize(agentdockVersion); ok && releaseversion.IsPrerelease(normalized) {
 		// RC/Beta 读取自己不可变 Release 中的 catalog，验证通过后正式版再把同一份
 		// metadata 提升到长期 components/v1 仓库；这样预发布验证不会提前改变稳定用户契约。
@@ -964,8 +970,18 @@ func validateCloudflaredCatalogEntry(entry CatalogComponent) error {
 }
 
 func cloudflaredCompatible(entry CatalogComponent, currentAgentDockVersion string) bool {
-	minVersion, _ := releaseversion.Normalize(entry.AgentDock.MinVersion)
-	maxVersion, _ := releaseversion.Normalize(entry.AgentDock.MaxVersionExclusive)
+	minVersion, minOK := releaseversion.Normalize(entry.AgentDock.MinVersion)
+	maxVersion, maxOK := releaseversion.Normalize(entry.AgentDock.MaxVersionExclusive)
+	if !minOK || !maxOK {
+		return false
+	}
+	if releaseversion.IsDevelopment(currentAgentDockVersion) {
+		// 开发身份不携带版本信息，兼容区间无从判断。按 SemVer 硬套会把 0.0.0-dev
+		// 判成「比所有发布版本都旧」，结果全部候选被挡，本地构建永远无法安装可选组件。
+		// 这里只要求区间本身合法：revoked 过滤和 supported 优先级仍照常生效，
+		// 读到 min_version 高于当前源码能力的条目属于开发者自己的契约责任。
+		return true
+	}
 	lower, _ := releaseversion.Compare(currentAgentDockVersion, minVersion)
 	upper, _ := releaseversion.Compare(currentAgentDockVersion, maxVersion)
 	return lower >= 0 && upper < 0

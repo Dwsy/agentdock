@@ -93,14 +93,15 @@ func (a *App) fileDetail(c *ui.Context, rows []runtimeapi.FileChangeEntry) {
 	kit.DiffText(c, ch.Diff)
 }
 
-// actionTone 把变更动作映射为 kit 色调。
+// actionTone 把变更动作映射为 kit 色调。Go 侧已归一到 create/edit/delete/move，
+// 旧词保留兕底以兼容旧 Core 回传的原始动词。
 func actionTone(action string) kit.Tone {
 	switch action {
-	case "created", "create", "write":
+	case "created", "create", "add", "write":
 		return kit.ToneSuccess
-	case "deleted", "delete":
+	case "deleted", "delete", "remove":
 		return kit.ToneDanger
-	case "renamed", "rename":
+	case "renamed", "rename", "move", "moved":
 		return kit.ToneAccent
 	}
 	return kit.ToneNeutral

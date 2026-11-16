@@ -50,6 +50,10 @@ type App struct {
 	mu   sync.Mutex // 保护后台拉取写入的缓存字段
 	page string     // 导航选择："overview"/"catalog"/"tasks"/"files"/"published"/"traces"/"analytics"
 
+	// 外观模式（仅 UI 线程读写，见 theme.go）；themePersist 是持久化回调。
+	themeMode    ThemeMode
+	themePersist func(ThemeMode)
+
 	// 侧边栏分组展开状态。
 	secObs, secAssets, secWork bool
 
@@ -170,6 +174,7 @@ func New(backend runtimeapi.Backend) *App {
 		rtCtx:         rtCtx,
 		rtCancel:      rtCancel,
 		page:          pageOverview,
+		themeMode:     ThemeModeLight, // 默认浅色（用户偏好）；切换入口在工具条
 		secObs:        true,
 		secAssets:     true,
 		secWork:       true,
@@ -248,6 +253,7 @@ func (a *App) notify() {
 // 不足全高的子元素悬浮在窗口垂直中部），子元素再各 FillHeight 兜底，保证
 // 侧栏与内容列都是窗口全高、贴顶贴底。
 func (a *App) View(c *ui.Context) {
+	a.themeMode.apply(c) // 帧首应用外观；跟随系统模式不覆盖框架默认
 	c.OnShortcut(ui.Cmd, ui.KeyK, func() {
 		a.searchOpen = true
 		a.searchSel = 0
@@ -281,7 +287,8 @@ func (a *App) sidebar(c *ui.Context) {
 	}).Width(216).FillHeight().Shrink(0).Label("侧栏")
 }
 
-// toolbar 是页面顶部工具条：页面标题 + 实时连接指示灯 + 手动刷新按钮；
+// toolbar 是页面顶部工具条：页面标题 + 实时连接指示灯 + 外观切换按钮（循环
+// 浅色/深色/跟随系统）+ 手动刷新按钮；
 // 追踪页另有 "自动刷新"开关与上次刷新时间（该页 5s 自动轮询）。
 //
 // 行宽铺满、行高随内容：用 FillWidth 而不是 Fill——Fill 的 height:100% 会把
@@ -293,6 +300,22 @@ func (a *App) toolbar(c *ui.Context) {
 		kit.StatusChip(c, label, tone)
 		if a.page == pageTraces {
 			a.traceAutoControls(c)
+		}
+		var themeIcon *ui.SVG
+		switch a.themeMode {
+		case ThemeModeDark:
+			themeIcon = kit.IconMoon()
+		case ThemeModeSystem:
+			themeIcon = kit.IconMonitor()
+		default:
+			themeIcon = kit.IconSun()
+		}
+		themeBtn := ui.Button(c, "").Children(func() {
+			ui.Icon(c, themeIcon)
+			ui.Text(c, a.themeMode.label())
+		})
+		if themeBtn.Clicked() {
+			a.cycleThemeMode()
 		}
 		btn := ui.Button(c, "").Children(func() {
 			ui.Icon(c, kit.IconRefresh())

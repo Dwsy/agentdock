@@ -145,9 +145,12 @@ func TestIconsParseAndCache(t *testing.T) {
 		"IconCopy":         IconCopy,
 		"IconExternalLink": IconExternalLink,
 		"IconCheck":        IconCheck,
+		"IconSun":          IconSun,
+		"IconMoon":         IconMoon,
+		"IconMonitor":      IconMonitor,
 	}
-	if len(icons) != 12 {
-		t.Fatalf("应有 12 个图标，实际 %d", len(icons))
+	if len(icons) != 15 {
+		t.Fatalf("应有 15 个图标，实际 %d", len(icons))
 	}
 	for name, get := range icons {
 		a := get()

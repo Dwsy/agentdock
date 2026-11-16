@@ -26,6 +26,9 @@ func main() {
 	client := runtimeapi.NewClient(baseURL, token)
 
 	app := console.New(client)
+	// 外观模式：默认浅色，工具条按钮循环切换，选择持久化到 PathUserData。
+	app.SetThemeMode(loadThemeMode())
+	app.SetThemePersist(saveThemeMode)
 	mygo.App.WhenReady(func() {
 		win := mygo.NewWindow(mygo.WindowOptions{
 			Title:     "AgentDock Console",

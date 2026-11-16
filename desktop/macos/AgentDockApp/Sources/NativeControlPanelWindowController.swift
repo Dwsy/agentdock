@@ -357,6 +357,10 @@ private final class ControlPanelModel: ObservableObject {
         await service.runtimeTraceDetail(id: id, full: full, configuration: status.configuration)
     }
 
+    func loadTraceImagePreview(id: UInt64) async -> RuntimeTraceImagePayload? {
+        await service.runtimeTraceImage(id: id, configuration: status.configuration)
+    }
+
     /// 抓包列表同样只拉摘要：每条记录单侧正文可达 32 KiB，完整记录由详情接口按需取。
     /// 方法不单独传：搜索框已经按方法/路径/地址匹配。
     func loadNetwork(query: String, channel: String, status filter: String) async -> RuntimeNetworkPayload? {
@@ -3684,7 +3688,8 @@ private struct TracesView: View {
                 full: fullRecord,
                 fullUnavailable: fullUnavailable,
                 fullLoading: fullLoading,
-                onLoadFull: { Task { await loadFull() } }
+                onLoadFull: { Task { await loadFull() } },
+                onLoadImagePreview: { id in await model.loadTraceImagePreview(id: id) }
             )
         } else {
             Text(L10n.text("Select a trace"))
@@ -3793,14 +3798,7 @@ private struct TraceRowView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                        ForEach(changes.indices, id: \.self) { index in
-                            if let insertions = changes[index].insertions, insertions > 0 {
-                                Text("+\(insertions)").foregroundStyle(.green)
-                            }
-                            if let deletions = changes[index].deletions, deletions > 0 {
-                                Text("−\(deletions)").foregroundStyle(.red)
-                            }
-                        }
+                        TraceFileChangeDeltaLabel(changes: changes)
                     }
                     .font(.system(size: 10.5, weight: .medium, design: .monospaced))
                 }
@@ -4337,6 +4335,7 @@ private struct AnalyticsView: View {
                 if let analytics {
                     metrics(analytics)
                     chart
+                    dailyTokens
                     table
                 } else {
                     CatalogUnavailable(
@@ -4415,6 +4414,19 @@ private struct AnalyticsView: View {
                 icon: "minus",
                 tint: payload.totalDeletions > 0 ? .orange : .secondary
             )
+            // token 指标展示当前累计段：段按钟表半点对齐，段内持续累加。
+            AnalyticsMetric(
+                title: L10n.text("Input tokens"),
+                value: analyticsTokenCount(payload.windowInputTokens),
+                icon: "arrow.down.circle",
+                caption: tokenSegmentCaption(payload.tokenSegmentStartedAt)
+            )
+            AnalyticsMetric(
+                title: L10n.text("Output tokens"),
+                value: analyticsTokenCount(payload.windowOutputTokens),
+                icon: "arrow.up.circle",
+                caption: tokenSegmentCaption(payload.tokenSegmentStartedAt)
+            )
         }
     }
 
@@ -4457,7 +4469,7 @@ private struct AnalyticsView: View {
         }
     }
 
-    /// 8 个固定列在窄窗口必然超宽；行内用 ScrollView(.horizontal) 兜底，
+    /// 10 个固定列在窄窗口必然超宽；行内用 ScrollView(.horizontal) 兜底，
     /// 表头与数据行共享同一份列宽定义，避免两处漂移。
     private var table: some View {
         CatalogCard(title: L10n.text("Details")) {
@@ -4468,6 +4480,35 @@ private struct AnalyticsView: View {
                     ForEach(Array(stats.enumerated()), id: \.element.id) { index, item in
                         AnalyticsTableRow(stat: item, isEven: index.isMultiple(of: 2))
                     }
+                }
+            }
+        }
+    }
+
+    /// 按日 token 累计，跨重启保留；倒序展示最近的日期。
+    private var dailyTokens: some View {
+        CatalogCard(title: L10n.text("Tokens by day")) {
+            if analytics?.dailyTokens.isEmpty ?? true {
+                Text(L10n.text("No token usage recorded yet."))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 10)
+            } else {
+                ForEach(analytics?.dailyTokens ?? []) { day in
+                    HStack(spacing: 10) {
+                        Text(day.date)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .frame(width: 90, alignment: .leading)
+                        Label(analyticsTokenCount(day.inputTokens), systemImage: "arrow.down.circle")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        Label(analyticsTokenCount(day.outputTokens), systemImage: "arrow.up.circle")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 100, alignment: .trailing)
+                    }
+                    .font(.system(size: 11.5).monospacedDigit())
+                    .padding(.vertical, 3)
                 }
             }
         }
@@ -4584,6 +4625,8 @@ private enum AnalyticsColumn {
     static let errorRate: CGFloat = 78
     static let insertions: CGFloat = 70
     static let deletions: CGFloat = 70
+    static let inputTokens: CGFloat = 78
+    static let outputTokens: CGFloat = 78
     static let p50: CGFloat = 64
     static let p95: CGFloat = 64
     static let p99: CGFloat = 64
@@ -4599,6 +4642,8 @@ private struct AnalyticsTableHeader: View {
             Text(L10n.text("Error rate")).frame(width: AnalyticsColumn.errorRate, alignment: .trailing)
             Text(L10n.text("Added lines")).frame(width: AnalyticsColumn.insertions, alignment: .trailing)
             Text(L10n.text("Deleted lines")).frame(width: AnalyticsColumn.deletions, alignment: .trailing)
+            Text(L10n.text("Input tokens")).frame(width: AnalyticsColumn.inputTokens, alignment: .trailing)
+            Text(L10n.text("Output tokens")).frame(width: AnalyticsColumn.outputTokens, alignment: .trailing)
             Text("P50").frame(width: AnalyticsColumn.p50, alignment: .trailing)
             Text("P95").frame(width: AnalyticsColumn.p95, alignment: .trailing)
             Text("P99").frame(width: AnalyticsColumn.p99, alignment: .trailing)
@@ -4632,6 +4677,12 @@ private struct AnalyticsTableRow: View {
             Text("\(stat.deletions)")
                 .foregroundStyle(stat.deletions > 0 ? Color.orange : Color.secondary)
                 .frame(width: AnalyticsColumn.deletions, alignment: .trailing)
+            Text(analyticsTokenCount(UInt64(stat.inputTokens)))
+                .foregroundStyle(stat.inputTokens > 0 ? Color.primary : Color.secondary)
+                .frame(width: AnalyticsColumn.inputTokens, alignment: .trailing)
+            Text(analyticsTokenCount(UInt64(stat.outputTokens)))
+                .foregroundStyle(stat.outputTokens > 0 ? Color.primary : Color.secondary)
+                .frame(width: AnalyticsColumn.outputTokens, alignment: .trailing)
             Text(analyticsDuration(stat.p50DurationMS)).frame(width: AnalyticsColumn.p50, alignment: .trailing)
             Text(analyticsDuration(stat.p95DurationMS)).frame(width: AnalyticsColumn.p95, alignment: .trailing)
             Text(analyticsDuration(stat.p99DurationMS)).frame(width: AnalyticsColumn.p99, alignment: .trailing)
@@ -4651,6 +4702,35 @@ private struct AnalyticsTableRow: View {
 
 private func analyticsDuration(_ value: Double) -> String {
     value >= 1000 ? String(format: "%.1fs", value / 1000) : String(format: "%.0fms", value)
+}
+
+/// 大数字用 K/M/B 缩写，避免 token 量级大时指标卡/表格被撑宽。
+private func analyticsTokenCount(_ value: UInt64) -> String {
+    switch value {
+    case ..<1_000:
+        return "\(value)"
+    case ..<1_000_000:
+        return trimmedDecimal(Double(value) / 1_000) + "K"
+    case ..<1_000_000_000:
+        return trimmedDecimal(Double(value) / 1_000_000) + "M"
+    default:
+        return trimmedDecimal(Double(value) / 1_000_000_000) + "B"
+    }
+}
+
+private func trimmedDecimal(_ value: Double) -> String {
+    let text = String(format: "%.1f", value)
+    return text.hasSuffix(".0") ? String(text.dropLast(2)) : text
+}
+
+/// 展示当前累计段的本地时间窗口，如 "14:00-14:30"。
+private func tokenSegmentCaption(_ isoDate: String) -> String {
+    let formatter = ISO8601DateFormatter()
+    guard let start = formatter.date(from: isoDate) else { return "" }
+    let end = start.addingTimeInterval(30 * 60)
+    let display = DateFormatter()
+    display.dateFormat = "HH:mm"
+    return "\(display.string(from: start))-\(display.string(from: end))"
 }
 
 // MARK: - File change history

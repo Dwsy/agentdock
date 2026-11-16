@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Typed result models
@@ -91,20 +92,50 @@ struct RuntimeCapabilityMCP: Decodable {
 }
 
 /// task_create / task_manage 的返回契约（internal/tool/task/task_actions.go）。
-/// 两个工具都走 Service.Manage，返回 action/task_id/task_summary/state_dir，
-/// task_summary 是 compactTaskSummary 的投影，字段与完整 Task 不同。
+/// 两个工具都走 Service.Manage，但正文形态不同：create 与生命周期动作回
+/// task_id/task_summary，get 回完整 task，list 回 tasks/count。三者互斥。
 struct RuntimeTaskToolResult: Decodable {
     let action: String?
     let taskId: String?
     let stateDir: String?
     let taskSummary: RuntimeTaskCompactSummary?
+    let task: RuntimeTaskState?
+    let tasks: [RuntimeTaskCompactSummary]?
+    let count: Int?
 
     private enum CodingKeys: String, CodingKey {
-        case action
+        case action, task, tasks, count
         case taskId = "task_id"
         case stateDir = "state_dir"
         case taskSummary = "task_summary"
     }
+}
+
+/// task_manage get 返回的完整任务状态（internal/taskstate.Task）：带 goal 与 events，
+/// 这两块在 compactTaskSummary 里没有。
+struct RuntimeTaskState: Decodable {
+    let id: String?
+    let title: String?
+    let goal: String?
+    let status: String?
+    let phase: String?
+    let conditions: [RuntimeTaskCompactCondition]?
+    let steps: [RuntimeTaskStateStep]?
+    let events: [RuntimeTaskStateEvent]?
+    let blocker: String?
+    let summary: String?
+}
+
+struct RuntimeTaskStateStep: Decodable {
+    let id: String?
+    let title: String?
+    let phase: String?
+    let status: String?
+}
+
+struct RuntimeTaskStateEvent: Decodable {
+    let type: String?
+    let summary: String?
 }
 
 struct RuntimeTaskCompactSummary: Decodable {
@@ -249,8 +280,7 @@ enum TraceTypedResult {
         case "agentdock_context":
             return (try? JSONDecoder().decode(RuntimeCapabilityContext.self, from: data)).map { .capabilityContext($0) }
         case "task_create", "task_manage":
-            // 两个工具共用 Service.Manage 的返回：{action, task_id, task_summary, state_dir}。
-            return (try? JSONDecoder().decode(RuntimeTaskToolResult.self, from: data)).map { .task($0) }
+            return decodeTaskResult(data)
         case "read_file":
             return (try? JSONDecoder().decode(RuntimeReadFileResult.self, from: data)).map { .readFile($0) }
         case "search_text":
@@ -263,11 +293,23 @@ enum TraceTypedResult {
             return nil
         }
     }
+
+    /// get 回 task、list 回 tasks，与生命周期动作的 task_summary 互斥。三者都没命中
+    /// 说明解码没拿到真正正文，退回通用 JSON 渲染：只画 action 徽章的任务卡会把
+    /// 整份任务状态静默吞掉。
+    private static func decodeTaskResult(_ data: Data) -> TraceTypedResult? {
+        guard let result = try? JSONDecoder().decode(RuntimeTaskToolResult.self, from: data) else { return nil }
+        guard result.task != nil || result.tasks != nil || result.taskSummary != nil else { return nil }
+        return .task(result)
+    }
 }
 
 struct TraceTypedResultCard: View {
     let result: TraceTypedResult
     let rawText: String
+    let traceID: UInt64
+    let imagePreview: RuntimeTraceImagePreview?
+    let onLoadImagePreview: ((UInt64) async -> RuntimeTraceImagePayload?)?
 
     var body: some View {
         switch result {
@@ -276,7 +318,7 @@ struct TraceTypedResultCard: View {
         case let .capabilityContext(context):
             TraceCapabilityContextCard(context: context, rawText: rawText)
         case let .task(result):
-            TraceTaskCard(result: result, rawText: rawText)
+            TraceTaskResultCard(result: result, rawText: rawText)
         case let .readFile(file):
             TraceReadFileCard(file: file, rawText: rawText)
         case let .searchText(search):
@@ -284,7 +326,13 @@ struct TraceTypedResultCard: View {
         case let .listDir(listing):
             TraceListDirCard(listing: listing, rawText: rawText)
         case let .viewImage(image):
-            TraceViewImageCard(image: image, rawText: rawText)
+            TraceViewImageCard(
+                image: image,
+                rawText: rawText,
+                traceID: traceID,
+                preview: imagePreview,
+                onLoadPreview: onLoadImagePreview
+            )
         }
     }
 }
@@ -333,15 +381,31 @@ private struct TraceDeltaLabel: View {
 
 // MARK: - file_edit
 
+/// 列表与详情共用调用级合计，避免多文件 patch 挤出一串逐文件数字。
+struct TraceFileChangeDeltaLabel: View {
+    let changes: [RuntimeFileChange]
+
+    var body: some View {
+        TraceDeltaLabel(
+            insertions: changes.reduce(0) { $0 + ($1.insertions ?? 0) },
+            deletions: changes.reduce(0) { $0 + ($1.deletions ?? 0) }
+        )
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
 /// file_edit 的文件级变更卡：一次调用可能影响多个文件（patch/move），
-/// 每个文件一行，diff 按需展开。数据来自 TraceRecord.fileChanges，
-/// 不走 Result 文本，因此摘要列表行同样能渲染。
+/// 每个文件一行，diff 默认展开（出参分区就是要看改了什么），可按需折叠。
+/// 数据来自 TraceRecord.fileChanges，不走 Result 文本，因此摘要列表行同样能渲染。
 struct TraceFileChangesCard: View {
     let changes: [RuntimeFileChange]
     let rawText: String
 
     var body: some View {
-        TraceSurfaceCard(title: L10n.format("Files (%d)", changes.count), trailing: CopyButton(text: rawText)) {
+        TraceSurfaceCard(title: L10n.format("Files (%d)", changes.count), trailing: HStack(spacing: 8) {
+            TraceFileChangeDeltaLabel(changes: changes)
+            CopyButton(text: rawText)
+        }) {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(changes) { change in
                     TraceFileChangeRow(change: change)
@@ -354,7 +418,7 @@ struct TraceFileChangesCard: View {
 private struct TraceFileChangeRow: View {
     let change: RuntimeFileChange
 
-    @State private var showDiff = false
+    @State private var showDiff = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -597,6 +661,180 @@ struct TraceCapabilityContextCard: View {
 
 // MARK: - task
 
+/// task 结果卡分派：get 回完整任务状态，list 回任务列表，生命周期动作回紧凑投影。
+private struct TraceTaskResultCard: View {
+    let result: RuntimeTaskToolResult
+    let rawText: String
+
+    var body: some View {
+        if let state = result.task {
+            TraceTaskStateCard(state: state, action: result.action, stateDir: result.stateDir, rawText: rawText)
+        } else if let items = result.tasks {
+            TraceTaskListCard(items: items, total: result.count, action: result.action, stateDir: result.stateDir, rawText: rawText)
+        } else {
+            TraceTaskCard(result: result, rawText: rawText)
+        }
+    }
+}
+
+/// 状态与阶段徽章的颜色，三张任务卡共用。
+private enum TraceTaskStyle {
+    static func statusColor(_ status: String) -> Color {
+        switch status {
+        case "completed", "passed", "done": return .green
+        case "blocked", "failed": return .red
+        case "active", "running", "in_progress": return .blue
+        default: return .secondary
+        }
+    }
+}
+
+/// task_manage get 的任务卡：完整任务状态带 goal 与 events，
+/// 紧凑投影里没有这两块。
+private struct TraceTaskStateCard: View {
+    let state: RuntimeTaskState
+    let action: String?
+    let stateDir: String?
+    let rawText: String
+
+    var body: some View {
+        TraceSurfaceCard(title: L10n.text("Task"), trailing: CopyButton(text: rawText)) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let action, !action.isEmpty {
+                    TraceBadge(text: action, color: .blue)
+                }
+                if let title = state.title, !title.isEmpty {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .textSelection(.enabled)
+                }
+                if let id = state.id, !id.isEmpty {
+                    TraceMetadataRow(label: L10n.text("Task ID"), value: id)
+                }
+                HStack(spacing: 6) {
+                    if let status = state.status, !status.isEmpty {
+                        TraceBadge(text: status, color: TraceTaskStyle.statusColor(status))
+                    }
+                    if let phase = state.phase, !phase.isEmpty {
+                        TraceBadge(text: phase, color: .blue)
+                    }
+                }
+                if let goal = state.goal, !goal.isEmpty {
+                    TraceCardSectionTitle(title: L10n.text("Goal"))
+                    Text(goal)
+                        .font(.system(size: 11.5))
+                        .textSelection(.enabled)
+                }
+                if let steps = state.steps, !steps.isEmpty {
+                    TraceCardSectionTitle(title: L10n.format("Steps (%d)", steps.count))
+                    ForEach(steps.indices, id: \.self) { index in
+                        let step = steps[index]
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(step.id ?? "")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                                .frame(width: 42, alignment: .leading)
+                            Text(step.title ?? "")
+                                .font(.system(size: 11.5))
+                                .textSelection(.enabled)
+                            Spacer(minLength: 8)
+                            if let status = step.status, !status.isEmpty {
+                                TraceBadge(text: status, color: TraceTaskStyle.statusColor(status))
+                            }
+                        }
+                    }
+                }
+                if let conditions = state.conditions, !conditions.isEmpty {
+                    TraceCardSectionTitle(title: L10n.format("Conditions (%d)", conditions.count))
+                    ForEach(conditions.indices, id: \.self) { index in
+                        Text(conditions[index].text ?? "")
+                            .font(.system(size: 11.5))
+                            .textSelection(.enabled)
+                    }
+                }
+                if let events = state.events, !events.isEmpty {
+                    TraceCardSectionTitle(title: L10n.format("Events (%d)", events.count))
+                    ForEach(events.indices, id: \.self) { index in
+                        let event = events[index]
+                        VStack(alignment: .leading, spacing: 1) {
+                            if let type = event.type, !type.isEmpty {
+                                TraceBadge(text: type, color: .secondary)
+                            }
+                            Text(event.summary ?? "")
+                                .font(.system(size: 11.5))
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                if let blocker = state.blocker, !blocker.isEmpty {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\u{26a0}").font(.system(size: 10))
+                        Text(blocker)
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.orange)
+                            .textSelection(.enabled)
+                    }
+                }
+                if let summary = state.summary, !summary.isEmpty {
+                    TraceCardSectionTitle(title: L10n.text("Summary"))
+                    Text(summary)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                if let stateDir, !stateDir.isEmpty {
+                    TraceMetadataRow(label: L10n.text("State directory"), value: stateDir)
+                }
+            }
+        }
+    }
+}
+
+/// task_manage list 的任务列表卡：一行一个任务，只带标题、状态与步骤进度。
+private struct TraceTaskListCard: View {
+    let items: [RuntimeTaskCompactSummary]
+    let total: Int?
+    let action: String?
+    let stateDir: String?
+    let rawText: String
+
+    var body: some View {
+        TraceSurfaceCard(
+            title: L10n.format("%d tasks", total ?? items.count),
+            trailing: CopyButton(text: rawText)
+        ) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let action, !action.isEmpty {
+                    TraceBadge(text: action, color: .blue)
+                }
+                if items.isEmpty {
+                    Text("—").foregroundStyle(.secondary)
+                }
+                ForEach(items.indices, id: \.self) { index in
+                    let item = items[index]
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        if let status = item.status, !status.isEmpty {
+                            TraceBadge(text: status, color: TraceTaskStyle.statusColor(status))
+                        }
+                        Text(item.title ?? "")
+                            .font(.system(size: 11.5))
+                            .textSelection(.enabled)
+                        Spacer(minLength: 8)
+                        if let completed = item.completedStepCount, let steps = item.stepCount, steps > 0 {
+                            Text(L10n.format("%d of %d steps", completed, steps))
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                if let stateDir, !stateDir.isEmpty {
+                    TraceMetadataRow(label: L10n.text("State directory"), value: stateDir)
+                }
+            }
+        }
+    }
+}
+
 /// task_create / task_manage 的任务状态卡。两个工具共用 Service.Manage 的
 /// 返回结构（action + task_summary + state_dir），task_summary 是紧凑投影：
 /// 步骤只有 id/title/status，终审只有计数没有事实列表。
@@ -716,20 +954,34 @@ struct TraceTaskCard: View {
         }
     }
 
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "completed", "passed", "done": return .green
-        case "blocked", "failed": return .red
-        case "active", "running", "in_progress": return .blue
-        default: return .secondary
-        }
-    }
+    private func statusColor(_ status: String) -> Color { TraceTaskStyle.statusColor(status) }
 }
 
 /// view_image 结果（internal/tool/media/view_image.go）。
-/// trace 会剥离内联 base64（见 app.traceImageResultText），只留元数据。
+/// source 是 Go 侧的结构化来源对象；图片字节通过 trace image sidecar 单独读取。
+struct RuntimeImageSource: Decodable {
+    let type: String?
+    let path: String?
+    let url: String?
+    let artifactID: String?
+    let filename: String?
+    let sizeBytes: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case type, path, url, filename
+        case artifactID = "artifact_id"
+        case sizeBytes = "size_bytes"
+    }
+
+    var displayValue: String? {
+        [path, url, artifactID, filename, type]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+}
+
 struct RuntimeViewImageResult: Decodable {
-    let source: String?
+    let source: RuntimeImageSource?
     let image: RuntimeImageMetadata?
     let original: RuntimeImageMetadata?
     let resized: Bool?
@@ -761,16 +1013,24 @@ struct RuntimeImageMetadata: Decodable {
 
 // MARK: - view_image
 
-/// view_image 详情卡：来源 + 处理后/原始图像元数据。图片本体不进调用追踪
-/// （内联 base64 会占满预览），所以这里只说明省略了多少字节。
+/// view_image 详情卡：先直接显示处理后的图片，再展示来源与尺寸元数据。
 struct TraceViewImageCard: View {
     let image: RuntimeViewImageResult
     let rawText: String
+    let traceID: UInt64
+    let preview: RuntimeTraceImagePreview?
+    let onLoadPreview: ((UInt64) async -> RuntimeTraceImagePayload?)?
+
+    @State private var renderedImage: NSImage?
+    @State private var previewLoading = false
+    @State private var previewUnavailable = false
 
     var body: some View {
         TraceSurfaceCard(title: L10n.text("Image"), trailing: CopyButton(text: rawText)) {
             VStack(alignment: .leading, spacing: 4) {
-                if let source = image.source, !source.isEmpty {
+                previewContent
+                    .padding(.bottom, 6)
+                if let source = image.source?.displayValue, !source.isEmpty {
                     TraceMetadataRow(label: L10n.text("Source"), value: source)
                 }
                 if let metadata = image.image {
@@ -800,7 +1060,7 @@ struct TraceViewImageCard: View {
                         value: originalSummary(original)
                     )
                 }
-                if let omitted = image.imageBytesOmitted, omitted > 0 {
+                if preview == nil, let omitted = image.imageBytesOmitted, omitted > 0 {
                     Text(L10n.format("Image data (%@) is not recorded in call traces.", TraceFormat.bytes(omitted)))
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
@@ -816,7 +1076,48 @@ struct TraceViewImageCard: View {
                     }
                 }
             }
+            .task(id: traceID) { await loadPreview() }
         }
+    }
+
+    @ViewBuilder private var previewContent: some View {
+        if let renderedImage {
+            Image(nsImage: renderedImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: 720, maxHeight: 440)
+                .frame(maxWidth: .infinity)
+                .background(Color.black.opacity(0.035))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .accessibilityLabel(image.image?.filename ?? L10n.text("Image"))
+        } else if previewLoading || (preview != nil && !previewUnavailable) {
+            ProgressView(L10n.text("Loading image preview…"))
+                .frame(maxWidth: .infinity, minHeight: 160)
+        } else {
+            Label(L10n.text("Image preview unavailable"), systemImage: "exclamationmark.triangle")
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 120)
+        }
+    }
+
+    private func loadPreview() async {
+        renderedImage = nil
+        previewUnavailable = false
+        guard preview != nil, let onLoadPreview else {
+            previewUnavailable = true
+            return
+        }
+        previewLoading = true
+        defer { previewLoading = false }
+        guard let payload = await onLoadPreview(traceID),
+              payload.mimeType == preview?.mimeType,
+              let decoded = NSImage(data: payload.data) else {
+            previewUnavailable = true
+            return
+        }
+        guard !Task.isCancelled else { return }
+        renderedImage = decoded
     }
 
     private func originalSummary(_ original: RuntimeImageMetadata) -> String {

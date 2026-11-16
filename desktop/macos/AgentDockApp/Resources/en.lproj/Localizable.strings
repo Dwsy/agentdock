@@ -674,6 +674,8 @@
 "Error rate" = "Error rate";
 "Added lines" = "Added lines";
 "Deleted lines" = "Deleted lines";
+"Input tokens" = "Input tokens";
+"Output tokens" = "Output tokens";
 "Alerts" = "Alerts";
 "%d active" = "%d active";
 "Error rate alert" = "Error rate alert";
@@ -745,6 +747,8 @@
 "Code" = "Code";
 "Saved. Restart AgentDock Core to apply the new configuration." = "Saved. Restart AgentDock Core to apply the new configuration.";
 "Last 5 minutes" = "Last 5 minutes";
+"Tokens by day" = "Tokens by day";
+"No token usage recorded yet." = "No token usage recorded yet.";
 "Working directory" = "Working directory";
 "Mode" = "Mode";
 "Timeout" = "Timeout";
@@ -823,6 +827,7 @@
 "Capability context" = "Capability context";
 "Conditions (%d)" = "Conditions (%d)";
 "Directory entries" = "Directory entries";
+"Events (%d)" = "Events (%d)";
 "File content" = "File content";
 "Files (%d)" = "Files (%d)";
 "Hide diff" = "Hide diff";
@@ -847,3 +852,5 @@
 "resized" = "resized";
 "Original" = "Original";
 "Image data (%@) is not recorded in call traces." = "Image data (%@) is not recorded in call traces.";
+"Loading image preview…" = "Loading image preview…";
+"Image preview unavailable" = "Image preview unavailable";

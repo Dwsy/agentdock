@@ -438,11 +438,12 @@ struct TraceCodeBlock: View {
 /// trace 渲染单独成文件时不能复用，只能复制同一份样式。
 /// 非 private：TraceResultCards.swift 的专用结果卡共用同一套外观。
 struct TraceSurfaceCard<Trailing: View, Content: View>: View {
-    let title: String
+    /// nil 表示分区名由外层 tab 提供，卡片不画标题行。
+    let title: String?
     var trailing: Trailing
     @ViewBuilder var content: () -> Content
 
-    init(title: String, trailing: Trailing, @ViewBuilder content: @escaping () -> Content) {
+    init(title: String?, trailing: Trailing, @ViewBuilder content: @escaping () -> Content) {
         self.title = title
         self.trailing = trailing
         self.content = content
@@ -450,12 +451,14 @@ struct TraceSurfaceCard<Trailing: View, Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 12)
-                trailing
+            if let title {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    trailing
+                }
             }
             content()
         }
@@ -471,7 +474,7 @@ struct TraceSurfaceCard<Trailing: View, Content: View>: View {
 }
 
 extension TraceSurfaceCard where Trailing == EmptyView {
-    init(title: String, @ViewBuilder content: @escaping () -> Content) {
+    init(title: String?, @ViewBuilder content: @escaping () -> Content) {
         self.init(title: title, trailing: EmptyView(), content: content)
     }
 }
@@ -653,7 +656,7 @@ struct TraceCommandCard: View {
     }
 
     var body: some View {
-        TraceSurfaceCard(title: L10n.text("Command")) {
+        TraceSurfaceCard(title: nil) {
             if let summary = command.summary, !summary.isEmpty, !hasCommandBody {
                 Text(summary)
                     .font(.system(size: 11.5, design: .monospaced))
@@ -774,9 +777,27 @@ struct TraceOutputSection: View {
 
 // MARK: - Trace detail
 
+/// 详情页分区。命令类工具多出命令分区，带错误码的记录多出错误分区。
+enum TraceDetailTab: String, CaseIterable {
+    case command
+    case arguments
+    case result
+    case error
+
+    var title: String {
+        switch self {
+        case .command: return L10n.text("Command")
+        case .arguments: return L10n.text("Arguments")
+        case .result: return L10n.text("Result")
+        case .error: return L10n.text("Error")
+        }
+    }
+}
+
 /// 调用追踪详情页。record 可能是列表摘要（正文还没回来）也可能是完整详情；
 /// 摘要记录只渲染元数据，正文与命令输出等 detail 回读后再出现。
 /// 预览被截断时提供「加载全文」：全文来自旁路副本，缺失时降级为预览。
+/// 入参/出参/命令/错误以 tab 分区，同一时间只渲染一个分区。
 struct TraceDetailView: View {
     let record: RuntimeTraceRecord
     var loadingDetail = false
@@ -789,12 +810,17 @@ struct TraceDetailView: View {
     /// 用户级配置，跨详情页与启动会话持久化。
     @AppStorage("TraceRenderJSONAsCards") private var renderJSONAsCards = true
 
+    /// 分区选择同样是用户级偏好：换选中行（甚至重启 App）都停在上次看的分区，
+    /// 否则每选一条记录都要重新点回原来那一栏。
+    @AppStorage("TraceDetailTab") private var selectedTab: TraceDetailTab = .arguments
+
     /// 解析/解码只在视图重建时执行一次；body 重估（开关切换、加载态变化）
     /// 直接复用，不再对同一份正文反复 parse/decode。
     private let argumentsJSON: TraceJSONDocument?
     private let resultJSON: TraceJSONDocument?
     /// 已知工具的 Result 专用卡片模型；非专用工具或解析失败时为 nil。
     private let typedResult: TraceTypedResult?
+    private let imagePreviewLoader: ((UInt64) async -> RuntimeTraceImagePayload?)?
 
     init(
         record: RuntimeTraceRecord,
@@ -802,7 +828,8 @@ struct TraceDetailView: View {
         full: RuntimeTraceFullRecord? = nil,
         fullUnavailable: Bool = false,
         fullLoading: Bool = false,
-        onLoadFull: (() -> Void)? = nil
+        onLoadFull: (() -> Void)? = nil,
+        onLoadImagePreview: ((UInt64) async -> RuntimeTraceImagePayload?)? = nil
     ) {
         self.record = record
         self.loadingDetail = loadingDetail
@@ -810,6 +837,7 @@ struct TraceDetailView: View {
         self.fullUnavailable = fullUnavailable
         self.fullLoading = fullLoading
         self.onLoadFull = onLoadFull
+        self.imagePreviewLoader = onLoadImagePreview
         let resultText = full?.result ?? record.result
         self.argumentsJSON = TraceJSONDocument.parse(full?.arguments ?? record.arguments)
         self.resultJSON = TraceJSONDocument.parse(resultText)
@@ -826,25 +854,8 @@ struct TraceDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
-
-                if let code = record.errorCode, !code.isEmpty {
-                    TraceSurfaceCard(title: L10n.text("Error")) {
-                        TraceMetadataRow(label: L10n.text("Code"), value: code)
-                        if let error = errorText, !error.isEmpty {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(error).font(.system(size: 12)).textSelection(.enabled)
-                                CopyButton(text: error)
-                            }
-                        }
-                    }
-                }
-
-                if let command {
-                    TraceCommandCard(command: command, full: full?.command)
-                }
-
-                payloadCard(L10n.text("Arguments"), argumentsText, document: argumentsJSON, language: .json)
-                resultSection
+                tabBar
+                activeTabContent
 
                 if loadingDetail {
                     ProgressView()
@@ -857,6 +868,75 @@ struct TraceDetailView: View {
             .frame(maxWidth: 860, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    /// 当前记录可用的分区。顺序固定，同一用户在不同记录间不用重新找位置。
+    private var tabs: [TraceDetailTab] {
+        var tabs: [TraceDetailTab] = []
+        if command != nil { tabs.append(.command) }
+        tabs.append(contentsOf: [.arguments, .result])
+        if let code = record.errorCode, !code.isEmpty { tabs.append(.error) }
+        return tabs
+    }
+
+    /// 记录不支持已记住的分区（例如从 exec_command 切到 file_edit）时回落入参，
+    /// 但不覆盖偏好：切回命令类记录仍回到命令分区。
+    private var activeTab: TraceDetailTab {
+        tabs.contains(selectedTab) ? selectedTab : .arguments
+    }
+
+    private var tabSelection: Binding<TraceDetailTab> {
+        Binding(get: { activeTab }, set: { selectedTab = $0 })
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 12) {
+            Picker("", selection: tabSelection) {
+                ForEach(tabs, id: \.self) { tab in
+                    Text(tab.title).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            Spacer(minLength: 12)
+            // 渲染模式只决定入参/出参的 JSON 呈现，其他分区不显示这个开关。
+            if activeTab == .arguments || activeTab == .result {
+                renderModeToggle
+            }
+        }
+    }
+
+    @ViewBuilder private var activeTabContent: some View {
+        switch activeTab {
+        case .command:
+            if let command {
+                TraceCommandCard(command: command, full: full?.command)
+            }
+        case .arguments:
+            payloadCard(argumentsText, document: argumentsJSON, language: .json)
+        case .result:
+            resultSection
+        case .error:
+            errorCard
+        }
+    }
+
+    /// 错误分区：卡片标题由 tab 承担，错误正文为空时保留占位符。
+    private var errorCard: some View {
+        TraceSurfaceCard(title: nil) {
+            if let code = record.errorCode, !code.isEmpty {
+                TraceMetadataRow(label: L10n.text("Code"), value: code)
+            }
+            if let error = errorText, !error.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(error).font(.system(size: 12)).textSelection(.enabled)
+                    CopyButton(text: error)
+                }
+            } else {
+                Text("—").foregroundStyle(.secondary)
+            }
+        }
     }
 
     @ViewBuilder private var fullTextFooter: some View {
@@ -918,14 +998,21 @@ struct TraceDetailView: View {
         if renderJSONAsCards, let changes = record.fileChanges, !changes.isEmpty {
             TraceFileChangesCard(changes: changes, rawText: resultText ?? "")
         } else if renderJSONAsCards, let typedResult {
-            TraceTypedResultCard(result: typedResult, rawText: resultText ?? "")
+            TraceTypedResultCard(
+                result: typedResult,
+                rawText: resultText ?? "",
+                traceID: record.id,
+                imagePreview: record.imagePreview,
+                onLoadImagePreview: imagePreviewLoader
+            )
         } else {
-            payloadCard(L10n.text("Result"), resultText, document: resultJSON, language: .log)
+            payloadCard(resultText, document: resultJSON, language: .log)
         }
     }
 
-    @ViewBuilder private func payloadCard(_ title: String, _ text: String?, document: TraceJSONDocument?, language: TraceCodeLanguage) -> some View {
-        TraceSurfaceCard(title: title, trailing: renderModeToggle) {
+    /// JSON 分区卡片不画标题：入参/出参名由 tab 标注，卡片只渲染正文与复制按钮。
+    @ViewBuilder private func payloadCard(_ text: String?, document: TraceJSONDocument?, language: TraceCodeLanguage) -> some View {
+        TraceSurfaceCard(title: nil) {
             if let text, !text.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
                     if renderJSONAsCards {

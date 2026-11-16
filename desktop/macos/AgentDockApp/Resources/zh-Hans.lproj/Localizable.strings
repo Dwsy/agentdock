@@ -674,6 +674,8 @@
 "Error rate" = "错误率";
 "Added lines" = "新增行数";
 "Deleted lines" = "删除行数";
+"Input tokens" = "入参 tokens";
+"Output tokens" = "结果 tokens";
 "Alerts" = "告警";
 "%d active" = "%d 条活跃";
 "Error rate alert" = "错误率告警";
@@ -745,6 +747,8 @@
 "Code" = "错误码";
 "Saved. Restart AgentDock Core to apply the new configuration." = "已保存。重启 AgentDock Core 后生效。";
 "Last 5 minutes" = "最近 5 分钟";
+"Tokens by day" = "按日 Token 统计";
+"No token usage recorded yet." = "暂无 Token 使用记录。";
 "Working directory" = "工作目录";
 "Mode" = "模式";
 "Timeout" = "超时";
@@ -823,6 +827,7 @@
 "Capability context" = "能力上下文";
 "Conditions (%d)" = "条件（%d）";
 "Directory entries" = "目录条目";
+"Events (%d)" = "事件（%d）";
 "File content" = "文件内容";
 "Files (%d)" = "文件（%d）";
 "Hide diff" = "隐藏 diff";
@@ -847,3 +852,5 @@
 "resized" = "已缩放";
 "Original" = "原始";
 "Image data (%@) is not recorded in call traces." = "图片数据（%@）不记入调用追踪。";
+"Loading image preview…" = "正在加载图片预览…";
+"Image preview unavailable" = "图片预览不可用";

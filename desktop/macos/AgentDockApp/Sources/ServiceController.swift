@@ -24,6 +24,7 @@ private enum RuntimeAPIPath {
     static let tasks = "/internal/runtime/tasks"
     static let traces = "/internal/runtime/traces"
     static let traceDetail = "/internal/runtime/traces/detail"
+    static let traceImage = "/internal/runtime/traces/image"
     static let networkCapture = "/internal/runtime/network"
     static let networkCaptureDetail = "/internal/runtime/network/detail"
     static let fileChanges = "/internal/runtime/file-changes"
@@ -420,6 +421,8 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
     /// file_edit 成功时的文件级变更摘要；其他工具为 nil。摘要投影不会剥离它，
     /// 所以列表行也能拿到变更计数。
     let fileChanges: [RuntimeFileChange]?
+    /// 图片字节保存在 trace 私有 sidecar；列表只携带 MIME 与大小。
+    let imagePreview: RuntimeTraceImagePreview?
 
     private enum CodingKeys: String, CodingKey {
         case id, tool, source, success, arguments, result, error, truncated, command
@@ -428,6 +431,27 @@ struct RuntimeTraceRecord: Decodable, Identifiable {
         case durationMS = "duration_ms"
         case errorCode = "error_code"
         case fileChanges = "file_changes"
+        case imagePreview = "image_preview"
+    }
+}
+
+struct RuntimeTraceImagePreview: Decodable {
+    let mimeType: String
+    let sizeBytes: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case mimeType = "mime_type"
+        case sizeBytes = "size_bytes"
+    }
+}
+
+struct RuntimeTraceImagePayload: Decodable {
+    let mimeType: String
+    let data: Data
+
+    private enum CodingKeys: String, CodingKey {
+        case data
+        case mimeType = "mime_type"
     }
 }
 
@@ -908,6 +932,9 @@ struct RuntimeToolStats: Decodable, Identifiable {
     /// insertions/deletions 是该工具在窗口内造成的代码行数变动。
     let insertions: Int
     let deletions: Int
+    /// inputTokens/outputTokens 是该工具在窗口内的入参与结果 token 数。
+    let inputTokens: Int
+    let outputTokens: Int
 
     var id: String { tool }
 
@@ -919,6 +946,8 @@ struct RuntimeToolStats: Decodable, Identifiable {
         case p95DurationMS = "p95_duration_ms"
         case p99DurationMS = "p99_duration_ms"
         case insertions, deletions
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
     }
 }
 
@@ -980,6 +1009,17 @@ struct RuntimeAnalyticsPayload: Decodable {
     /// totalInsertions/totalDeletions 是进程启动以来的代码行数变动累计值。
     let totalInsertions: UInt64
     let totalDeletions: UInt64
+    /// totalInputTokens/totalOutputTokens 是进程启动以来的 token 累计值。
+    let totalInputTokens: UInt64
+    let totalOutputTokens: UInt64
+    /// windowInputTokens/windowOutputTokens 是当前 token 累计段的值。
+    let windowInputTokens: UInt64
+    let windowOutputTokens: UInt64
+    let tokenWindowSeconds: Int
+    /// tokenSegmentStartedAt 是当前累计段的起点（UTC RFC3339）。
+    let tokenSegmentStartedAt: String
+    /// dailyTokens 是按自然日的 token 累计，最近的在前。
+    let dailyTokens: [RuntimeDailyTokens]
     let toolStats: [RuntimeToolStats]
     let recentCalls: [RuntimeAnalyticsCall]
     let process: RuntimeProcessSnapshot
@@ -994,8 +1034,28 @@ struct RuntimeAnalyticsPayload: Decodable {
         case activeCalls = "active_calls"
         case totalInsertions = "total_insertions"
         case totalDeletions = "total_deletions"
+        case totalInputTokens = "total_input_tokens"
+        case totalOutputTokens = "total_output_tokens"
+        case windowInputTokens = "window_input_tokens"
+        case windowOutputTokens = "window_output_tokens"
+        case tokenWindowSeconds = "token_window_seconds"
+        case tokenSegmentStartedAt = "token_segment_started_at"
+        case dailyTokens = "daily_tokens"
         case toolStats = "tool_stats"
         case recentCalls = "recent_calls"
+    }
+}
+
+struct RuntimeDailyTokens: Decodable, Identifiable {
+    var id: String { date }
+    let date: String
+    let inputTokens: UInt64
+    let outputTokens: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case date
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
     }
 }
 
@@ -1278,6 +1338,17 @@ final class ServiceController: @unchecked Sendable {
             path: RuntimeAPIPath.traceDetail,
             queryItems: items,
             timeout: 5
+        )
+    }
+
+    func runtimeTraceImage(id: UInt64, configuration: ServiceConfiguration?) async -> RuntimeTraceImagePayload? {
+        guard let configuration else { return nil }
+        return await fetchRuntimePayload(
+            RuntimeTraceImagePayload.self,
+            configuration: configuration,
+            path: RuntimeAPIPath.traceImage,
+            queryItems: [URLQueryItem(name: "id", value: String(id))],
+            timeout: 10
         )
     }
 

@@ -594,15 +594,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshStatusItemBadge()
     }
 
-    /// 菜单栏徽标：活跃告警数以文字形式挂在图标旁（macOS 邮件未读数的惯例）。
-    /// 图标保持模板图，徽标颜色跟随菜单栏前景色，避免深浅色外观失配。
+    /// 菜单栏徽标：曾以文字形式把活跃告警数挂在图标旁；用户反馈图标被数字
+    /// 挤歪（弹出箭头错位），故不再渲染徽标。告警仍在托盘面板内展示。
     private func refreshStatusItemBadge() {
-        guard let button = statusItem?.button else { return }
-        let count = currentAlerts.count
-        button.title = count > 0 ? "\(count)" : ""
-        button.toolTip = count > 0
-            ? L10n.format("%d active alerts", count)
-            : "AgentDock"
+        statusItem?.button?.title = ""
+        statusItem?.button?.toolTip = "AgentDock"
     }
 
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {

@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string, bool, diffStats, error) {
+func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string, bool, diffStats, map[string]diffStats, error) {
 	paths := make([]string, 0, len(staged))
 	for path := range staged {
 		paths = append(paths, path)
@@ -13,6 +13,7 @@ func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string,
 	sort.Strings(paths)
 	var builder strings.Builder
 	total := diffStats{}
+	byPath := make(map[string]diffStats, len(staged))
 	for _, path := range paths {
 		file := staged[path]
 		oldContent := string(file.Original)
@@ -22,8 +23,9 @@ func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string,
 		}
 		diff, _, stats, err := unifiedDiffPreview(file.Display, oldContent, newContent, 0)
 		if err != nil {
-			return "", false, diffStats{}, err
+			return "", false, diffStats{}, nil, err
 		}
+		byPath[file.Display] = stats
 		builder.WriteString(diff)
 		if diff != "" && !strings.HasSuffix(diff, "\n") {
 			builder.WriteString("\n")
@@ -36,7 +38,22 @@ func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string,
 	}
 	text := builder.String()
 	truncated := truncateString(text, maxBytes)
-	return truncated, maxBytes > 0 && len([]byte(text)) > maxBytes, total, nil
+	return truncated, maxBytes > 0 && len([]byte(text)) > maxBytes, total, byPath, nil
+}
+
+// addAffectedFileStats 在预览截断前保留逐文件计数，move 同时包含源与目标；
+// 调用追踪不应从展示文本反推一份可能残缺的统计。
+func addAffectedFileStats(affected []map[string]any, byPath map[string]diffStats) {
+	for _, file := range affected {
+		path, _ := file["path"].(string)
+		stats := byPath[path]
+		if destination, _ := file["move_to"].(string); destination != "" && destination != path {
+			stats.Insertions += byPath[destination].Insertions
+			stats.Deletions += byPath[destination].Deletions
+		}
+		file["insertions"] = stats.Insertions
+		file["deletions"] = stats.Deletions
+	}
 }
 
 func patchNearbyContext(lines, oldLines []string) []map[string]any {

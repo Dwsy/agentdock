@@ -3,7 +3,6 @@ package file
 import (
 	"bytes"
 	"fmt"
-	"strings"
 
 	anchoreddiff "github.com/rogpeppe/go-internal/diff"
 	"github.com/uvwt/agentdock/internal/textutil"
@@ -33,23 +32,17 @@ func unifiedDiffPreview(path, oldContent, newContent string, maxBytes int) (stri
 	return truncated.Text, truncated.Truncated, stats, nil
 }
 
+// countDiffStats 按分节统计整个 diff 文本的增删行数。用分节解析而不是
+// 逐行扫描：内容行删除 "-- x" 渲染为 "--- x"，逐行扫描会把它误当文件头
+// 漏计；FilesChanged 是有变更的分节数，多文件 git patch 才能报出真实文件数。
 func countDiffStats(diffText string) diffStats {
 	stats := diffStats{}
-	if strings.TrimSpace(diffText) == "" {
-		return stats
-	}
-	for _, line := range strings.Split(diffText, "\n") {
-		switch {
-		case strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
-			continue
-		case strings.HasPrefix(line, "+"):
-			stats.Insertions++
-		case strings.HasPrefix(line, "-"):
-			stats.Deletions++
+	for _, section := range textutil.DiffSections(diffText) {
+		if section.Insertions > 0 || section.Deletions > 0 {
+			stats.FilesChanged++
 		}
-	}
-	if stats.Insertions > 0 || stats.Deletions > 0 {
-		stats.FilesChanged = 1
+		stats.Insertions += section.Insertions
+		stats.Deletions += section.Deletions
 	}
 	return stats
 }

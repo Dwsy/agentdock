@@ -136,10 +136,11 @@ func (svc *Service) applyEnvelopePatch(patch string, dryRun bool, basePath strin
 	if len(affected) == 0 {
 		return nil, toolError("PATCH_FAILED", "no files were modified", "validation")
 	}
-	diffPreview, diffTruncated, stats, err := stagedDiffPreview(staged, 65536)
+	diffPreview, diffTruncated, stats, byPath, err := stagedDiffPreview(staged, 65536)
 	if err != nil {
 		return nil, err
 	}
+	addAffectedFileStats(affected, byPath)
 	if !dryRun {
 		if err := commitStagedPatch(staged); err != nil {
 			return nil, err

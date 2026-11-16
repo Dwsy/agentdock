@@ -18,9 +18,13 @@ const traceFileDiffBytes = 8 << 10
 // 结构化 patch 的 {path,operation,move_to}、unified diff 的 {path,status}）
 // 都先归一到这里，历史层不再关心工具返回的方言。
 type affectedFile struct {
-	path   string
-	action string
-	moveTo string
+	path          string
+	action        string
+	moveTo        string
+	insertions    int
+	deletions     int
+	hasInsertions bool
+	hasDeletions  bool
 }
 
 // traceFileChanges 从 file_edit 的返回结果提取文件级变更。
@@ -64,20 +68,32 @@ func traceFileChanges(tool string, args map[string]any, result *Result, success 
 		files = []affectedFile{entry}
 	}
 
-	// 多文件 patch 的调用级 +/- 是总数，冒充单文件统计会误导；按 diff 分节
-	// 重新统计，截断预览统计不到的文件如实记 0（预览已标 truncated）。
-	stats := diffFileStats(preview.Text)
+	// 旧结果缺少逐文件计数时按 diff 回退，不能让历史正文的 8 KiB 上限
+	// 吞掉后续文件。旧结果自身已截断时统计只是下界；新结果优先完整计数。
+	stats := diffFileStats(diff)
 	callInsertions := traceIntValue(payload["insertions"])
 	callDeletions := traceIntValue(payload["deletions"])
+	_, hasInsertions := payload["insertions"]
+	_, hasDeletions := payload["deletions"]
 
 	changes := make([]observability.FileChange, 0, len(files))
 	for _, file := range files {
 		insertions, deletions := callInsertions, callDeletions
-		if len(files) > 1 {
-			insertions, deletions = 0, 0
-			if stat, ok := lookupDiffStats(stats, file.path); ok {
-				insertions, deletions = stat[0], stat[1]
-			}
+		stat, _ := lookupDiffStats(stats, file.path)
+		if file.moveTo != "" && file.moveTo != file.path {
+			destination, _ := lookupDiffStats(stats, file.moveTo)
+			stat[0] += destination[0]
+			stat[1] += destination[1]
+		}
+		if file.hasInsertions {
+			insertions = file.insertions
+		} else if len(files) > 1 || !hasInsertions {
+			insertions = stat[0]
+		}
+		if file.hasDeletions {
+			deletions = file.deletions
+		} else if len(files) > 1 || !hasDeletions {
+			deletions = stat[1]
 		}
 		changes = append(changes, observability.FileChange{
 			Path:        file.path,
@@ -110,45 +126,46 @@ func traceCodeChangeCounts(tool string, result *Result, success bool) (int, int)
 	return traceIntValue(payload["insertions"]), traceIntValue(payload["deletions"])
 }
 
-// traceAffectedFiles 解析 affected_files 的三种形态；无法识别时返回 nil，
-// 由调用方回退到单文件 path。
+// traceAffectedFiles 在 JSON 边界归一化 affected_files：进程内工具会返回
+// []map 或私有结构体切片，经过传输后才是 []any；两条路径必须产生相同摘要。
 func traceAffectedFiles(value any, callAction string) []affectedFile {
-	switch typed := value.(type) {
-	case []string:
-		out := make([]affectedFile, 0, len(typed))
-		for _, path := range typed {
-			if path != "" {
-				out = append(out, affectedFile{path: path, action: normalizeFileAction(callAction)})
-			}
-		}
-		return out
-	case []any:
-		out := make([]affectedFile, 0, len(typed))
-		for _, item := range typed {
-			switch entry := item.(type) {
-			case string:
-				if entry != "" {
-					out = append(out, affectedFile{path: entry, action: normalizeFileAction(callAction)})
-				}
-			case map[string]any:
-				path, _ := entry["path"].(string)
-				if path == "" {
-					continue
-				}
-				rawAction, _ := entry["operation"].(string)
-				if rawAction == "" {
-					rawAction, _ = entry["status"].(string)
-				}
-				if rawAction == "" {
-					rawAction = callAction
-				}
-				moveTo, _ := entry["move_to"].(string)
-				out = append(out, affectedFile{path: path, action: normalizeFileAction(rawAction), moveTo: moveTo})
-			}
-		}
-		return out
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
 	}
-	return nil
+	var entries []any
+	if err := json.Unmarshal(encoded, &entries); err != nil {
+		return nil
+	}
+	out := make([]affectedFile, 0, len(entries))
+	seen := make(map[affectedFile]bool, len(entries))
+	for _, item := range entries {
+		var file affectedFile
+		switch entry := item.(type) {
+		case string:
+			file = affectedFile{path: entry, action: normalizeFileAction(callAction)}
+		case map[string]any:
+			file.path, _ = entry["path"].(string)
+			rawAction, _ := entry["operation"].(string)
+			if rawAction == "" {
+				rawAction, _ = entry["status"].(string)
+			}
+			if rawAction == "" {
+				rawAction = callAction
+			}
+			file.action = normalizeFileAction(rawAction)
+			file.moveTo, _ = entry["move_to"].(string)
+			file.insertions = traceIntValue(entry["insertions"])
+			file.deletions = traceIntValue(entry["deletions"])
+			_, file.hasInsertions = entry["insertions"]
+			_, file.hasDeletions = entry["deletions"]
+		}
+		if file.path != "" && !seen[file] {
+			out = append(out, file)
+			seen[file] = true
+		}
+	}
+	return out
 }
 
 // normalizeFileAction 把工具返回的动词方言归一到历史词汇表：
@@ -173,46 +190,24 @@ func lookupDiffStats(stats map[string][2]int, path string) ([2]int, bool) {
 	if stat, ok := stats[path]; ok {
 		return stat, true
 	}
+	var matched [2]int
+	longest := 0
 	for key, stat := range stats {
-		if strings.HasSuffix(path, "/"+key) {
-			return stat, true
+		if len(key) > longest && strings.HasSuffix(path, "/"+key) {
+			matched, longest = stat, len(key)
 		}
 	}
-	return [2]int{}, false
+	return matched, longest > 0
 }
 
-// diffFileStats 按 unified diff 分节统计每个文件的增删行数。
-// 预览被截断时统计是下界，调用方已有 truncated 标记如实提示。
+// diffFileStats 按 unified diff 分节统计每个文件的增删行数，复用 textutil
+// 的分节解析：envelope patch 的预览只有 ---/+++ 头没有 diff --git 行，
+// 旧的逐行扫描会把整个多文件 patch 统计成全 0。预览被截断时统计是下界，
+// 调用方已有 truncated 标记如实提示。
 func diffFileStats(diffText string) map[string][2]int {
 	stats := map[string][2]int{}
-	if diffText == "" {
-		return stats
-	}
-	current := ""
-	for _, line := range strings.Split(diffText, "\n") {
-		if strings.HasPrefix(line, "diff --git ") {
-			parts := strings.Fields(line)
-			current = ""
-			if len(parts) >= 4 {
-				current = strings.TrimPrefix(parts[3], "b/")
-			}
-			continue
-		}
-		if current == "" {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
-			continue
-		case strings.HasPrefix(line, "+"):
-			stat := stats[current]
-			stat[0]++
-			stats[current] = stat
-		case strings.HasPrefix(line, "-"):
-			stat := stats[current]
-			stat[1]++
-			stats[current] = stat
-		}
+	for _, section := range textutil.DiffSections(diffText) {
+		stats[section.Path] = [2]int{section.Insertions, section.Deletions}
 	}
 	return stats
 }

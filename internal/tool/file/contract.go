@@ -154,11 +154,13 @@ func OutputSchema(name string) (map[string]any, bool) {
 				"additionalProperties": false,
 				"required":             []string{"path"},
 				"properties": map[string]any{
-					"path":      stringProp("Affected file path."),
-					"operation": map[string]any{"type": "string", "enum": []string{"add", "delete", "update", "move"}},
-					"move_to":   stringProp("Move destination for operation=move."),
-					"status":    stringProp("Unified diff file status."),
-					"binary":    boolProp("Whether a unified diff file is binary."),
+					"path":       stringProp("Affected file path."),
+					"operation":  map[string]any{"type": "string", "enum": []string{"add", "delete", "update", "move"}},
+					"move_to":    stringProp("Move destination for operation=move."),
+					"status":     stringProp("Unified diff file status."),
+					"binary":     boolProp("Whether a unified diff file is binary."),
+					"insertions": intProp("Inserted line count for this file, independent of diff preview truncation."),
+					"deletions":  intProp("Deleted line count for this file, independent of diff preview truncation."),
 				},
 			},
 		}

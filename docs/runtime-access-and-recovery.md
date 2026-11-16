@@ -54,6 +54,8 @@
 
 `exec_command`、`session_observe`、`session_act` 额外写入结构化的 `command` 字段（命令、cwd、运行时、超时、stdout/stderr、退出码）。所有正文在写入保留窗口前统一截断：通用 `arguments`/`result` 与命令/stdout/stderr 均为单侧 8 KiB，超过时追加 `…(truncated)` 并置位 `truncated`（结构化字段另有 `*_preview_truncated`）。脱敏正则只扫描保留窗口两倍的文本，避免 MB 级命令输出把工具返回路径拖慢到几十毫秒。
 
+`file_edit` 的 patch 结果在 `affected_files[]` 内提供逐文件 `insertions`/`deletions`，在预览截断前计算；move 合并源文件和目标文件的计数。追踪层统一读取进程内与 JSON 传输后的文件列表，优先采用这些计数；旧结果缺少计数时才按 diff 分节回退。macOS 列表与详情使用相同的调用合计。此修复对新记录生效，已丢失文件摘要的旧记录不会自动补写。
+
 ## 动态 MCP 连接与授权
 
 - MCP Streamable HTTP 仅允许同一协议、主机和端口的重定向，最多 10 次；跨源地址或 HTTPS 降级返回连接错误，避免配置的静态头、环境变量头和 OAuth 凭据随重定向泄漏。需要迁移服务地址时直接更新服务器配置。

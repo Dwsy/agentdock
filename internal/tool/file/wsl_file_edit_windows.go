@@ -306,6 +306,7 @@ func (svc *Service) fileEditPatchWSL(ctx context.Context, request EditRequest, s
 	sort.Strings(paths)
 	var diffBuilder strings.Builder
 	totalStats := diffStats{}
+	byPath := make(map[string]diffStats, len(staged))
 	for _, path := range paths {
 		stage := staged[path]
 		newContent := ""
@@ -328,7 +329,9 @@ func (svc *Service) fileEditPatchWSL(ctx context.Context, request EditRequest, s
 		}
 		totalStats.Insertions += stats.Insertions
 		totalStats.Deletions += stats.Deletions
+		byPath[path] = stats
 	}
+	addAffectedFileStats(affected, byPath)
 	preview := diffBuilder.String()
 	previewResult := truncateString(preview, maxDiffBytes)
 	truncated := len(previewResult) < len(preview)

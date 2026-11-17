@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check test test-scripts test-scripts-macos vet race build check run docker-build docker-dev-build docker-browser-build docker-up docker-browser-up docker-down smoke-docker logs clean clean-local-artifacts install install-linux install-macos uninstall-macos test-install-macos deploy-macos-source restart-macos
+.PHONY: fmt fmt-check test test-scripts test-scripts-macos vet race build dashboard check run docker-build docker-dev-build docker-browser-build docker-up docker-browser-up docker-down smoke-docker logs clean clean-local-artifacts install install-linux install-macos uninstall-macos test-install-macos deploy-macos-source restart-macos
 
 APP := agentdock
 IMAGE := agentdock:local
@@ -41,6 +41,11 @@ race:
 
 build:
 	go build -trimpath -ldflags "$(BUILD_LDFLAGS)" -o ./bin/$(APP) ./cmd/agentdock
+
+# 构建 Web 仪表盘并同步到 go:embed 目录；需在编译 Core 之前运行。
+# AGENTDOCK_SKIP_DASHBOARD=1 可跳过（无 Node 环境时用仓库占位页）。
+dashboard:
+	./packaging/macos/build-dashboard.sh
 
 check: fmt-check test test-scripts vet build
 

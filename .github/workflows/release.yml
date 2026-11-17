@@ -315,6 +315,21 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: desktop/web-dashboard/package.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: pnpm
+          cache-dependency-path: desktop/web-dashboard/pnpm-lock.yaml
+
+      - name: Build Web dashboard
+        run: ./packaging/macos/build-dashboard.sh
+
       - name: Build and package
         env:
           CGO_ENABLED: '0'

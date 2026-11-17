@@ -1,0 +1,38 @@
+@import "tailwindcss";
+@import "./solid-glass.css";
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* highlight.js 精简主题（适配 Solid Glass 明暗双色） */
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type { color: #f59e0b; }
+.hljs-string, .hljs-attr, .hljs-addition, .hljs-regexp { color: #10b981; }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: #f97316; }
+.hljs-title, .hljs-title.function_, .hljs-section { color: #60a5fa; }
+.hljs-comment, .hljs-quote, .hljs-meta { color: #6b7280; font-style: italic; }
+.hljs-built_in, .hljs-variable, .hljs-template-variable { color: #c084fc; }
+.hljs-attribute, .hljs-property, .hljs-params { color: #38bdf8; }
+.hljs-deletion { color: #ef4444; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* markdown 渲染区细节 */
+.markdown-body pre code {
+  background: transparent;
+  padding: 0;
+}
+.markdown-body table th,
+.markdown-body table td {
+  vertical-align: top;
+}

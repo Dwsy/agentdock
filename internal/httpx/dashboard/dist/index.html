@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>AgentDock · 远程控制台</title>
+    <script>
+      // 在首屏渲染前定好主题，避免闪一下白/黑。
+      // 优先级：localStorage 记忆 > 系统偏好 > 默认暗色。
+      (function () {
+        var saved = null;
+        try { saved = localStorage.getItem('agentdock-theme'); } catch (e) {}
+        var dark = saved === 'dark' || (saved === null && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+        document.querySelector('meta[name=color-scheme]').setAttribute('content', dark ? 'dark' : 'light');
+      })();
+    </script>
+    <script type="module" crossorigin src="/dashboard/assets/index-5wjVB1u2.js"></script>
+    <link rel="stylesheet" crossorigin href="/dashboard/assets/index-CaV4r8oJ.css">
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

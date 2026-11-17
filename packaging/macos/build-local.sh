@@ -84,6 +84,9 @@ xcrun swiftc -swift-version 5 -typecheck \
   -sdk "$SDK_PATH" \
   "$ROOT_DIR/desktop/macos/AgentDockApp/Sources"/*.swift
 
+print -u2 -- "==> 构建 Web 仪表盘（供 Core go:embed）"
+"$ROOT_DIR/packaging/macos/build-dashboard.sh"
+
 print -u2 -- "==> 构建 Core 与 core-skills 载荷"
 rm -rf "$PAYLOAD_ROOT"
 mkdir -p "$PAYLOAD_ROOT/bin" "$PAYLOAD_ROOT/share/agentdock" "$PAYLOAD_ROOT/offline"

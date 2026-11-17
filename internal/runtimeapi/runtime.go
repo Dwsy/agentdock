@@ -160,6 +160,14 @@ type ResourceLibraryRuntime interface {
 
 const ResourceLibraryPath = "/internal/runtime/resource-library"
 
+// ConfigRuntime 是可选的只读 Web 控制台配置能力。独立于 Runtime 主接口，
+// 避免所有测试替身被迫实现配置读写（含重启这种副作用操作）。
+type ConfigRuntime interface {
+	RuntimeConfig() app.Result
+	RuntimeConfigUpdate(map[string]string) (app.Result, error)
+	RuntimeConfigRestart(context.Context) (app.Result, error)
+}
+
 // Request 是 HTTP 与 Nexus Bridge 共用的 Runtime API 请求表示。
 type Request struct {
 	Method string          `json:"method"`

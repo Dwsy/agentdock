@@ -632,6 +632,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         menu.addItem(item(L10n.text("Show main window"), #selector(showSetup)))
+        let dashboardItem = item(L10n.text("Open Web Dashboard"), #selector(openWebDashboard))
+        dashboardItem.isEnabled = currentStatus.loaded
+        menu.addItem(dashboardItem)
 
         menu.addItem(.separator())
         let startItem = item(L10n.text("Tray Start"), #selector(startService))
@@ -696,6 +699,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let url = URL(string: "https://docs.nexusdock.co/agentdock/") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// 在系统默认浏览器打开随 Core 分发的只读 Web 仪表盘。
+    /// 端口优先取本机 agentdock.env 的 AGENTDOCK_PORT，缺省 8765。
+    @objc private func openWebDashboard() {
+        let port = Self.dashboardPort()
+        if let url = URL(string: "http://127.0.0.1:\(port)/dashboard/") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private static func dashboardPort() -> Int {
+        let envURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AgentDock/agentdock.env")
+        if let text = try? String(contentsOf: envURL, encoding: .utf8) {
+            for line in text.split(separator: "\n") where line.hasPrefix("AGENTDOCK_PORT=") {
+                let value = line.dropFirst("AGENTDOCK_PORT=".count)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "'\""))
+                if let port = Int(value), port > 0 {
+                    return port
+                }
+            }
+        }
+        return 8765
     }
 
     @objc private func startService() {

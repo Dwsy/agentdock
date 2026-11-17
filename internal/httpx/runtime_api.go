@@ -19,6 +19,8 @@ import (
 func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) {
 	h := runtimeAPIHandler(runtime, cfg, oauthStore)
 	mux.HandleFunc("/internal/runtime/status", h)
+	mux.HandleFunc("/internal/runtime/config", h)
+	mux.HandleFunc("/internal/runtime/config/restart", h)
 	mux.HandleFunc("/internal/runtime/analytics", h)
 	mux.HandleFunc("/internal/runtime/events", h)
 	mux.HandleFunc("/internal/runtime/alerts", h)
@@ -107,7 +109,7 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 
 func runtimeRequestBody(r *http.Request) ([]byte, error) {
 	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
-	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
+	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != "/internal/runtime/config" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
 		return nil, nil
 	}
 	return io.ReadAll(io.LimitReader(r.Body, 64*1024+1))

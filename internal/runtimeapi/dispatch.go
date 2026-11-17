@@ -57,6 +57,13 @@ func MethodAllowed(method, path string) bool {
 	if cleanPath == "/internal/runtime/alerts" {
 		return method == http.MethodGet
 	}
+	// config 有两个子路由，方法语义不同，先按路径收紧再走通用兜底。
+	if cleanPath == "/internal/runtime/config/restart" {
+		return method == http.MethodPost
+	}
+	if cleanPath == "/internal/runtime/config" {
+		return method == http.MethodGet || method == http.MethodPost
+	}
 	if method == http.MethodGet {
 		return true
 	}
@@ -93,8 +100,11 @@ func AllowHeader(path string) string {
 	if cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" {
 		return "GET, POST"
 	}
-	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" {
+	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/config/restart" {
 		return "POST"
+	}
+	if cleanPath == "/internal/runtime/config" {
+		return "GET, POST"
 	}
 	if cleanPath == ResourceLibraryPath {
 		return "GET, POST"
@@ -431,6 +441,33 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		}
 		result, err := library.RuntimeResourceLibrary(ctx, method, request.Body)
 		return map[string]any(result), err
+	case path == "/internal/runtime/config/restart" && method == http.MethodPost:
+		configRuntime, ok := runtime.(ConfigRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "CONFIG_UNSUPPORTED", Message: "runtime does not support configuration", Category: "not_found"}
+		}
+		result, err := configRuntime.RuntimeConfigRestart(ctx)
+		return map[string]any(result), err
+	case path == "/internal/runtime/config" && method == http.MethodPost:
+		configRuntime, ok := runtime.(ConfigRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "CONFIG_UNSUPPORTED", Message: "runtime does not support configuration", Category: "not_found"}
+		}
+		var updates map[string]string
+		if err := json.Unmarshal(request.Body, &updates); err != nil {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "config body must be an object of string values", Category: "validation"}
+		}
+		result, err := configRuntime.RuntimeConfigUpdate(updates)
+		if err != nil {
+			return nil, &app.ToolError{Code: "CONFIG_INVALID", Message: err.Error(), Category: "validation"}
+		}
+		return map[string]any(result), err
+	case path == "/internal/runtime/config" && method == http.MethodGet:
+		configRuntime, ok := runtime.(ConfigRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "CONFIG_UNSUPPORTED", Message: "runtime does not support configuration", Category: "not_found"}
+		}
+		return map[string]any(configRuntime.RuntimeConfig()), nil
 	case path == "/internal/runtime/evolve" && method == http.MethodPost:
 		args, err := decodeRuntimeEvolutionRequest(request.Body)
 		if err != nil {

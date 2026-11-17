@@ -57,6 +57,8 @@ func Serve(ctx context.Context, server *mcp.Server, runtime runtimeapi.Runtime, 
 	registerMCPOAuthCallback(mux, runtime)
 	mux.HandleFunc("/context", agentDockContextHandler(server, cfg, oauthStore))
 	registerRuntimeAPI(mux, runtime, cfg, oauthStore)
+	// 只读 Web 控制台：静态页 + loopback-only API 代理（内部注入 token）。
+	registerDashboard(mux, cfg, runtimeAPIHandler(runtime, cfg, oauthStore))
 	mux.HandleFunc("/mcp", mcpEndpointHandler(server, cfg, oauthStore))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)

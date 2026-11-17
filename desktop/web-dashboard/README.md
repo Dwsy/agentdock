@@ -1,0 +1,79 @@
+# AgentDock 远程控制台
+
+用你 GitHub 最新收藏的组件库 [Solid Glass](https://github.com/deeplethe/solid-glass)（React 19 + Tailwind 4 的玻璃质感设计系统）搭的产品级只读监控台，远程查看本机 AgentDock 的运行状态。
+
+## 页面
+
+| 页面 | 内容 |
+|---|---|
+| 概览 | 服务/任务/调用/告警关键指标、14 天 Token 趋势、工具排行、进程健康、能力开关 |
+| 实时事件 | SSE 订阅 AgentDock 事件总线，实时显示调用/任务/发布物事件，支持筛选、暂停、清空 |
+| 调用追踪 | 左右布局：左侧按工具分类 chips + 成功/失败筛选 + 搜索，右侧单条详情；详情走 `/traces/detail` 接口，命令类展示完整命令/工作目录/stdout/stderr，结果里的 markdown 可切换渲染 |
+| 文件变更 | 左右布局：左侧目录树（按路径层级）、右侧详情；diff 支持「左右对比 / 统一视图」切换，`.md` 文件额外提供 Markdown 渲染标签 |
+| 任务与告警 | 点任务卡片进入独立详情页：目标 / 步骤 / 完成条件 / 事件时间线 / 摘要 + 关联调用与文件变更（diff 可展开）；列表按状态筛选，另附阻塞告警 |
+| 能力目录 | 工具/规则/已装 Skill/共享 Skill 四个标签页，支持搜索 |
+
+顶部每 10 秒自动刷新一次快照，实时事件走独立 SSE 长连接。可手动刷新、切深浅色——主题选择记在 localStorage，刷新后保持，首次访问跟随系统偏好（页面脚本在首屏渲染前定好主题，无闪烁）。全程只读，不做任何写操作。
+
+## 数据来源
+
+统一走 `/dashboard/api/*`（而非直连 `/internal/runtime/*`），用到 status / overview / analytics / alerts / tasks / traces / file-changes / skills / plugins / mcp / catalog / events 共 12 个接口。
+
+- **生产**：AgentDock Go core 用 go:embed 把本目录 `dist/` 打进二进制，托盘菜单打开 `http://127.0.0.1:<port>/dashboard/`。`/dashboard/api/*` 由 core 做 loopback-only 反向代理，内部注入 token 转发到 `/internal/runtime/*`。
+- **开发**：Vite dev server 的中间件把 `/dashboard/api/*` 代理到本机 core，token 从 `agentdock.env` 读取后注入。
+
+## 运行
+
+```bash
+pnpm install
+pnpm dev          # http://localhost:5173（开发模式，需本机 core 在跑）
+```
+
+生产构建（由 `packaging/macos/build-dashboard.sh` 或 `make dashboard` 调用）：
+
+```bash
+pnpm build        # tsc + vite build，产出 dist/，base 为 /dashboard/
+```
+
+`dist/` 会被 `build-dashboard.sh` 同步到 `internal/httpx/dashboard/dist/`，再由 Go 的 `go:embed` 打进 core 二进制。该 embed 产物随仓库提交，任何 `go build ./cmd/agentdock` 都自带完整控制台；前端改动后跑一次 `make dashboard` 刷新即可（build-local.sh 和 release workflow 已自动串联）。
+
+## 渲染实现
+
+界面渲染参考 agentdock 自带的 macOS Swift 版（`desktop/macos/AgentDockApp/Sources/TraceRenderView.swift` / `TraceResultCards.swift`）的信息架构：完整命令分区、任务卡的目标/步骤/事件分区、轻量语法高亮。Web 版用 React 组件实现：
+
+- `DiffViewer` — unified diff 解析成结构化行，左右两列按 del/add 块对齐，可切统一视图
+- `MarkdownView` — react-markdown + remark-gfm + rehype-highlight，渲染 `.md` 变更后的正文
+- `CommandBlock` — 命令原文 + 工作目录 + session + stdout/stderr，带行号和 shell 高亮
+- `TraceDetail` — 走详情接口拉单条调用全文，与左侧列表联动
+- `FileTree` — 从变更路径构建层级树，支持展开折叠
+- `TaskDetailPage` — 任务详情页，目标/步骤/条件/事件时间线 + 关联调用与文件变更
+
+Markdown 渲染器通过 `React.lazy` 按需加载：首屏主包 ~298KB（gzip 88KB），markdown 块 349KB 只在打开相关页面时才拉取。
+
+## 健壮性
+
+AgentDock 在跑大任务时 runtime API 会间歇性变慢甚至超时。控制台做了容错：
+
+- 代理层和前端请求都有超时（30s / 25s），不会无限挂起
+- 概览数据用 `Promise.allSettled` 逐接口拉取，个别失败只显示局部提示，保留上次成功的数据，不再整页卡死
+- 任务详情用列表项做兜底，详情/活动接口失败时仍能渲染主体，并可一键重试
+- 修复了 SSE 流中途断开时代理重复写响应头导致 dev server 崩溃的问题
+
+## 鉴权与安全
+
+```
+浏览器 → /dashboard/api/* → (core loopback-only 代理，注入 token) → /internal/runtime/*
+```
+
+- 生产由 Go core 的 `internal/httpx/dashboard.go` 做代理；开发由 Vite 中间件做同形代理。
+- `/dashboard/api/*` 只接受本机直连请求（复用 core 的 `isDirectLoopbackRequest`，拒绝跨域代理头），token 在服务端注入，**不写进前端代码或构建产物**。
+- 直连 `/internal/runtime/*` 仍需 Bearer，鉴权边界没有被削弱。
+- AgentDock 的 network capture 会把 `Authorization` 等请求头原文记进记录里。代理层对所有非 SSE 响应 JSON 做递归脱敏（Authorization/Cookie/Set-Cookie/token/password 等），避免凭据暴露到浏览器。
+- SSE 事件流是摘要投影，不含参数或路径，代理层流式透传。
+- 静态页带 CSP（default-src 'self'）、nosniff、no-referrer；SPA 路由回退 index.html；不用 `http.FileServer` 以避免 `/dashboard/` 的 301 跳转循环。
+
+开发代理可用环境变量覆盖：`AGENTDOCK_ENV_FILE` / `AGENTDOCK_HOST` / `AGENTDOCK_PORT` / `AGENTDOCK_AUTH_TOKEN`。生产 token 直接用 core 的 `AGENTDOCK_AUTH_TOKEN`。
+
+## 远程访问
+
+dev server 监听 `0.0.0.0:5173`，同网段可通过 `http://<本机IP>:5173` 访问（已有多网卡地址显示在启动日志里）。生产环境建议在前面套一层反向代理 + HTTPS + 访问控制，不要裸奔到公网。

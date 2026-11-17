@@ -7,10 +7,11 @@ AgentDock 通过 MCP 把 ChatGPT / Claude / Codex 接到真实设备。改动前
 ```text
 cmd/            agentdock(核心) · arbiter(更新仲裁) · shim/tray(Windows) · wsl-helper
 internal/       app(ToolSpec 注册表 + Runtime) · tool/<capability> · mcp · httpx · auth
-                acp · plugin · skill · taskstate · evolution · nexusbridge
-                installer · updateengine · selfupdate · desktopruntime
+                httpx/dashboard(只读 Web 控制台静态页与 API 代理) · acp · plugin · skill
+                taskstate · evolution · nexusbridge · installer · updateengine · selfupdate
 core-skills/    随包分发的内置 Skill
 desktop/        macOS(SwiftUI+AppKit) · Windows(WinUI3/.NET8 + Go tray)
+                web-dashboard(React19+Tailwind4，只读控制台前端源码)
 scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · governance/ 脚本清单
 ```
 
@@ -24,6 +25,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 | --- | --- |
 | `make check` | CI 等价：gofmt 校验 → 单测 → 脚本治理 → vet → build |
 | `make build` | 产出 `bin/agentdock`，带 version/commit ldflags |
+| `make dashboard` | pnpm 构建只读 Web 仪表盘并把 dist 同步到 go:embed 目录；前端改动后必跑 |
 | `make run` | 本地起服务，默认 `127.0.0.1:8765` |
 | `go test ./internal/app -run TestName` | 单包定位调试 |
 | `make race` | `go test -race ./...`，CI 在 Linux 执行 |
@@ -35,7 +37,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 
 ### macOS 本地构建
 
-`packaging/macos/build-local.sh` 是本地改完桌面端后的唯一推荐入口（CI 仍走 `build-app.sh` + Release 载荷）：i18n 与 `swiftc -typecheck` 先失败 → 编译 Core 与 core-skills 载荷 → `build-app.sh` 产出 `.app/.zip/.dmg` → 安装到 `/Applications` → 加载 Core → 启动 App。用 `--build-only` 只出包不安装。
+`packaging/macos/build-local.sh` 是本地改完桌面端后的唯一推荐入口（CI 仍走 `build-app.sh` + Release 载荷）：i18n 与 `swiftc -typecheck` 先失败 → `build-dashboard.sh` 构建 Web 仪表盘 → 编译 Core 与 core-skills 载荷 → `build-app.sh` 产出 `.app/.zip/.dmg` → 安装到 `/Applications` → 加载 Core → 启动 App。用 `--build-only` 只出包不安装。仪表盘 dist 随仓库提交，任何 `go build` 都自带控制台；不装 Node 时设 `AGENTDOCK_SKIP_DASHBOARD=1` 用已提交的产物。
 
 只有 Command Line Tools、没有完整 Xcode 时：
 
@@ -57,6 +59,18 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 - 全文旁路：仅当预览会被截断时，`Record` 同步把脱敏全文（单侧上限 256 KiB，超限打 `full_truncated`）写进 `<trace root>/full/YYYY-MM-DD.jsonl`，保留期与清理跟预览同步。`GET /internal/runtime/traces/detail?id=<id>&full=1` 按需回读；副本缺失时 `full_available=false`，UI 降级为预览。全文不进内存环、不进 summary、不进 CSV 导出。
 - 写入：`Arguments`/`Result`/`command.command`/`stdout`/`stderr` 统一在 `observability.TraceStore.Record` 处先脱敏（16 KiB 扫描窗口）再截断到 8 KiB，超限打 `truncated` 标记。不要在采集侧另开截断点。
 - 改 trace 字段必须同步三处：Swift 解码（`TraceRenderView.swift` / `ServiceController.swift`）、CSV 导出列、`runtime_trace*_test.go` 的字段断言。
+
+### 只读 Web 仪表盘契约
+
+- 前端源码在 `desktop/web-dashboard`（pnpm + React 19 + Tailwind 4 + Solid Glass），只读，不做任何写操作。`make dashboard` 产出 dist 并同步到 `internal/httpx/dashboard/dist`，由 `go:embed` 打进 Core；该 dist 随仓库提交，所以 `go build ./cmd/agentdock` 无需 Node 也自带完整控制台。
+- 浏览器访问 `http://127.0.0.1:<port>/dashboard/`（托盘右键菜单「打开 Web 仪表盘」，端口读 `agentdock.env` 的 `AGENTDOCK_PORT`，缺省 8765）。所有数据请求走同形前缀 `/dashboard/api/*`，**不要**让前端直连 `/internal/runtime/*`：
+  - 生产由 `internal/httpx/dashboard.go` 的 loopback-only 代理把 `/dashboard/api/*` 重写成 `/internal/runtime/*`，服务端注入 `AGENTDOCK_AUTH_TOKEN`；开发由 `vite.config.ts` 的同形中间件代理。token 绝不进前端代码或 dist。
+  - 代理对所有非 SSE 响应 JSON 递归脱敏（Authorization/Cookie/token/password 等）；SSE 事件流是摘要投影，流式透传不清头。直连 `/internal/runtime/*` 的 Bearer/OAuth 鉴权边界不变。
+  - 静态页用 `ServeContent` 直出并做 SPA 回退 index.html；**不要用 `http.FileServer`**（会把 `/index.html` 301 到 `./`，在 `/dashboard/` 前缀下形成跳转循环）。CSP 为 `default-src 'self'`。
+- Vite `base` 由 `command` 决定：build 用 `/dashboard/`，dev 用 `/`。改前端路由或静态资源路径时，务必同时验证 dev（`:5173`）和 embedded（`:8765/dashboard/`）两种模式。
+- 数据接口约定：`/dashboard/api` 映射到 `/internal/runtime`，因此前端 `api.ts` 的 path 与 runtime 路由一一对应。新增 runtime 接口后，仪表盘要接入就在 `api.ts` 加类型与方法，不要另开后端通道。
+- 配置页：`GET/POST /internal/runtime/config`、`POST /internal/runtime/config/restart`（`ConfigRuntime` 可选能力，`internal/app/runtime_config.go`）。只暴露 `editableConfigKeys` 白名单（host/port/log_level/mcp_apps_mode/browser*/acp*/trace*/network_capture*），token/OAuth/设备身份**绝不回显或可改**；`init()` 会断言白名单不含敏感 key。写入用 `envstore.ParseFile` + `atomicfile.Write(0600)` 保留未知 key；校验失败返回 400 `CONFIG_INVALID`。重启走 `agentdock service restart --runtime-root`，只有 launchd/SMAppService 管理的实例可重启，手动启动的实例返回明确错误而不是杀掉后拉不回来。
+- 前端改动后必跑 `make dashboard` 重生成并提交 embed dist，否则发布出去的 Core 仍是旧页面。
 
 ## Coding Style & Naming Conventions
 

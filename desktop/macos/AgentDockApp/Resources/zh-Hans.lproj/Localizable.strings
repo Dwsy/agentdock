@@ -597,6 +597,7 @@
 
 "Exit AgentDock" = "退出 AgentDock";
 "Show main window" = "显示主窗口";
+"Open Web Dashboard" = "打开 Web 仪表盘";
 "Tray Start" = "启动 AgentDock";
 "Tray Restart" = "重启 AgentDock";
 "Tray Check for updates" = "检查更新";

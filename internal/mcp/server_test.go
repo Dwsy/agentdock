@@ -1,7 +1,10 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -355,4 +358,162 @@ func toolDescriptorsForConfig(t *testing.T, names []string, cfg config.Config) [
 		definitions = append(definitions, definition)
 	}
 	return toolDescriptors(definitions, config.MCPAppsModeFull)
+}
+
+func TestBuildCallToolResultMatchesEnvelopeWireJSON(t *testing.T) {
+	pngSample := base64.StdEncoding.EncodeToString([]byte("\x89PNG\r\n\x1a\nfake-image-payload"))
+	cases := []struct {
+		name    string
+		tool    string
+		result  app.Result
+		callErr error
+		wantErr bool
+	}{
+		{
+			name:   "standard success",
+			tool:   "read_file",
+			result: app.Result{"ok": true, "path": "main.go", "content": "package main\n", "line_count": 1},
+		},
+		{
+			name:    "permission error",
+			tool:    "exec_command",
+			callErr: &app.ToolError{Code: "PERMISSION_REQUIRED", Category: "permission", Message: "blocked", Details: map[string]any{"permission": "exec"}},
+		},
+		{
+			name:   "view_image standard base64",
+			tool:   "view_image",
+			result: app.Result{"ok": true, "source": map[string]any{"type": "file"}, "_mcp_image_base64": pngSample, "_mcp_image_mime_type": "image/png"},
+		},
+		{
+			name:    "view_image non-canonical base64 fallback",
+			tool:    "view_image",
+			result:  app.Result{"ok": true, "_mcp_image_base64": "abc123", "_mcp_image_mime_type": "image/png"},
+			wantErr: true,
+		},
+		{
+			name: "mcp_tool_call dynamic content",
+			tool: "mcp_tool_call",
+			result: app.Result{
+				"ok":   true,
+				"name": "figma:get_screenshot",
+				"result": map[string]any{
+					"content": []any{
+						map[string]any{"type": "text", "text": "done"},
+						map[string]any{"type": "image", "data": pngSample, "mimeType": "image/png"},
+					},
+					"structuredContent": map[string]any{"node_id": "1:2"},
+				},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildCallToolResult(tc.tool, tc.result, tc.callErr)
+			want, wantErr := unmarshalEnvelopeResult(toolEnvelope(tc.tool, tc.result, tc.callErr))
+			if tc.wantErr {
+				if err == nil || wantErr == nil {
+					t.Fatalf("expected error from both paths: got=%v want=%v", err, wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildCallToolResult() error = %v", err)
+			}
+			if wantErr != nil {
+				t.Fatalf("unmarshalEnvelopeResult() error = %v", wantErr)
+			}
+			gotJSON, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("json.Marshal(got) error = %v", err)
+			}
+			wantJSON, err := json.Marshal(want)
+			if err != nil {
+				t.Fatalf("json.Marshal(want) error = %v", err)
+			}
+			if !bytes.Equal(gotJSON, wantJSON) {
+				t.Fatalf("wire JSON mismatch:\ngot:  %s\nwant: %s", gotJSON, wantJSON)
+			}
+		})
+	}
+}
+
+func TestServerCachesDescriptorsAndContractHash(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Config{AgentDockDefaultDir: root, AgentDockHome: filepath.Join(root, ".agentdock")}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	runtime, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatalf("NewRuntime() error = %v", err)
+	}
+	defer runtime.Close()
+
+	server := NewServer(runtime, cfg)
+	first := server.ToolDescriptors()
+	if len(first) == 0 {
+		t.Fatal("expected non-empty descriptors")
+	}
+	hash1 := server.ToolContractHash()
+	if !strings.HasPrefix(hash1, "sha256:") {
+		t.Fatalf("unexpected contract hash %q", hash1)
+	}
+	// Mutating returned slice must not corrupt cached descriptors.
+	first[0] = nil
+	if server.ToolDescriptors()[0] == nil || server.ToolContractHash() != hash1 {
+		t.Fatal("mutating returned descriptor slice affected server cache")
+	}
+}
+
+func BenchmarkCallToolResultLargeText(b *testing.B) {
+	res := app.Result{
+		"ok":         true,
+		"path":       "large.log",
+		"content":    strings.Repeat("0123456789abcdef", 64<<10), // 1 MiB
+		"line_count": 1000,
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := buildCallToolResult("read_file", res, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCallToolResultViewImage(b *testing.B) {
+	encoded := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 1<<20))
+	res := app.Result{
+		"ok":                   true,
+		"_mcp_image_base64":    encoded,
+		"_mcp_image_mime_type": "image/png",
+		"image_width":          1024,
+		"image_height":         768,
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := buildCallToolResult("view_image", res, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkToolContractHash(b *testing.B) {
+	root := b.TempDir()
+	cfg := config.Config{AgentDockDefaultDir: root, AgentDockHome: filepath.Join(root, ".agentdock")}
+	if err := cfg.Normalize(); err != nil {
+		b.Fatal(err)
+	}
+	runtime, err := app.NewRuntime(cfg)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer runtime.Close()
+	server := NewServer(runtime, cfg)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if server.ToolContractHash() == "" {
+			b.Fatal("empty hash")
+		}
+	}
 }

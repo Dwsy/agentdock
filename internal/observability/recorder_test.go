@@ -373,3 +373,23 @@ func TestRecorderPersistsAndRestoresAcrossRestart(t *testing.T) {
 		t.Fatalf("restored recent calls = %#v, want empty", snapshot.RecentCalls)
 	}
 }
+
+func TestRecorderSnapshotProcessMetricsConsistent(t *testing.T) {
+	recorder := NewRecorder(10, "")
+	// Ensure some live heap objects exist so HeapAllocBytes is positive.
+	sink := make([]byte, 4096)
+	sink[0] = 1
+	snapshot := recorder.Snapshot()
+	if sink[0] != 1 {
+		t.Fatal("unreachable")
+	}
+	if snapshot.Process.HeapAllocBytes == 0 {
+		t.Fatalf("HeapAllocBytes = 0, want > 0")
+	}
+	if snapshot.Process.HeapInuseBytes < snapshot.Process.HeapAllocBytes {
+		t.Fatalf("HeapInuseBytes (%d) < HeapAllocBytes (%d)", snapshot.Process.HeapInuseBytes, snapshot.Process.HeapAllocBytes)
+	}
+	if snapshot.Process.HeapSysBytes < snapshot.Process.HeapInuseBytes {
+		t.Fatalf("HeapSysBytes (%d) < HeapInuseBytes (%d)", snapshot.Process.HeapSysBytes, snapshot.Process.HeapInuseBytes)
+	}
+}

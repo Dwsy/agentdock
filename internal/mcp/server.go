@@ -3,12 +3,14 @@ package mcp
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	sdkjsonrpc "github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -20,10 +22,12 @@ import (
 )
 
 type Server struct {
-	runtime     *app.Runtime
-	cfg         config.Config
-	sdk         *mcpsdk.Server
-	httpHandler http.Handler
+	runtime      *app.Runtime
+	cfg          config.Config
+	sdk          *mcpsdk.Server
+	httpHandler  http.Handler
+	descriptors  []map[string]any
+	contractHash string
 }
 
 func NewServer(runtime *app.Runtime, cfg config.Config) *Server {
@@ -38,8 +42,13 @@ func NewServer(runtime *app.Runtime, cfg config.Config) *Server {
 	)
 	if runtime != nil {
 		server.registerAppResources()
-		for _, definition := range runtime.ToolDefinitions() {
+		definitions := runtime.ToolDefinitions()
+		for _, definition := range definitions {
 			server.registerTool(definition)
+		}
+		server.descriptors = toolDescriptors(definitions, cfg.MCPAppsMode)
+		if encoded, err := json.Marshal(server.descriptors); err == nil {
+			server.contractHash = fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
 		}
 	}
 	server.httpHandler = mcpsdk.NewStreamableHTTPHandler(
@@ -79,18 +88,17 @@ func (s *Server) ToolNames() []string {
 }
 
 func (s *Server) ToolContractHash() string {
-	encoded, err := json.Marshal(s.ToolDescriptors())
-	if err != nil {
+	if s == nil || s.runtime == nil {
 		return ""
 	}
-	return fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
+	return s.contractHash
 }
 
 func (s *Server) ToolDescriptors() []map[string]any {
 	if s == nil || s.runtime == nil {
 		return nil
 	}
-	return toolDescriptors(s.runtime.ToolDefinitions(), s.cfg.MCPAppsMode)
+	return slices.Clone(s.descriptors)
 }
 
 func (s *Server) Invoke(ctx context.Context, name string, arguments map[string]any) (map[string]any, error) {
@@ -141,11 +149,12 @@ func (s *Server) registerTool(def ToolDefinition) {
 	// 使用低层 AddTool：AgentDock 的参数校验、权限错误和结构化输出都由
 	// Runtime 统一处理，SDK 只负责协议、会话与传输语义。
 	s.sdk.AddTool(tool, func(ctx context.Context, request *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
-		return s.callTool(ctx, def.Name, request)
+		return s.callTool(ctx, def, request)
 	})
 }
 
-func (s *Server) callTool(ctx context.Context, name string, request *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+func (s *Server) callTool(ctx context.Context, def ToolDefinition, request *mcpsdk.CallToolRequest) (*mcpsdk.CallToolResult, error) {
+	name := def.Name
 	arguments := map[string]any{}
 	if request != nil && request.Params != nil && len(request.Params.Arguments) > 0 && string(request.Params.Arguments) != "null" {
 		if err := json.Unmarshal(request.Params.Arguments, &arguments); err != nil {
@@ -157,34 +166,28 @@ func (s *Server) callTool(ctx context.Context, name string, request *mcpsdk.Call
 	ctx = observability.WithSource(ctx, observability.SourceMCP)
 	result, err := s.runtime.Call(ctx, name, arguments)
 
-	encoded, encodeErr := json.Marshal(toolEnvelope(name, result, err))
-	if encodeErr != nil {
-		return nil, fmt.Errorf("encode MCP tool result: %w", encodeErr)
+	response, buildErr := buildCallToolResult(name, result, err)
+	if buildErr != nil {
+		return nil, buildErr
 	}
-	var response mcpsdk.CallToolResult
-	if decodeErr := json.Unmarshal(encoded, &response); decodeErr != nil {
-		return nil, fmt.Errorf("decode MCP tool result: %w", decodeErr)
+	if meta := toolResultMetadata(def, arguments, s.cfg.MCPAppsMode); len(meta) > 0 {
+		response.Meta = meta
 	}
-	if def, ok := s.runtime.ToolDefinition(name); ok {
-		if meta := toolResultMetadata(def, arguments, s.cfg.MCPAppsMode); len(meta) > 0 {
-			response.Meta = meta
-		}
-		if name == "view_image" && !response.IsError {
-			meta := toolMetadata(def, s.cfg.MCPAppsMode)
-			if meta["ui"] != nil {
-				for _, content := range response.Content {
-					if _, ok := content.(*mcpsdk.ImageContent); ok {
-						// 只有当前模式实际启用 Image 卡片时才追加宿主确认提示；
-						// 原图字节和结构化协议始终保持不变。
-						response.Meta = mcpsdk.Meta(meta)
-						response.Content = append(response.Content, &mcpsdk.TextContent{Text: mcpapps.ImageResultText})
-						break
-					}
+	if name == "view_image" && !response.IsError {
+		meta := toolMetadata(def, s.cfg.MCPAppsMode)
+		if meta["ui"] != nil {
+			for _, content := range response.Content {
+				if _, ok := content.(*mcpsdk.ImageContent); ok {
+					// 只有当前模式实际启用 Image 卡片时才追加宿主确认提示；
+					// 原图字节和结构化协议始终保持不变。
+					response.Meta = mcpsdk.Meta(meta)
+					response.Content = append(response.Content, &mcpsdk.TextContent{Text: mcpapps.ImageResultText})
+					break
 				}
 			}
 		}
 	}
-	return &response, nil
+	return response, nil
 }
 
 func toolMetadata(def ToolDefinition, mode config.MCPAppsMode) map[string]any {
@@ -277,23 +280,79 @@ func toolDescriptors(definitions []ToolDefinition, mode config.MCPAppsMode) []ma
 	return descriptors
 }
 
-func toolEnvelope(name string, structured any, err error) map[string]any {
-	if err != nil {
-		payload := map[string]any{"tool": name, "error": err.Error()}
-		var toolErr *app.ToolError
-		if errors.As(err, &toolErr) {
-			payload["code"] = toolErr.Code
-			payload["category"] = toolErr.Category
-			payload["retryable"] = toolErr.Retryable
-			payload["details"] = toolErr.Details
-			if toolErr.Code == "PERMISSION_REQUIRED" {
-				payload["permission_request"] = map[string]any{
-					"tool_name":  name,
-					"permission": toolErr.Details["permission"],
-					"status":     "required",
-				}
+func buildCallToolResult(name string, result app.Result, callErr error) (*mcpsdk.CallToolResult, error) {
+	if callErr != nil {
+		payload := toolErrorPayload(name, callErr)
+		return &mcpsdk.CallToolResult{
+			IsError:           true,
+			StructuredContent: payload,
+			Content:           []mcpsdk.Content{&mcpsdk.TextContent{Text: pretty(payload)}},
+		}, nil
+	}
+	if name == "view_image" && result != nil {
+		if data, _ := result["_mcp_image_base64"].(string); data != "" {
+			rawBytes, decodeErr := base64.StdEncoding.DecodeString(data)
+			if decodeErr != nil {
+				// Non-canonical base64 falls back to the SDK wire decoder to keep edge behavior identical.
+				return unmarshalEnvelopeResult(toolEnvelope(name, result, nil))
+			}
+			mimeType, _ := result["_mcp_image_mime_type"].(string)
+			clean := cloneWithoutInternalImage(result)
+			return &mcpsdk.CallToolResult{
+				IsError:           false,
+				StructuredContent: clean,
+				Content:           []mcpsdk.Content{&mcpsdk.ImageContent{Data: rawBytes, MIMEType: mimeType}},
+			}, nil
+		}
+	}
+	if name == "mcp_tool_call" {
+		return unmarshalEnvelopeResult(dynamicMCPToolEnvelope(result))
+	}
+	var structured any
+	if result != nil {
+		structured = map[string]any(result)
+	}
+	return &mcpsdk.CallToolResult{
+		IsError:           false,
+		StructuredContent: structured,
+		Content:           []mcpsdk.Content{&mcpsdk.TextContent{Text: pretty(structured)}},
+	}, nil
+}
+
+func unmarshalEnvelopeResult(envelope map[string]any) (*mcpsdk.CallToolResult, error) {
+	encoded, encodeErr := json.Marshal(envelope)
+	if encodeErr != nil {
+		return nil, fmt.Errorf("encode MCP tool result: %w", encodeErr)
+	}
+	var response mcpsdk.CallToolResult
+	if decodeErr := json.Unmarshal(encoded, &response); decodeErr != nil {
+		return nil, fmt.Errorf("decode MCP tool result: %w", decodeErr)
+	}
+	return &response, nil
+}
+
+func toolErrorPayload(name string, err error) map[string]any {
+	payload := map[string]any{"tool": name, "error": err.Error()}
+	var toolErr *app.ToolError
+	if errors.As(err, &toolErr) {
+		payload["code"] = toolErr.Code
+		payload["category"] = toolErr.Category
+		payload["retryable"] = toolErr.Retryable
+		payload["details"] = toolErr.Details
+		if toolErr.Code == "PERMISSION_REQUIRED" {
+			payload["permission_request"] = map[string]any{
+				"tool_name":  name,
+				"permission": toolErr.Details["permission"],
+				"status":     "required",
 			}
 		}
+	}
+	return payload
+}
+
+func toolEnvelope(name string, structured any, err error) map[string]any {
+	if err != nil {
+		payload := toolErrorPayload(name, err)
 		return map[string]any{"isError": true, "structuredContent": payload, "content": []map[string]any{{"type": "text", "text": pretty(payload)}}}
 	}
 	if name == "view_image" {

@@ -157,14 +157,6 @@ func (c *CommandTrace) trim() bool {
 }
 
 // searchFields 让结构化命令内容参与自由文本搜索：正文一旦从 Arguments/Result
-// 移到 Command，旧的子串搜索语义必须跟着覆盖新字段。
-func (c *CommandTrace) searchFields() []string {
-	if c == nil {
-		return nil
-	}
-	return []string{c.Summary, c.Command, c.Workdir, c.Runtime, c.SessionID, c.Status, c.Action, c.SkillRef, c.Stdout, c.Stderr}
-}
-
 func traceCommandSummary(command, action string) string {
 	line := command
 	if index := strings.IndexAny(line, "\r\n"); index >= 0 {
@@ -174,11 +166,14 @@ func traceCommandSummary(command, action string) string {
 	if line == "" {
 		line = action
 	}
+	if len(line) <= traceSummaryChars {
+		return line
+	}
 	runes := []rune(line)
 	if len(runes) > traceSummaryChars {
 		return string(runes[:traceSummaryChars]) + "…"
 	}
-	return string(runes)
+	return line
 }
 
 // traceCommandSecretPattern 覆盖命令行常见的头部凭据写法。替换保留键名与分隔符，
@@ -186,7 +181,14 @@ func traceCommandSummary(command, action string) string {
 var traceCommandSecretPattern = regexp.MustCompile(`(?i)((?:authorization|x-api-key|api-key)\s*:\s*)(?:bearer\s+)?[^\s"']+`)
 
 func redactCommandPayload(value string) string {
-	return traceCommandSecretPattern.ReplaceAllString(redactTracePayload(value), "$1***")
+	out := redactTracePayload(value)
+	if strings.IndexByte(out, ':') < 0 {
+		return out
+	}
+	if !containsFold(out, "authorization") && !containsFold(out, "api-key") {
+		return out
+	}
+	return traceCommandSecretPattern.ReplaceAllString(out, "$1***")
 }
 
 // traceCut 在 rune 边界上截断，避免把一个多字节字符切成非法 UTF-8。

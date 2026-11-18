@@ -170,3 +170,22 @@ func TestCaptureHeadersBoundsTotalBytes(t *testing.T) {
 		t.Fatalf("CaptureHeaders = %+v, want both X-Tag values in order", got)
 	}
 }
+
+func TestCaptureStoreRingEvictionAndBinarySearch(t *testing.T) {
+	const capMax = 4
+	store := NewCaptureStore(true, capMax)
+	for i := 1; i <= 15; i++ {
+		store.Record(CaptureRecord{Method: http.MethodPost, Path: "/v1/items", Query: strings.Repeat("q", i)})
+	}
+	if _, ok := store.RecordByID(11); ok {
+		t.Fatal("evicted capture record ID 11 should not exist")
+	}
+	rec12, ok := store.RecordByID(12)
+	if !ok || len(rec12.Query) != 12 {
+		t.Fatalf("RecordByID(12) = (%+v, %v)", rec12, ok)
+	}
+	rec15, ok := store.RecordByID(15)
+	if !ok || len(rec15.Query) != 15 {
+		t.Fatalf("RecordByID(15) = (%+v, %v)", rec15, ok)
+	}
+}

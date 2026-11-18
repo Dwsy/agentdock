@@ -57,11 +57,25 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			span.SetStatus(codes.Error, errorCode)
 		}
 	}
+	tracesEnabled := r != nil && r.traces != nil
+	argsJSON := ""
+	if tracesEnabled && args != nil {
+		argsJSON = tracePayload(args)
+	}
 	recordID := uint64(0)
 	if r != nil && r.observer != nil {
 		// 代码行数变动不依赖 trace 开关：分析页要在 trace 关闭时也能统计。
 		insertions, deletions := traceCodeChangeCounts(toolName, result, success)
-		inputTokens, outputTokens := toolTokenCounts(args, result)
+		inputTokens := 0
+		if tracesEnabled {
+			inputTokens = observability.CountTextTokens(argsJSON)
+		} else if args != nil {
+			inputTokens = observability.CountJSONTokens(args)
+		}
+		outputTokens := 0
+		if result != nil {
+			outputTokens = observability.CountJSONTokens(*result)
+		}
 		recordID = r.observer.EndTool(observability.CallMeta{
 			Tool:          toolName,
 			Source:        source,
@@ -95,7 +109,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 		})
 	}
 	// trace 是独立开关：默认关闭时 r.traces 为 nil，不产生任何序列化开销。
-	if r != nil && r.traces != nil {
+	if tracesEnabled {
 		var resultMap map[string]any
 		if result != nil {
 			resultMap = *result
@@ -114,7 +128,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			ErrorCode:            errorCode,
 			ErrorCategory:        errorCategory,
 			TraceID:              traceID,
-			Arguments:            tracePayload(args),
+			Arguments:            argsJSON,
 			Result:               traceResultText(result, command),
 			Error:                traceErrorText(callErr),
 			Command:              command,
@@ -124,13 +138,14 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 		})
 	}
 
-	attributes := []any{
+	attributes := make([]any, 0, 16)
+	attributes = append(attributes,
 		"tool", toolName,
 		"source", string(source),
 		"user_agent", userAgent,
-		"duration_ms", float64(duration) / float64(time.Millisecond),
+		"duration_ms", float64(duration)/float64(time.Millisecond),
 		"ok", success,
-	}
+	)
 	if taskID != "" {
 		attributes = append(attributes, "task_id", taskID)
 	}
@@ -148,20 +163,6 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	if recovered != nil {
 		panic(recovered)
 	}
-}
-
-// toolTokenCounts 统计一次调用入参与结果的 token 数。结果为空（调用失败、
-// 工具未返回）时输出计 0；这里只累加计数，不保存任何正文。
-func toolTokenCounts(args map[string]any, result *Result) (int, int) {
-	input := 0
-	if args != nil {
-		input = observability.CountJSONTokens(args)
-	}
-	output := 0
-	if result != nil {
-		output = observability.CountJSONTokens(*result)
-	}
-	return input, output
 }
 
 // tracePayload 只负责把 Payload 变成文本；截断与脱敏由 TraceStore 统一完成，

@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -95,8 +97,32 @@ func (svc *Service) SearchText(ctx context.Context, request SearchRequest) (Resu
 	return addFileRuntimeResult(result, selection), err
 }
 
+var rgLookupCache struct {
+	mu      sync.Mutex
+	pathEnv string
+	rgPath  string
+	err     error
+	cached  bool
+}
+
+func lookupRG() (string, error) {
+	// Key cache on PATH so tests calling t.Setenv("PATH", ...) bypass stale entries.
+	pathEnv := os.Getenv("PATH")
+	rgLookupCache.mu.Lock()
+	defer rgLookupCache.mu.Unlock()
+	if rgLookupCache.cached && rgLookupCache.pathEnv == pathEnv {
+		return rgLookupCache.rgPath, rgLookupCache.err
+	}
+	rgPath, err := exec.LookPath("rg")
+	rgLookupCache.pathEnv = pathEnv
+	rgLookupCache.rgPath = rgPath
+	rgLookupCache.err = err
+	rgLookupCache.cached = true
+	return rgPath, err
+}
+
 func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts SearchOptions) (Result, bool, error) {
-	rg, err := exec.LookPath("rg")
+	rg, err := lookupRG()
 	if err != nil {
 		return nil, false, nil
 	}
@@ -120,26 +146,44 @@ func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts Sea
 	}
 	args = append(args, "-e", opts.Query, "--", p.Abs)
 
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, rg, args...)
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer timeoutCancel()
+	streamCtx, streamCancel := context.WithCancel(timeoutCtx)
+	defer streamCancel()
+
+	cmd := exec.CommandContext(streamCtx, rg, args...)
 	cmd.Dir = p.Abs
 	info, err := os.Stat(p.Abs)
 	if err != nil {
-		return nil, true, kernelExecutionError(ctx, "rg", "text search", err)
+		return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", err)
 	}
 	if !info.IsDir() {
 		cmd.Dir = filepath.Dir(p.Abs)
 	}
 	processcontrol.Configure(cmd)
-	output, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", err)
+	}
+	matches, truncated, ok := svc.parseRGJSONReader(stdout, p.Abs, opts)
+	if truncated && ok {
+		// Terminate ripgrep as soon as MaxResults is reached so huge repos stop scanning early.
+		streamCancel()
+		_ = cmd.Wait()
+		if timeoutCtx.Err() != nil {
+			return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", timeoutCtx.Err())
+		}
+		return Result{"query": opts.Query, "engine": "rg", "matches": matches, "total_matches": len(matches), "truncated": true}, true, nil
+	}
+	if waitErr := cmd.Wait(); waitErr != nil {
+		if exit, isExit := waitErr.(*exec.ExitError); isExit && exit.ExitCode() == 1 && timeoutCtx.Err() == nil {
 			return Result{"query": opts.Query, "engine": "rg", "matches": []map[string]any{}, "total_matches": 0, "truncated": false}, true, nil
 		}
-		return nil, true, kernelExecutionError(ctx, "rg", "text search", err)
+		return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", waitErr)
 	}
-	matches, truncated, ok := svc.parseRGJSON(output, p.Abs, opts)
 	if !ok {
 		return nil, true, toolError("SEARCH_FAILED", "failed to parse ripgrep search results", "runtime")
 	}
@@ -147,12 +191,16 @@ func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts Sea
 }
 
 func (svc *Service) parseRGJSON(output []byte, searchRoot string, opts SearchOptions) ([]map[string]any, bool, bool) {
+	return svc.parseRGJSONReader(bytes.NewReader(output), searchRoot, opts)
+}
+
+func (svc *Service) parseRGJSONReader(reader io.Reader, searchRoot string, opts SearchOptions) ([]map[string]any, bool, bool) {
 	matches := make([]map[string]any, 0)
 	before := map[string][]string{}
 	var lastMatch map[string]any
 	var lastPath string
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		var event struct {
 			Type string `json:"type"`
@@ -261,6 +309,10 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 		}
 		re = compiled
 	}
+	var queryBytes []byte
+	if re == nil {
+		queryBytes = []byte(opts.Query)
+	}
 	matches := make([]map[string]any, 0)
 	ignore := loadIgnoreMatcher(svc.ws.Root())
 	entriesVisited := 0
@@ -356,6 +408,9 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 		bytesScanned += read.Size
 		data := read.Data
 		if looksBinary(data) || !utf8.Valid(data) {
+			return nil
+		}
+		if re == nil && !bytes.Contains(data, queryBytes) {
 			return nil
 		}
 		lines := strings.Split(string(data), "\n")

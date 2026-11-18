@@ -1,8 +1,10 @@
 package textutil
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -86,4 +88,32 @@ func FuzzSafeTruncateString(f *testing.F) {
 			t.Fatalf("result bytes=%d exceed max=%d", len(got.Text), maxBytes)
 		}
 	})
+}
+
+func TestSafeTruncateBytesEarlyInvalidUTF8LinearTime(t *testing.T) {
+	data := append([]byte("prefix-"), bytes.Repeat([]byte{'x'}, 128<<10)...)
+	data[7] = 0xff
+
+	started := time.Now()
+	got := SafeTruncateBytes(data, 64<<10)
+	elapsed := time.Since(started)
+
+	if got.Text != "prefix-" || !got.Truncated {
+		t.Fatalf("got = %q (truncated=%v), want %q", got.Text, got.Truncated, "prefix-")
+	}
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("SafeTruncateBytes took %v on invalid UTF-8, expected linear time", elapsed)
+	}
+}
+
+func BenchmarkSafeTruncateString4M(b *testing.B) {
+	sample := strings.Repeat("agentdock utf-8 truncation 中文 ", (4<<20)/len("agentdock utf-8 truncation 中文 "))
+	limit := 64 << 10
+	b.SetBytes(int64(limit))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if got := SafeTruncateString(sample, limit); !got.Truncated {
+			b.Fatal("expected truncation")
+		}
+	}
 }

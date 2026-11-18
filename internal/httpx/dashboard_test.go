@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -42,5 +43,71 @@ func TestSanitizeDashboardJSONNonJSON(t *testing.T) {
 	got := sanitizeDashboardJSON([]byte("oops Bearer abcdefghijklmnop text"))
 	if strings.Contains(string(got), "abcdefghijklmnop") {
 		t.Fatalf("non-JSON fallback failed: %s", got)
+	}
+}
+
+func TestSanitizeDashboardJSONEdgeCasesAndFastPath(t *testing.T) {
+	cleanAnalytics := []byte(`{"total_calls":128,"total_input_tokens":45000,"daily_tokens":[{"date":"2026-11-18","input":1200}],"status":"ok"}`)
+	gotClean := sanitizeDashboardJSON(cleanAnalytics)
+	if !bytes.Equal(gotClean, cleanAnalytics) {
+		t.Fatalf("clean payload altered: %s", gotClean)
+	}
+
+	cases := []struct {
+		name     string
+		input    string
+		leaked   string
+		retained string
+	}{
+		{
+			name:     "unicode escaped key",
+			input:    `{"\u0074oken":"secret-unicode-value","ok":true}`,
+			leaked:   "secret-unicode-value",
+			retained: `"ok":true`,
+		},
+		{
+			name:     "case variations",
+			input:    `{"X-API-Key":"k1","Proxy-Authorization":"k2","Set-Cookie":"c1","detail":"bearer xyz12345678","ok":true}`,
+			leaked:   "xyz12345678",
+			retained: `[REDACTED]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(sanitizeDashboardJSON([]byte(tc.input)))
+			if strings.Contains(got, tc.leaked) {
+				t.Fatalf("secret leaked in %q: %s", tc.name, got)
+			}
+			if !strings.Contains(got, tc.retained) {
+				t.Fatalf("expected %q in %s", tc.retained, got)
+			}
+		})
+	}
+
+	pngHeader := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRbinarypayload")
+	if gotPNG := sanitizeDashboardJSON(pngHeader); !bytes.Equal(gotPNG, pngHeader) {
+		t.Fatalf("binary PNG payload altered")
+	}
+}
+
+func BenchmarkSanitizeDashboardJSONCleanAnalytics(b *testing.B) {
+	payload := []byte(`{"total_calls":500,"total_input_tokens":92000,"total_output_tokens":34000,"daily_tokens":[{"date":"2026-11-18","input":12000,"output":4500}],"recent_calls":[{"id":1,"tool":"read_file","success":true}]}`)
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if len(sanitizeDashboardJSON(payload)) == 0 {
+			b.Fatal("empty output")
+		}
+	}
+}
+
+func BenchmarkSanitizeDashboardJSONWithSecrets(b *testing.B) {
+	payload := []byte(`{"ok":true,"records":[{"headers":[{"name":"Authorization","value":"Bearer abcdefghijklmnopqrst"},{"name":"Accept","value":"*/*"}],"password":"hidden-password"}]}`)
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if len(sanitizeDashboardJSON(payload)) == 0 {
+			b.Fatal("empty output")
+		}
 	}
 }

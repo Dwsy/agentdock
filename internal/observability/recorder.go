@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"runtime/metrics"
 	"sort"
 	"sync"
 	"time"
@@ -433,8 +434,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	window := append([]windowStat(nil), r.window...)
 	r.mu.Unlock()
 
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
+	heapAlloc, heapInuse, heapSys, gcCycles := readProcessMemory()
 
 	return Snapshot{
 		StartedAt:             startedAt.UTC(),
@@ -456,13 +456,42 @@ func (r *Recorder) Snapshot() Snapshot {
 		RecentCalls:           recent,
 		Process: ProcessSnapshot{
 			Goroutines:     runtime.NumGoroutine(),
-			HeapAllocBytes: memory.HeapAlloc,
-			HeapInuseBytes: memory.HeapInuse,
-			HeapSysBytes:   memory.HeapSys,
-			GCCycles:       memory.NumGC,
+			HeapAllocBytes: heapAlloc,
+			HeapInuseBytes: heapInuse,
+			HeapSysBytes:   heapSys,
+			GCCycles:       gcCycles,
 			UptimeMS:       maxInt64(0, time.Since(startedAt).Milliseconds()),
 		},
 	}
+}
+
+func readProcessMemory() (heapAlloc, heapInuse, heapSys uint64, gcCycles uint32) {
+	// Read runtime/metrics instead of runtime.ReadMemStats so analytics polling does
+	// not trigger stop-the-world pauses across the Go runtime.
+	samples := [5]metrics.Sample{
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/unused:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+	}
+	metrics.Read(samples[:])
+	for _, sample := range samples {
+		if sample.Value.Kind() != metrics.KindUint64 {
+			var memory runtime.MemStats
+			runtime.ReadMemStats(&memory)
+			return memory.HeapAlloc, memory.HeapInuse, memory.HeapSys, memory.NumGC
+		}
+	}
+	objects := samples[0].Value.Uint64()
+	unused := samples[1].Value.Uint64()
+	free := samples[2].Value.Uint64()
+	released := samples[3].Value.Uint64()
+	heapAlloc = objects
+	heapInuse = objects + unused
+	heapSys = heapInuse + free + released
+	gcCycles = uint32(samples[4].Value.Uint64())
+	return heapAlloc, heapInuse, heapSys, gcCycles
 }
 
 // addTokenUsageLocked 把本次调用的 token 累加进当前累计段和当日桶，然后

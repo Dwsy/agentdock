@@ -1,7 +1,9 @@
 package observability
 
 import (
+	"cmp"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ type CaptureStore struct {
 	enabled bool
 	max     int
 	records []CaptureRecord
+	buf     []CaptureRecord
 	nextID  uint64
 }
 
@@ -138,9 +141,25 @@ func (s *CaptureStore) Record(record CaptureRecord) {
 	defer s.mu.Unlock()
 	s.nextID++
 	record.ID = s.nextID
-	s.records = append(s.records, record)
-	if len(s.records) > s.max {
-		s.records = s.records[len(s.records)-s.max:]
+	if len(s.records) < s.max {
+		s.records = append(s.records, record)
+	} else {
+		evict := len(s.records) - s.max + 1
+		evicted := s.records[:evict]
+		for i := range evicted {
+			evicted[i] = CaptureRecord{}
+		}
+		if cap(s.records) > len(s.records) {
+			s.records = append(s.records[evict:], record)
+		} else {
+			if len(s.buf) < 2*s.max {
+				s.buf = make([]CaptureRecord, 2*s.max)
+			}
+			n := copy(s.buf, s.records[evict:])
+			s.buf[n] = record
+			clear(s.buf[n+1:])
+			s.records = s.buf[:n+1]
+		}
 	}
 }
 
@@ -187,10 +206,10 @@ func (s *CaptureStore) RecordByID(id uint64) (CaptureRecord, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for i := len(s.records) - 1; i >= 0; i-- {
-		if s.records[i].ID == id {
-			return s.records[i], true
-		}
+	if idx, found := slices.BinarySearchFunc(s.records, id, func(r CaptureRecord, target uint64) int {
+		return cmp.Compare(r.ID, target)
+	}); found {
+		return s.records[idx], true
 	}
 	return CaptureRecord{}, false
 }
@@ -204,6 +223,10 @@ func (s *CaptureStore) Clear() int {
 	defer s.mu.Unlock()
 	count := len(s.records)
 	s.records = nil
+	if s.buf != nil {
+		clear(s.buf)
+		s.buf = nil
+	}
 	return count
 }
 
@@ -269,10 +292,18 @@ func captureMatches(record CaptureRecord, needle, channelFilter, methodFilter, s
 	if needle == "" {
 		return true
 	}
-	haystack := strings.ToLower(strings.Join([]string{
-		record.Method, record.Path, record.Query, record.RawURL, record.RemoteAddr, record.UserAgent,
-	}, " "))
-	return strings.Contains(haystack, needle)
+	if strings.IndexByte(needle, ' ') >= 0 {
+		haystack := strings.ToLower(strings.Join([]string{
+			record.Method, record.Path, record.Query, record.RawURL, record.RemoteAddr, record.UserAgent,
+		}, " "))
+		return strings.Contains(haystack, needle)
+	}
+	return containsFold(record.Method, needle) ||
+		containsFold(record.Path, needle) ||
+		containsFold(record.Query, needle) ||
+		containsFold(record.RawURL, needle) ||
+		containsFold(record.RemoteAddr, needle) ||
+		containsFold(record.UserAgent, needle)
 }
 
 // CaptureOutcome 把 HTTP 状态码归类成两通道统一的 Outcome。

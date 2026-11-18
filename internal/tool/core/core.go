@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -202,25 +203,77 @@ var defaultSecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`https://[^\s/@:]+:[^\s/@]+@github\.com`),
 }
 
-func RedactSecrets(value string, extraPatterns []string) string {
-	out := value
-	for _, expression := range defaultSecretPatterns {
-		out = expression.ReplaceAllStringFunc(out, func(match string) string {
-			if strings.HasPrefix(strings.ToLower(match), "https://") {
-				return "https://***@github.com"
+const maxCachedExtraSecretPatterns = 256
+
+var (
+	extraSecretRegexCache sync.Map
+	extraSecretRegexCount atomic.Int32
+)
+
+func compileExtraSecretPattern(pattern string) *regexp.Regexp {
+	if cached, ok := extraSecretRegexCache.Load(pattern); ok {
+		if expression, ok := cached.(*regexp.Regexp); ok {
+			return expression
+		}
+	}
+	expression, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	if extraSecretRegexCount.Load() < maxCachedExtraSecretPatterns {
+		if _, loaded := extraSecretRegexCache.LoadOrStore(pattern, expression); !loaded {
+			extraSecretRegexCount.Add(1)
+		}
+	}
+	return expression
+}
+
+func containsGitHubTokenPrefix(s string) bool {
+	for i := 0; i < len(s); {
+		idx := strings.Index(s[i:], "gh")
+		if idx < 0 {
+			return false
+		}
+		pos := i + idx
+		if pos+3 < len(s) && s[pos+3] == '_' {
+			switch s[pos+2] {
+			case 'p', 'o', 'u', 's', 'r':
+				return true
 			}
-			if index := strings.Index(match, "="); index >= 0 {
+		}
+		i = pos + 2
+	}
+	return false
+}
+
+func RedactSecrets(value string, extraPatterns []string) string {
+	if value == "" && len(extraPatterns) == 0 {
+		return ""
+	}
+	out := value
+	if strings.Contains(out, "github_pat_") {
+		out = defaultSecretPatterns[0].ReplaceAllString(out, "***")
+	}
+	if containsGitHubTokenPrefix(out) {
+		out = defaultSecretPatterns[1].ReplaceAllString(out, "***")
+	}
+	if strings.IndexByte(out, '=') >= 0 {
+		out = defaultSecretPatterns[2].ReplaceAllStringFunc(out, func(match string) string {
+			if index := strings.IndexByte(match, '='); index >= 0 {
 				return match[:index+1] + "***"
 			}
 			return "***"
 		})
 	}
+	if strings.Contains(out, "@github.com") && strings.Contains(out, "https://") {
+		out = defaultSecretPatterns[3].ReplaceAllString(out, "https://***@github.com")
+	}
 	for _, pattern := range extraPatterns {
 		if pattern == "" {
 			continue
 		}
-		expression, err := regexp.Compile(pattern)
-		if err != nil {
+		expression := compileExtraSecretPattern(pattern)
+		if expression == nil {
 			continue
 		}
 		out = expression.ReplaceAllString(out, "***")

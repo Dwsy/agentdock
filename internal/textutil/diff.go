@@ -19,31 +19,41 @@ func DiffSections(diffText string) []DiffSection {
 	if diffText == "" {
 		return nil
 	}
-	lines := strings.Split(diffText, "\n")
 	sections := make([]DiffSection, 0)
 	index := map[string]int{}
 	current := -1
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
+	for rest := diffText; rest != ""; {
+		var line string
+		line, rest = cutDiffLine(rest)
 		switch {
-		case strings.HasPrefix(line, "--- ") && i+2 < len(lines) &&
-			strings.HasPrefix(lines[i+1], "+++ ") && strings.HasPrefix(lines[i+2], "@@"):
-			path := DiffHeaderPath(lines[i+1][4:])
-			if path == "" {
-				path = DiffHeaderPath(line[4:])
+		case strings.HasPrefix(line, "--- "):
+			line2, rest2, ok2 := cutNextDiffLine(rest)
+			if ok2 && strings.HasPrefix(line2, "+++ ") {
+				line3, _, ok3 := cutNextDiffLine(rest2)
+				if ok3 && strings.HasPrefix(line3, "@@") {
+					path := DiffHeaderPath(line2[4:])
+					if path == "" {
+						path = DiffHeaderPath(line[4:])
+					}
+					if path == "" {
+						current = -1
+						continue
+					}
+					if existing, ok := index[path]; ok {
+						current = existing
+					} else {
+						sections = append(sections, DiffSection{Path: path})
+						current = len(sections) - 1
+						index[path] = current
+					}
+					rest = rest2 // 文件头对消费 +++ 行
+					continue
+				}
 			}
-			if path == "" {
-				current = -1
-				continue
+			// Fall through for content lines like "--- dashes" inside a hunk.
+			if current >= 0 {
+				sections[current].Deletions++
 			}
-			if existing, ok := index[path]; ok {
-				current = existing
-			} else {
-				sections = append(sections, DiffSection{Path: path})
-				current = len(sections) - 1
-				index[path] = current
-			}
-			i++ // 文件头对消费 +++ 行
 		case current >= 0 && strings.HasPrefix(line, "+"):
 			sections[current].Insertions++
 		case current >= 0 && strings.HasPrefix(line, "-"):
@@ -51,6 +61,21 @@ func DiffSections(diffText string) []DiffSection {
 		}
 	}
 	return sections
+}
+
+func cutDiffLine(s string) (line, rest string) {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+func cutNextDiffLine(s string) (line, rest string, ok bool) {
+	if s == "" {
+		return "", "", false
+	}
+	line, rest = cutDiffLine(s)
+	return line, rest, true
 }
 
 // DiffHeaderPath 提取 unified diff 文件头行（--- / +++ 之后）的路径：

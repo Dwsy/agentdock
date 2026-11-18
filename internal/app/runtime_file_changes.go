@@ -44,7 +44,7 @@ func traceFileChanges(tool string, args map[string]any, result *Result, success 
 
 	diff, _ := payload["diff_preview"].(string)
 	truncated, _ := payload["truncated"].(bool)
-	preview := textutil.SafeTruncateBytes([]byte(diff), traceFileDiffBytes)
+	preview := textutil.SafeTruncateString(diff, traceFileDiffBytes)
 	if preview.Truncated {
 		truncated = true
 	}

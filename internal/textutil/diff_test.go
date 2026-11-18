@@ -1,6 +1,9 @@
 package textutil
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDiffSectionsSplitsGitStyleDiff(t *testing.T) {
 	diff := "" +
@@ -86,5 +89,17 @@ func TestDiffHeaderPath(t *testing.T) {
 func TestDiffSectionsEmptyInput(t *testing.T) {
 	if sections := DiffSections(""); sections != nil {
 		t.Fatalf("empty input = %#v", sections)
+	}
+}
+
+func BenchmarkDiffSectionsLarge(b *testing.B) {
+	chunk := "--- a/src/file.go\n+++ b/src/file.go\n@@ -1,4 +1,4 @@\n context\n-old line\n+new line\n"
+	diff := strings.Repeat(chunk, 1000)
+	b.SetBytes(int64(len(diff)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if len(DiffSections(diff)) == 0 {
+			b.Fatal("empty sections")
+		}
 	}
 }

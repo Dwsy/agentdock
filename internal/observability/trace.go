@@ -2,16 +2,19 @@ package observability
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	toolcore "github.com/uvwt/agentdock/internal/tool/core"
 )
@@ -25,6 +28,9 @@ type TraceStore struct {
 	mode    TraceMode
 	max     int
 	records []TraceRecord
+	// buf provides double-buffered sliding window backing storage at capacity so steady-state
+	// Record calls advance in O(1) without allocating a fresh 2000-element slice each time.
+	buf     []TraceRecord
 	nextID  uint64
 	root    string
 	retain  time.Duration
@@ -326,13 +332,26 @@ func (s *TraceStore) Record(record TraceRecord) uint64 {
 	record.ImagePreview = s.storeImagePreviewLocked(record.ID, record.StartedAt, record.ImagePreviewData, record.ImagePreviewMimeType)
 	record.ImagePreviewData = nil
 	record.ImagePreviewMimeType = ""
-	s.records = append(s.records, record)
-	if len(s.records) > s.max {
-		evicted := s.records[:len(s.records)-s.max]
-		for _, old := range evicted {
+	if len(s.records) < s.max {
+		s.records = append(s.records, record)
+	} else {
+		evict := len(s.records) - s.max + 1
+		evicted := s.records[:evict]
+		for i, old := range evicted {
 			s.removeImagePreviewLocked(old)
+			evicted[i] = TraceRecord{}
 		}
-		s.records = append([]TraceRecord(nil), s.records[len(s.records)-s.max:]...)
+		if cap(s.records) > len(s.records) {
+			s.records = append(s.records[evict:], record)
+		} else {
+			if len(s.buf) < 2*s.max {
+				s.buf = make([]TraceRecord, 2*s.max)
+			}
+			n := copy(s.buf, s.records[evict:])
+			s.buf[n] = record
+			clear(s.buf[n+1:])
+			s.records = s.buf[:n+1]
+		}
 	}
 	if s.mode != TraceModeDisk {
 		id := record.ID
@@ -397,8 +416,19 @@ var traceJSONSecretPattern = regexp.MustCompile(`(?i)"(token|password|secret|api
 
 func redactTracePayload(value string) string {
 	out := toolcore.RedactSecrets(value, nil)
+	if strings.IndexByte(out, ':') < 0 || strings.IndexByte(out, '"') < 0 || !hasAnyTraceSecretKeyword(out) {
+		return out
+	}
 	out = traceJSONSecretPattern.ReplaceAllStringFunc(out, traceJSONSecretReplacement)
 	return traceJSONOpenSecretPattern.ReplaceAllStringFunc(out, traceJSONSecretReplacement)
+}
+
+func hasAnyTraceSecretKeyword(s string) bool {
+	return containsFold(s, "token") ||
+		containsFold(s, "password") ||
+		containsFold(s, "secret") ||
+		containsFold(s, "key") ||
+		containsFold(s, "authorization")
 }
 
 // traceJSONOpenSecretPattern 处理“截断正好落在敏感值中间”的尾巴：预截断后
@@ -422,6 +452,12 @@ func (s *TraceStore) RecordByID(id uint64) (TraceRecord, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if idx, found := slices.BinarySearchFunc(s.records, id, func(r TraceRecord, target uint64) int {
+		return cmp.Compare(r.ID, target)
+	}); found {
+		return s.records[idx], true
+	}
+	// Disk replay sorts concurrent records by StartedAt rather than ID; fall back to linear scan.
 	for i := len(s.records) - 1; i >= 0; i-- {
 		if s.records[i].ID == id {
 			return s.records[i], true
@@ -532,6 +568,10 @@ func (s *TraceStore) Clear() (int, error) {
 	defer s.mu.Unlock()
 	cleared := len(s.records)
 	s.records = nil
+	if s.buf != nil {
+		clear(s.buf)
+		s.buf = nil
+	}
 	s.pending = nil
 	s.pendingFull = nil
 	s.pendingFullBytes = 0
@@ -609,16 +649,84 @@ func traceSummaryRecord(record TraceRecord) TraceRecord {
 }
 
 func traceMatches(record TraceRecord, needle string) bool {
-	fields := []string{record.Tool, string(record.Source), record.UserAgent, record.TaskID, record.ErrorCode, record.Error, record.Arguments, record.Result, record.TraceID}
-	if record.Command != nil {
-		fields = append(fields, record.Command.searchFields()...)
+	if containsFold(record.Tool, needle) ||
+		containsFold(string(record.Source), needle) ||
+		containsFold(record.UserAgent, needle) ||
+		containsFold(record.TaskID, needle) ||
+		containsFold(record.ErrorCode, needle) ||
+		containsFold(record.TraceID, needle) ||
+		containsFold(record.Error, needle) ||
+		containsFold(record.Arguments, needle) ||
+		containsFold(record.Result, needle) {
+		return true
 	}
-	for _, field := range fields {
-		if strings.Contains(strings.ToLower(field), needle) {
-			return true
-		}
+	if record.Command != nil && commandMatchesFold(record.Command, needle) {
+		return true
 	}
 	return false
+}
+
+func commandMatchesFold(c *CommandTrace, needle string) bool {
+	return containsFold(c.Summary, needle) ||
+		containsFold(c.Command, needle) ||
+		containsFold(c.Workdir, needle) ||
+		containsFold(c.Runtime, needle) ||
+		containsFold(c.SessionID, needle) ||
+		containsFold(c.Status, needle) ||
+		containsFold(c.Action, needle) ||
+		containsFold(c.SkillRef, needle) ||
+		containsFold(c.Stdout, needle) ||
+		containsFold(c.Stderr, needle)
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// containsFold reports whether haystack contains lowercase needle case-insensitively
+// without allocating on ASCII inputs, falling back to strings.ToLower for non-ASCII UTF-8.
+func containsFold(haystack, needleLower string) bool {
+	n := len(needleLower)
+	if n == 0 {
+		return true
+	}
+	if len(haystack) < n {
+		return false
+	}
+	if isASCII(haystack) && isASCII(needleLower) {
+		limit := len(haystack) - n
+		first := needleLower[0]
+		for i := 0; i <= limit; i++ {
+			c := haystack[i]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != first {
+				continue
+			}
+			matched := true
+			for j := 1; j < n; j++ {
+				hc := haystack[i+j]
+				if hc >= 'A' && hc <= 'Z' {
+					hc += 'a' - 'A'
+				}
+				if hc != needleLower[j] {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return true
+			}
+		}
+		return false
+	}
+	return strings.Contains(strings.ToLower(haystack), needleLower)
 }
 
 // TaskRecords 返回指定 task_id 的调用记录（新到旧），供任务活动聚合。
@@ -665,8 +773,14 @@ func (s *TraceStore) FileChanges(query string, limit int) []FileChangeEntry {
 		record := s.records[i]
 		for j := len(record.FileChanges) - 1; j >= 0; j-- {
 			change := record.FileChanges[j]
-			if needle != "" && !strings.Contains(strings.ToLower(change.Path+"\n"+change.MoveTo+"\n"+change.Action+"\n"+change.Diff), needle) {
-				continue
+			if needle != "" {
+				if strings.IndexByte(needle, '\n') >= 0 {
+					if !strings.Contains(strings.ToLower(change.Path+"\n"+change.MoveTo+"\n"+change.Action+"\n"+change.Diff), needle) {
+						continue
+					}
+				} else if !containsFold(change.Path, needle) && !containsFold(change.MoveTo, needle) && !containsFold(change.Action, needle) && !containsFold(change.Diff, needle) {
+					continue
+				}
 			}
 			out = append(out, FileChangeEntry{
 				ID: record.ID, TraceID: record.TraceID, Tool: record.Tool, Source: record.Source,
@@ -918,7 +1032,8 @@ func (s *TraceStore) loadRecent() error {
 	}
 	sort.Slice(loaded, func(i, j int) bool { return loaded[i].StartedAt.Before(loaded[j].StartedAt) })
 	if len(loaded) > s.max {
-		loaded = loaded[len(loaded)-s.max:]
+		// Copy the kept tail so an oversized replay slice is released to GC immediately.
+		loaded = slices.Clone(loaded[len(loaded)-s.max:])
 	}
 	s.records = loaded
 	s.cleanImagePreviewsForRecords()

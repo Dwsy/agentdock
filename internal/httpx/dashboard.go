@@ -31,9 +31,8 @@ const (
 )
 
 var (
-	dashboardBearerRe    = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	dashboardSensitiveRe = regexp.MustCompile(`(?i)^(authorization|cookie|set-cookie|x-api-key|api-key|proxy-authorization|access_token|refresh_token|token|password|secret)$`)
-	dashboardCSP         = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
+	dashboardBearerRe = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{8,}`)
+	dashboardCSP      = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
 )
 
 // registerDashboard 注册静态页与 API 代理。
@@ -137,8 +136,15 @@ func (d *dashboardRecorder) Write(p []byte) (int, error) {
 
 // sanitizeDashboardJSON 递归脱敏敏感字段，并对残留 Bearer 串做兜底清理。
 func sanitizeDashboardJSON(in []byte) []byte {
+	hasBearer := containsFoldASCIIBytes(in, "bearer")
+	if !hasBearer && !bytes.Contains(in, []byte{'\\', 'u'}) && !bytes.Contains(in, []byte{'\\', 'U'}) && !containsAnyQuotedDashboardSensitiveKey(in) && json.Valid(in) {
+		return in
+	}
 	var value any
 	if err := json.Unmarshal(in, &value); err != nil {
+		if !hasBearer {
+			return in
+		}
 		return dashboardBearerRe.ReplaceAll(in, []byte("Bearer [REDACTED]"))
 	}
 	clean := redactDashboardValue(value)
@@ -154,14 +160,14 @@ func redactDashboardValue(v any) any {
 	case map[string]any:
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			if dashboardSensitiveRe.MatchString(k) {
+			if isDashboardSensitiveKey(k) {
 				out[k] = "[REDACTED]"
 				continue
 			}
 			out[k] = redactDashboardValue(val)
 		}
 		// 请求头数组项 {"name":"Authorization","value":"..."}：保留名字，洗掉 value。
-		if name, ok := out["name"].(string); ok && dashboardSensitiveRe.MatchString(name) {
+		if name, ok := out["name"].(string); ok && isDashboardSensitiveKey(name) {
 			if _, hasValue := out["value"]; hasValue {
 				out["value"] = "[REDACTED]"
 			}
@@ -174,8 +180,171 @@ func redactDashboardValue(v any) any {
 		}
 		return out
 	case string:
-		return dashboardBearerRe.ReplaceAllString(x, "Bearer [REDACTED]")
+		// Shortest possible match for `(?i)Bearer\s+\S{8,}` is 15 bytes ("Bearer " + 8 chars).
+		if len(x) >= 15 && containsFoldASCII(x, "bearer") {
+			return dashboardBearerRe.ReplaceAllString(x, "Bearer [REDACTED]")
+		}
+		return x
 	default:
 		return v
 	}
+}
+
+func isDashboardSensitiveKey(k string) bool {
+	switch len(k) {
+	case 5:
+		return strings.EqualFold(k, "token")
+	case 6:
+		return strings.EqualFold(k, "cookie") || strings.EqualFold(k, "secret")
+	case 7:
+		return strings.EqualFold(k, "api-key")
+	case 8:
+		return strings.EqualFold(k, "password")
+	case 9:
+		return strings.EqualFold(k, "x-api-key")
+	case 10:
+		return strings.EqualFold(k, "set-cookie")
+	case 12:
+		return strings.EqualFold(k, "access_token")
+	case 13:
+		return strings.EqualFold(k, "authorization") || strings.EqualFold(k, "refresh_token")
+	case 19:
+		return strings.EqualFold(k, "proxy-authorization")
+	default:
+		return false
+	}
+}
+
+func containsAnyQuotedDashboardSensitiveKey(in []byte) bool {
+	for i := 0; i < len(in); {
+		rel := bytes.IndexByte(in[i:], '"')
+		if rel < 0 {
+			return false
+		}
+		rest := in[i+rel+1:]
+		i += rel + 1
+		if len(rest) < 6 {
+			return false
+		}
+		switch rest[0] | 0x20 {
+		case 't':
+			if len(rest) > 5 && rest[5] == '"' && equalFoldASCIIBytes(rest[:5], "token") {
+				return true
+			}
+		case 'c':
+			if len(rest) > 6 && rest[6] == '"' && equalFoldASCIIBytes(rest[:6], "cookie") {
+				return true
+			}
+		case 's':
+			if len(rest) > 6 && rest[6] == '"' && equalFoldASCIIBytes(rest[:6], "secret") {
+				return true
+			}
+			if len(rest) > 10 && rest[10] == '"' && equalFoldASCIIBytes(rest[:10], "set-cookie") {
+				return true
+			}
+		case 'a':
+			if len(rest) > 7 && rest[7] == '"' && equalFoldASCIIBytes(rest[:7], "api-key") {
+				return true
+			}
+			if len(rest) > 12 && rest[12] == '"' && equalFoldASCIIBytes(rest[:12], "access_token") {
+				return true
+			}
+			if len(rest) > 13 && rest[13] == '"' && equalFoldASCIIBytes(rest[:13], "authorization") {
+				return true
+			}
+		case 'p':
+			if len(rest) > 8 && rest[8] == '"' && equalFoldASCIIBytes(rest[:8], "password") {
+				return true
+			}
+			if len(rest) > 19 && rest[19] == '"' && equalFoldASCIIBytes(rest[:19], "proxy-authorization") {
+				return true
+			}
+		case 'x':
+			if len(rest) > 9 && rest[9] == '"' && equalFoldASCIIBytes(rest[:9], "x-api-key") {
+				return true
+			}
+		case 'r':
+			if len(rest) > 13 && rest[13] == '"' && equalFoldASCIIBytes(rest[:13], "refresh_token") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func equalFoldASCIIBytes(a []byte, lower string) bool {
+	if len(a) != len(lower) {
+		return false
+	}
+	for i := 0; i < len(lower); i++ {
+		c := a[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsFoldASCIIBytes(b []byte, lower string) bool {
+	n := len(lower)
+	if n == 0 {
+		return true
+	}
+	if len(b) < n {
+		return false
+	}
+	limit := len(b) - n
+	first := lower[0]
+	for i := 0; i <= limit; i++ {
+		c := b[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != first {
+			continue
+		}
+		if equalFoldASCIIBytes(b[i:i+n], lower) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFoldASCII(s, lower string) bool {
+	n := len(lower)
+	if n == 0 {
+		return true
+	}
+	if len(s) < n {
+		return false
+	}
+	limit := len(s) - n
+	first := lower[0]
+	for i := 0; i <= limit; i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != first {
+			continue
+		}
+		matched := true
+		for j := 1; j < n; j++ {
+			sc := s[i+j]
+			if sc >= 'A' && sc <= 'Z' {
+				sc += 'a' - 'A'
+			}
+			if sc != lower[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }

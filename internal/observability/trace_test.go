@@ -283,3 +283,50 @@ func TestTraceStoreFileChangesProjection(t *testing.T) {
 		t.Fatalf("limit not applied: %#v", limited)
 	}
 }
+
+func TestTraceStoreRingEvictionRecordByIDAndSearch(t *testing.T) {
+	const capMax = 5
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: capMax})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var lastID uint64
+	for i := 1; i <= 18; i++ {
+		tool := "read_file"
+		args := `{"path":"src/handler.go"}`
+		if i == 17 {
+			tool = "file_edit"
+			args = `{"path":"中文路径/配置.md"}`
+		}
+		lastID = store.Record(TraceRecord{
+			Tool:      tool,
+			Source:    string(SourceMCP),
+			Success:   true,
+			Arguments: args,
+			Result:    `{"ok":true}`,
+			StartedAt: time.Now(),
+		})
+	}
+
+	got := store.Query(TraceQuery{Limit: 20})
+	if len(got) != capMax {
+		t.Fatalf("Query len = %d, want %d", len(got), capMax)
+	}
+	// Evicted oldest records (1..13) must be absent; kept IDs must be 18..14 newest-first.
+	if _, ok := store.RecordByID(13); ok {
+		t.Fatal("evicted record ID 13 still accessible")
+	}
+	rec17, ok := store.RecordByID(lastID - 1)
+	if !ok || rec17.Tool != "file_edit" {
+		t.Fatalf("RecordByID(17) = (%v, %v)", rec17, ok)
+	}
+
+	if hits := store.Query(TraceQuery{Query: "HANDLER"}); len(hits) != capMax-1 {
+		t.Fatalf("ASCII fold search hits = %d, want %d", len(hits), capMax-1)
+	}
+	if hits := store.Query(TraceQuery{Query: "配置.MD"}); len(hits) != 1 || hits[0].ID != lastID-1 {
+		t.Fatalf("UTF-8 fold search hits = %#v", hits)
+	}
+}

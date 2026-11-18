@@ -59,6 +59,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	mcpAppsMode := string(cfg.MCPAppsMode)
 	flags.StringVar(&mcpAppsMode, "mcp-apps-mode", mcpAppsMode, "chat card mode: full, compact, off")
 	flags.BoolVar(&cfg.BrowserEnabled, "browser-enabled", cfg.BrowserEnabled, "expose optional browser automation tools")
+	flags.BoolVar(&cfg.ManualLLMEnabled, "manual-llm-enabled", cfg.ManualLLMEnabled, "expose manual /v1/responses and /mcp/manual LLM bridge")
 	flags.StringVar(&cfg.BrowserExecutablePath, "browser-executable-path", cfg.BrowserExecutablePath, "optional absolute Chrome, Chromium, or Edge executable path")
 	flags.StringVar(&cfg.BrowserCDPURL, "browser-cdp-url", cfg.BrowserCDPURL, "optional existing Chromium CDP endpoint to attach")
 	flags.BoolVar(&cfg.BrowserReuseExistingCDP, "browser-reuse-existing-cdp", cfg.BrowserReuseExistingCDP, "discover and reuse a unique local existing CDP browser before launching one")
@@ -105,7 +106,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	} else {
 		startupdiag.Log(slog.Default(), "core", "desktop_runtime_repair", repairStartedAt, slog.String("result", "ok"))
 	}
-	slog.Info("server starting", "agentdock_home", cfg.AgentDockHome, "agentdock_default_dir", cfg.AgentDockDefaultDir, "path_model", config.PathModel, "host", cfg.Host, "port", cfg.Port, "stdio", cfg.Stdio, "log_level", cfg.LogLevel, "recall_enabled", cfg.NexusEndpoint != "", "nexus_enabled", cfg.NexusEndpoint != "", "mcp_apps_mode", cfg.MCPAppsMode, "browser_enabled", cfg.BrowserEnabled)
+	slog.Info("server starting", "agentdock_home", cfg.AgentDockHome, "agentdock_default_dir", cfg.AgentDockDefaultDir, "path_model", config.PathModel, "host", cfg.Host, "port", cfg.Port, "stdio", cfg.Stdio, "log_level", cfg.LogLevel, "recall_enabled", cfg.NexusEndpoint != "", "nexus_enabled", cfg.NexusEndpoint != "", "mcp_apps_mode", cfg.MCPAppsMode, "browser_enabled", cfg.BrowserEnabled, "manual_llm_enabled", cfg.ManualLLMEnabled)
 	runtimeInitStartedAt := time.Now()
 	runtime, err := app.NewRuntime(cfg)
 	if err != nil {

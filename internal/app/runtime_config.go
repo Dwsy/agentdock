@@ -29,6 +29,7 @@ var editableConfigKeys = []string{
 	"AGENTDOCK_BROWSER_REUSE_EXISTING_CDP",
 	"AGENTDOCK_ACP_ENABLED",
 	"AGENTDOCK_ACP_DEFAULT_PROFILE",
+	"AGENTDOCK_MANUAL_LLM_ENABLED",
 	"AGENTDOCK_TRACE_MODE",
 	"AGENTDOCK_TRACE_RETENTION_DAYS",
 	"AGENTDOCK_NETWORK_CAPTURE_ENABLED",
@@ -71,6 +72,7 @@ func (r *Runtime) RuntimeConfig() Result {
 		"AGENTDOCK_BROWSER_REUSE_EXISTING_CDP": strconv.FormatBool(cfg.BrowserReuseExistingCDP),
 		"AGENTDOCK_ACP_ENABLED":                strconv.FormatBool(cfg.ACPEnabled),
 		"AGENTDOCK_ACP_DEFAULT_PROFILE":        cfg.ACPDefaultProfile,
+		"AGENTDOCK_MANUAL_LLM_ENABLED":         strconv.FormatBool(cfg.ManualLLMEnabled),
 		"AGENTDOCK_TRACE_MODE":                 string(cfg.TraceMode),
 		"AGENTDOCK_TRACE_RETENTION_DAYS":       strconv.Itoa(cfg.TraceRetentionDays),
 		"AGENTDOCK_NETWORK_CAPTURE_ENABLED":    strconv.FormatBool(cfg.NetworkCaptureEnabled),
@@ -116,7 +118,7 @@ func validateConfigUpdate(key, value string) error {
 		default:
 			return errors.New("mcp_apps_mode 必须是 full/compact/off")
 		}
-	case "AGENTDOCK_BROWSER_ENABLED", "AGENTDOCK_BROWSER_REUSE_EXISTING_CDP", "AGENTDOCK_ACP_ENABLED", "AGENTDOCK_NETWORK_CAPTURE_ENABLED":
+	case "AGENTDOCK_BROWSER_ENABLED", "AGENTDOCK_BROWSER_REUSE_EXISTING_CDP", "AGENTDOCK_ACP_ENABLED", "AGENTDOCK_NETWORK_CAPTURE_ENABLED", "AGENTDOCK_MANUAL_LLM_ENABLED":
 		if _, err := strconv.ParseBool(strings.TrimSpace(value)); err != nil {
 			return fmt.Errorf("%s 必须是 true/false", key)
 		}

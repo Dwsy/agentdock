@@ -15,6 +15,7 @@ import {
   X,
   AlertTriangle,
   Settings2,
+  Terminal,
 } from 'lucide-react';
 import {
   api,
@@ -23,6 +24,7 @@ import {
   type Analytics,
   type Catalog,
   type FileChanges,
+  type ManualLLMQueue,
   type MCPs,
   type Overview,
   type Plugins,
@@ -39,6 +41,7 @@ import FileChangesPage from './pages/FileChanges';
 import TasksPage from './pages/Tasks';
 import CapabilitiesPage from './pages/Capabilities';
 import ConfigPage from './pages/Config';
+import ManualLLMPage from './pages/ManualLLM';
 import { Panel } from './ui';
 
 type Snapshot = {
@@ -53,6 +56,7 @@ type Snapshot = {
   plugins: Plugins;
   mcp: MCPs;
   catalog: Catalog;
+  manualLLM: ManualLLMQueue;
 };
 
 /** 任务列表接口上限 200；达到时页面只称“最近 200 条”。 */
@@ -64,6 +68,7 @@ const NAV = [
   { id: 'traces', label: '调用追踪', icon: ScrollText, group: '监控' },
   { id: 'files', label: '文件变更', icon: Layers, group: '监控' },
   { id: 'tasks', label: '任务与告警', icon: ListChecks, group: '管理' },
+  { id: 'manual_llm', label: '手动推理', icon: Terminal, group: '管理' },
   { id: 'capabilities', label: '能力目录', icon: Boxes, group: '管理' },
   { id: 'config', label: '配置', icon: Settings2, group: '管理' },
 ] as const;
@@ -88,10 +93,10 @@ export default function App() {
 
   const load = useCallback(async () => {
     // 上游忙时个别接口会超时；用 allSettled 让单个失败不拖垮整页。
-    const keys = ['status', 'overview', 'analytics', 'alerts', 'tasks', 'traces', 'fileChanges', 'skills', 'plugins', 'mcp', 'catalog'] as const;
+    const keys = ['status', 'overview', 'analytics', 'alerts', 'tasks', 'traces', 'fileChanges', 'skills', 'plugins', 'mcp', 'catalog', 'manualLLM'] as const;
     const results = await Promise.allSettled([
       api.status(), api.overview(), api.analytics(), api.alerts(), api.tasks(TASK_LIMIT),
-      api.traces(80), api.fileChanges(80), api.skills(), api.plugins(), api.mcp(), api.catalog(),
+      api.traces(80), api.fileChanges(80), api.skills(), api.plugins(), api.mcp(), api.catalog(), api.manualLLM(),
     ]);
     const got: Partial<Snapshot> = {};
     const failed: string[] = [];
@@ -115,6 +120,7 @@ export default function App() {
         plugins: got.plugins ?? { ok: false, source: '', count: 0, plugins: [] },
         mcp: got.mcp ?? { ok: false, source: '', action: '', count: 0, servers: [] },
         catalog: got.catalog ?? { ok: false, source: '', tool_count: 0, workdir: '', workspace_root: '', tools: [], rules: [], common_skills: { root: '', total: 0, truncated: false, items: [] } },
+        manualLLM: got.manualLLM ?? { ok: false, enabled: false, responses_path: '/v1/responses', mcp_endpoint: '/mcp/manual', idle_prompt: '', stats: { queued_count: 0, active_count: 0, completed_count: 0, sessions_count: 0 }, requests: [] },
       } as Snapshot;
     });
     setError(failed.length ? `部分接口暂时无响应：${failed.join('、')}（显示的是可用数据）` : null);
@@ -200,8 +206,9 @@ export default function App() {
     );
   }
 
-  const { status, overview, analytics, alerts, tasks, traces, fileChanges, skills, plugins, mcp, catalog } = data;
+  const { status, overview, analytics, alerts, tasks, traces, fileChanges, skills, plugins, mcp, catalog, manualLLM } = data;
   const activeAlerts = alerts.alerts.filter((a) => a.active).length;
+  const activeManualCount = (manualLLM.stats?.queued_count ?? 0) + (manualLLM.stats?.active_count ?? 0);
 
   const content = (() => {
     switch (page) {
@@ -223,6 +230,8 @@ export default function App() {
         return <FileChangesPage data={fileChanges} tasks={tasks} />;
       case 'tasks':
         return <TasksPage data={tasks} alerts={alerts} />;
+      case 'manual_llm':
+        return <ManualLLMPage data={manualLLM} onRefresh={load} onOpenConfig={() => navigate('config')} />;
       case 'capabilities':
         return <CapabilitiesPage catalog={catalog} skills={skills} plugins={plugins} mcp={mcp} status={status} />;
       case 'config':
@@ -286,6 +295,7 @@ export default function App() {
                       <span className="whitespace-nowrap">{item.label}</span>
                       {item.id === 'live' && <span className={`ml-auto h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />}
                       {item.id === 'tasks' && activeAlerts > 0 && <span className="ml-auto rounded bg-amber-500/15 px-1.5 text-[11px] text-amber-500">{activeAlerts}</span>}
+                      {item.id === 'manual_llm' && activeManualCount > 0 && <span className="ml-auto rounded bg-sky-500/15 px-1.5 text-[11px] text-sky-500">{activeManualCount}</span>}
                     </button>
                   );
                 })}

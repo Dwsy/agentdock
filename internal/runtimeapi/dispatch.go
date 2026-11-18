@@ -61,6 +61,9 @@ func MethodAllowed(method, path string) bool {
 	if cleanPath == "/internal/runtime/config/restart" {
 		return method == http.MethodPost
 	}
+	if cleanPath == "/internal/runtime/manual-llm/cancel" {
+		return method == http.MethodPost
+	}
 	if cleanPath == "/internal/runtime/config" {
 		return method == http.MethodGet || method == http.MethodPost
 	}
@@ -100,7 +103,7 @@ func AllowHeader(path string) string {
 	if cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" {
 		return "GET, POST"
 	}
-	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/config/restart" {
+	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/config/restart" || cleanPath == "/internal/runtime/manual-llm/cancel" {
 		return "POST"
 	}
 	if cleanPath == "/internal/runtime/config" {
@@ -444,6 +447,29 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		}
 		result, err := library.RuntimeResourceLibrary(ctx, method, request.Body)
 		return map[string]any(result), err
+	case path == "/internal/runtime/manual-llm" && method == http.MethodGet:
+		manualRuntime, ok := runtime.(ManualLLMRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "MANUAL_LLM_UNSUPPORTED", Message: "runtime does not support manual LLM queue", Category: "not_found"}
+		}
+		return map[string]any(manualRuntime.RuntimeManualLLMQueue()), nil
+	case path == "/internal/runtime/manual-llm/cancel" && method == http.MethodPost:
+		manualRuntime, ok := runtime.(ManualLLMRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "MANUAL_LLM_UNSUPPORTED", Message: "runtime does not support manual LLM queue", Category: "not_found"}
+		}
+		var payload struct {
+			RequestID string `json:"request_id"`
+			Reason    string `json:"reason"`
+		}
+		if err := json.Unmarshal(request.Body, &payload); err != nil {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "manual-llm cancel body must be valid JSON", Category: "validation"}
+		}
+		result, err := manualRuntime.RuntimeManualLLMCancel(payload.RequestID, payload.Reason)
+		if err != nil {
+			return nil, &app.ToolError{Code: "MANUAL_LLM_CANCEL_FAILED", Message: err.Error(), Category: "validation"}
+		}
+		return map[string]any(result), nil
 	case path == "/internal/runtime/config/restart" && method == http.MethodPost:
 		configRuntime, ok := runtime.(ConfigRuntime)
 		if !ok {

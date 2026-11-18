@@ -47,6 +47,8 @@ func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg conf
 	mux.HandleFunc(runtimeapi.ResourceLibraryPath, h)
 	mux.HandleFunc("/internal/runtime/mcp", h)
 	mux.HandleFunc("/internal/runtime/mcp/", h)
+	mux.HandleFunc("/internal/runtime/manual-llm", h)
+	mux.HandleFunc("/internal/runtime/manual-llm/", h)
 }
 
 func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
@@ -109,7 +111,7 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 
 func runtimeRequestBody(r *http.Request) ([]byte, error) {
 	cleanPath := strings.TrimSuffix(r.URL.Path, "/")
-	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != "/internal/runtime/config" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
+	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != "/internal/runtime/config" && cleanPath != "/internal/runtime/manual-llm/cancel" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
 		return nil, nil
 	}
 	return io.ReadAll(io.LimitReader(r.Body, 64*1024+1))

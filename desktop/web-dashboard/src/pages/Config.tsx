@@ -34,6 +34,7 @@ const FIELDS: { group: string; icon: any; fields: Field[] }[] = [
       { key: 'AGENTDOCK_BROWSER_REUSE_EXISTING_CDP', label: '复用已有浏览器', kind: 'bool' },
       { key: 'AGENTDOCK_ACP_ENABLED', label: 'ACP 编码代理', kind: 'bool' },
       { key: 'AGENTDOCK_ACP_DEFAULT_PROFILE', label: '默认 ACP Profile', kind: 'text' },
+      { key: 'AGENTDOCK_MANUAL_LLM_ENABLED', label: '手动推理桥接', kind: 'bool', hint: '开放 /v1/responses（SSE）与精简 2 工具 /mcp/manual；保存后需重启生效' },
     ],
   },
   {

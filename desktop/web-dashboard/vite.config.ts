@@ -104,10 +104,23 @@ function attach(server: { middlewares: { use: (p: string, h: (...a: any[]) => vo
     };
     try {
       // 上游忙时可能长时间不回；给个总超时，避免请求无限挂着。
+      const method = req.method || 'GET';
+      const chunks: Buffer[] = [];
+      if (method !== 'GET' && method !== 'HEAD') {
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+      }
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const contentType = req.headers['content-type'];
+      if (typeof contentType === 'string' && contentType) headers['Content-Type'] = contentType;
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 30_000);
       const upstream = await fetch(url, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        method,
+        headers,
+        body: chunks.length ? Buffer.concat(chunks) : undefined,
         signal: ctrl.signal,
       });
 

@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/uvwt/agentdock/internal/app"
+	"github.com/uvwt/agentdock/internal/manualllm"
 	"github.com/uvwt/agentdock/internal/mcp/oauthclient"
 	"github.com/uvwt/agentdock/internal/observability"
 )
@@ -166,6 +167,19 @@ type ConfigRuntime interface {
 	RuntimeConfig() app.Result
 	RuntimeConfigUpdate(map[string]string) (app.Result, error)
 	RuntimeConfigRestart(context.Context) (app.Result, error)
+}
+
+// ManualLLMRuntime is an optional Runtime capability exposing the manual LLM queue
+// and cancellation actions to the runtime API and dashboard.
+type ManualLLMRuntime interface {
+	RuntimeManualLLMQueue() app.Result
+	RuntimeManualLLMCancel(requestID, reason string) (app.Result, error)
+}
+
+// ManualLLMSource is an optional Runtime capability exposing the live manual LLM broker
+// for /v1/responses and /mcp/manual HTTP routing when enabled.
+type ManualLLMSource interface {
+	ManualLLM() *manualllm.Broker
 }
 
 // Request 是 HTTP 与 Nexus Bridge 共用的 Runtime API 请求表示。

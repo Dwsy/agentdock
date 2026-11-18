@@ -132,6 +132,7 @@ type Config struct {
 	BrowserCDPURL                string
 	BrowserReuseExistingCDP      bool
 	ACPEnabled                   bool
+	ManualLLMEnabled             bool
 	ACPProfiles                  []ACPProfile
 	ACPDefaultProfile            string
 	ACPMaxPrompts                int
@@ -224,6 +225,10 @@ func FromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	manualLLMEnabled, err := getenvBool("AGENTDOCK_MANUAL_LLM_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	var acpProfiles []ACPProfile
 	acpDefaultProfile := ""
 	acpMaxPrompts := 2
@@ -272,6 +277,7 @@ func FromEnv() (Config, error) {
 		BrowserCDPURL:                strings.TrimSpace(os.Getenv("AGENTDOCK_BROWSER_CDP_URL")),
 		BrowserReuseExistingCDP:      browserReuseExistingCDP,
 		ACPEnabled:                   acpEnabled,
+		ManualLLMEnabled:             manualLLMEnabled,
 		ACPProfiles:                  acpProfiles,
 		ACPDefaultProfile:            acpDefaultProfile,
 		ACPMaxPrompts:                acpMaxPrompts,

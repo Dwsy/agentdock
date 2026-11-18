@@ -552,3 +552,31 @@ func TestValidateAuthTreatsEmptyHostAsWildcard(t *testing.T) {
 		t.Fatalf("ValidateAuth() error = %v, want wildcard authentication error", err)
 	}
 }
+
+func TestFromEnvManualLLMEnabled(t *testing.T) {
+	home := t.TempDir()
+	setTestUserHome(t, home)
+
+	t.Setenv("AGENTDOCK_MANUAL_LLM_ENABLED", "")
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if cfg.ManualLLMEnabled {
+		t.Fatal("ManualLLMEnabled should default to false")
+	}
+
+	t.Setenv("AGENTDOCK_MANUAL_LLM_ENABLED", "true")
+	cfg, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if !cfg.ManualLLMEnabled {
+		t.Fatal("ManualLLMEnabled = false, want true")
+	}
+
+	t.Setenv("AGENTDOCK_MANUAL_LLM_ENABLED", "invalid")
+	if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "AGENTDOCK_MANUAL_LLM_ENABLED") {
+		t.Fatalf("FromEnv() error = %v, want AGENTDOCK_MANUAL_LLM_ENABLED validation error", err)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/envstore"
 	"github.com/uvwt/agentdock/internal/evolution"
+	"github.com/uvwt/agentdock/internal/manualllm"
 	mcpclient "github.com/uvwt/agentdock/internal/mcp/client"
 	"github.com/uvwt/agentdock/internal/observability"
 	pluginruntime "github.com/uvwt/agentdock/internal/plugin"
@@ -52,6 +53,7 @@ type Runtime struct {
 	evolution      *evolution.Service
 	taskTools      *tooltask.Service
 	acp            *toolacp.Service
+	manualLLM      *manualllm.Broker
 	observer       *observability.Recorder
 	events         *observability.EventBus
 	alerts         alertTracker
@@ -223,11 +225,15 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 		}
 		runtime.acp = toolacp.NewMulti(cfg.EffectiveACPDefaultProfile(), managers)
 	}
+	if cfg.ManualLLMEnabled {
+		runtime.manualLLM = manualllm.NewBroker()
+	}
 	return runtime, nil
 }
 
 func (r *Runtime) Config() config.Config           { return r.cfg }
 func (r *Runtime) Workspace() *workspace.Workspace { return r.ws }
+func (r *Runtime) ManualLLM() *manualllm.Broker    { return r.manualLLM }
 
 func (r *Runtime) Close() error {
 	if r == nil {
@@ -251,6 +257,9 @@ func (r *Runtime) Close() error {
 		}
 		if commandCancel != nil {
 			commandCancel()
+		}
+		if r.manualLLM != nil {
+			r.manualLLM.Close()
 		}
 		if r.acp != nil {
 			if err := r.acp.Close(); err != nil {

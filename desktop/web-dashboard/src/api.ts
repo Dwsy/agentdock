@@ -7,6 +7,7 @@ export type Status = {
   path_model: string;
   auth_enabled: boolean;
   browser_enabled: boolean;
+  manual_llm_enabled?: boolean;
   memory_enabled: boolean;
   nexus_enabled: boolean;
   tool_count: number;
@@ -317,6 +318,44 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return data as T;
 }
 
+export type ManualLLMQueueEntry = {
+  request_id: string;
+  response_id: string;
+  session_id: string;
+  model: string;
+  status: 'queued' | 'claimed' | 'streaming' | 'completed' | 'failed' | 'cancelled' | string;
+  turn: number;
+  created_at: string;
+  claimed_at?: string;
+  completed_at?: string;
+  message_count: number;
+  new_message_count: number;
+  tool_count: number;
+  preview?: string;
+  copy_prompt: string;
+  error_message?: string;
+};
+
+export type ManualLLMQueue = {
+  ok: boolean;
+  enabled: boolean;
+  responses_path: string;
+  mcp_endpoint: string;
+  idle_prompt: string;
+  stats: {
+    queued_count: number;
+    active_count: number;
+    completed_count: number;
+    sessions_count: number;
+  };
+  requests: ManualLLMQueueEntry[];
+};
+
+export type ManualLLMCancelResult = {
+  ok: boolean;
+  request: ManualLLMQueueEntry;
+};
+
 export const api = {
   status: () => get<Status>('/status'),
   config: () => get<AppConfig>('/config'),
@@ -336,6 +375,9 @@ export const api = {
   plugins: () => get<Plugins>('/plugins'),
   mcp: () => get<MCPs>('/mcp'),
   catalog: () => get<Catalog>('/catalog'),
+  manualLLM: () => get<ManualLLMQueue>('/manual-llm'),
+  manualLLMCancel: (request_id: string, reason = 'cancelled from dashboard') =>
+    post<ManualLLMCancelResult>('/manual-llm/cancel', { request_id, reason }),
 };
 
 export type EventKind = 'call' | 'task' | 'artifact' | 'ping';

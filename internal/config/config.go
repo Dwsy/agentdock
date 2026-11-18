@@ -35,6 +35,14 @@ const (
 	TraceModeDisk   TraceMode = "disk"
 )
 
+// TokenCountMode 控制工具与手动推理桥接的 token 估算方式：tiktoken（默认）或 chars。
+type TokenCountMode string
+
+const (
+	TokenCountModeTiktoken TokenCountMode = "tiktoken"
+	TokenCountModeChars    TokenCountMode = "chars"
+)
+
 const (
 	defaultTraceRetentionDays = 3
 	defaultTraceBufferSize    = 32
@@ -180,6 +188,7 @@ type Config struct {
 	TraceBufferSize              int
 	TraceFlushMS                 int
 	TraceMaxRecords              int
+	UsageCountMode               TokenCountMode
 	NetworkCaptureEnabled        bool
 	NetworkCaptureMax            int
 }
@@ -305,6 +314,10 @@ func FromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	usageCountMode, err := usageCountModeFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 	var acpProfiles []ACPProfile
 	acpDefaultProfile := ""
 	acpMaxPrompts := 2
@@ -375,6 +388,7 @@ func FromEnv() (Config, error) {
 		TraceBufferSize:              traceBufferSize,
 		TraceFlushMS:                 traceFlushMS,
 		TraceMaxRecords:              traceMaxRecords,
+		UsageCountMode:               usageCountMode,
 		NetworkCaptureEnabled:        networkCaptureEnabled,
 		NetworkCaptureMax:            networkCaptureMax,
 	}, nil
@@ -448,6 +462,11 @@ func (c *Config) Normalize() error {
 	if err := c.normalizeManualLLM(); err != nil {
 		return err
 	}
+	usageCountMode, err := ParseTokenCountMode(string(c.UsageCountMode))
+	if err != nil {
+		return fmt.Errorf("AGENTDOCK_USAGE_COUNT_MODE: %w", err)
+	}
+	c.UsageCountMode = usageCountMode
 	c.TraceMode = TraceMode(strings.ToLower(strings.TrimSpace(string(c.TraceMode))))
 	if c.TraceMode == "" {
 		c.TraceMode = TraceModeOff
@@ -979,4 +998,26 @@ func (c *Config) normalizeManualLLM() error {
 		return fmt.Errorf("AGENTDOCK_MANUAL_LLM_WAIT_MS (%d) cannot exceed AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS (%d)", c.ManualLLMWaitMs, c.ManualLLMMaxWaitMs)
 	}
 	return nil
+}
+
+// ParseTokenCountMode parses AGENTDOCK_USAGE_COUNT_MODE (default tiktoken).
+func ParseTokenCountMode(value string) (TokenCountMode, error) {
+	mode := TokenCountMode(strings.ToLower(strings.TrimSpace(value)))
+	if mode == "" {
+		return TokenCountModeTiktoken, nil
+	}
+	switch mode {
+	case TokenCountModeTiktoken, TokenCountModeChars:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported token count mode %q; expected tiktoken or chars", value)
+	}
+}
+
+func usageCountModeFromEnv() (TokenCountMode, error) {
+	mode, err := ParseTokenCountMode(os.Getenv("AGENTDOCK_USAGE_COUNT_MODE"))
+	if err != nil {
+		return "", fmt.Errorf("AGENTDOCK_USAGE_COUNT_MODE: %w", err)
+	}
+	return mode, nil
 }

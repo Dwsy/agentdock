@@ -3,33 +3,94 @@ package observability
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/tiktoken-go/tokenizer"
 	toolcore "github.com/uvwt/agentdock/internal/tool/core"
 )
 
-// tokenSampleBytes 是 token 统计的精确计数上限。BPE 计数器（regexp2 分词）
-// 吞吐约 15 MB/s，128 KiB 采样在工具返回路径上要 8ms+；统计口径只要
-// 数量级准确，16 KiB 采样 + 字节比例外推降到 1ms 内。
+// TokenCountMode 控制工具与手动推理桥接的 token 估算口径：
+// tiktoken（默认，使用 cl100k_base + 大文本采样外推）或 chars（纯 UTF-8 字符数 / 4 向上取整）。
+type TokenCountMode string
+
+const (
+	TokenCountModeTiktoken TokenCountMode = "tiktoken"
+	TokenCountModeChars    TokenCountMode = "chars"
+)
+
+// tokenSampleBytes 是 tiktoken BPE 统计的精确计数上限。
 const tokenSampleBytes = 16 << 10
 
 // largeJSONStringThreshold bounds when a top-level string field inside a result map
-// is sampled directly instead of escaped and marshaled through encoding/json.
+// is counted directly instead of escaped and marshaled through encoding/json.
 const largeJSONStringThreshold = 2 * tokenSampleBytes
 
-// tokenCodec 是共享的 cl100k_base 编码器。Codec 计数无状态，词表用包内
-// sync.Once 懒加载，这里只缓存实例避免每次调用重复构建。
+// tokenCodec 是共享的 cl100k_base 编码器，词表通过 sync.Once 懒加载。
 var tokenCodec = sync.OnceValues(func() (tokenizer.Codec, error) {
 	return tokenizer.Get(tokenizer.Cl100kBase)
 })
 
-// CountTextTokens 统计文本的 token 数（cl100k_base 近似口径）。
-// 超过 tokenSampleBytes 的文本只精确统计前缀，超出部分按字节比例外推；
-// 计数失败退化为字节/4 估算——token 统计是度量，不能反过来让工具调用失败。
+var activeTokenCountMode atomic.Int32 // 0 = tiktoken (default), 1 = chars
+
+// ParseTokenCountMode 解析并校验 token 估算模式；空字符串回落为 tiktoken。
+func ParseTokenCountMode(value string) (TokenCountMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", string(TokenCountModeTiktoken):
+		return TokenCountModeTiktoken, nil
+	case string(TokenCountModeChars):
+		return TokenCountModeChars, nil
+	default:
+		return "", fmt.Errorf("unsupported token count mode %q; expected tiktoken or chars", value)
+	}
+}
+
+// SetTokenCountMode 切换全局默认 token 统计模式；未识别值回落为 tiktoken。
+func SetTokenCountMode(mode TokenCountMode) {
+	if mode == TokenCountModeChars {
+		activeTokenCountMode.Store(1)
+		return
+	}
+	activeTokenCountMode.Store(0)
+}
+
+// CurrentTokenCountMode 返回当前全局默认 token 统计模式。
+func CurrentTokenCountMode() TokenCountMode {
+	if activeTokenCountMode.Load() == 1 {
+		return TokenCountModeChars
+	}
+	return TokenCountModeTiktoken
+}
+
+func normalizeTokenCountMode(mode TokenCountMode) TokenCountMode {
+	if mode == TokenCountModeChars {
+		return TokenCountModeChars
+	}
+	return TokenCountModeTiktoken
+}
+
+func tokensFromCharCount(chars int) int {
+	if chars <= 0 {
+		return 0
+	}
+	return (chars + 3) / 4
+}
+
+// CountTextTokens 按当前全局配置模式统计文本的 token 数。
 func CountTextTokens(text string) int {
+	return CountTextTokensWithMode(text, CurrentTokenCountMode())
+}
+
+// CountTextTokensWithMode 按指定模式统计文本的 token 数。
+func CountTextTokensWithMode(text string, mode TokenCountMode) int {
 	if text == "" {
 		return 0
+	}
+	if normalizeTokenCountMode(mode) == TokenCountModeChars {
+		return tokensFromCharCount(utf8.RuneCountInString(text))
 	}
 	sample := text
 	if len(sample) > tokenSampleBytes {
@@ -42,32 +103,39 @@ func CountTextTokens(text string) int {
 	return counted * len(text) / len(sample)
 }
 
-// CountJSONTokens 统计值经 JSON 序列化后的 token 数，序列化失败时返回 0。
-// 只累加计数，任何正文都不会被保存。
+// CountJSONTokens 按当前全局配置模式统计值经 JSON 序列化后的 token 数。
 func CountJSONTokens(value any) int {
+	return CountJSONTokensWithMode(value, CurrentTokenCountMode())
+}
+
+// CountJSONTokensWithMode 按指定模式统计值经 JSON 序列化后的 token 数。
+func CountJSONTokensWithMode(value any, mode TokenCountMode) int {
 	if value == nil {
 		return 0
 	}
+	mode = normalizeTokenCountMode(mode)
 	switch v := value.(type) {
 	case string:
 		if len(v) > largeJSONStringThreshold {
-			return CountTextTokens(v)
+			return CountTextTokensWithMode(v, mode)
 		}
 	case []byte:
 		if len(v) > largeJSONStringThreshold {
+			if mode == TokenCountModeChars {
+				return tokensFromCharCount(base64.StdEncoding.EncodedLen(len(v)) + 2)
+			}
 			return countLargeBytesTokens(v)
 		}
 	case map[string]any:
-		return countMapJSONTokens(v)
+		return countMapJSONTokensWithMode(v, mode)
 	case toolcore.Result:
-		return countMapJSONTokens(map[string]any(v))
+		return countMapJSONTokensWithMode(map[string]any(v), mode)
 	}
-	return countEncodedJSONTokens(value)
+	return countEncodedJSONTokensWithMode(value, mode)
 }
 
 func countLargeBytesTokens(data []byte) int {
 	encodedTotal := base64.StdEncoding.EncodedLen(len(data))
-	// 12 KiB of raw bytes encodes to exactly 16 KiB (tokenSampleBytes) of base64.
 	const rawSampleMax = (tokenSampleBytes / 4) * 3
 	raw := data
 	if len(raw) > rawSampleMax {
@@ -83,7 +151,7 @@ func countLargeBytesTokens(data []byte) int {
 	return counted * encodedTotal / sampleLen
 }
 
-func countMapJSONTokens(m map[string]any) int {
+func countMapJSONTokensWithMode(m map[string]any, mode TokenCountMode) int {
 	hasLarge := false
 	for _, entry := range m {
 		if s, ok := entry.(string); ok && len(s) > largeJSONStringThreshold {
@@ -92,19 +160,26 @@ func countMapJSONTokens(m map[string]any) int {
 		}
 	}
 	if !hasLarge {
-		return countEncodedJSONTokens(m)
+		return countEncodedJSONTokensWithMode(m, mode)
 	}
-	largeTokens := 0
+	largeCount := 0
 	rest := make(map[string]any, len(m))
 	for k, entry := range m {
 		if s, ok := entry.(string); ok && len(s) > largeJSONStringThreshold {
-			largeTokens += CountTextTokens(s)
+			if mode == TokenCountModeChars {
+				largeCount += utf8.RuneCountInString(s)
+			} else {
+				largeCount += CountTextTokensWithMode(s, TokenCountModeTiktoken)
+			}
 			rest[k] = ""
 			continue
 		}
 		rest[k] = entry
 	}
-	return largeTokens + countEncodedJSONTokens(rest)
+	if mode == TokenCountModeChars {
+		return tokensFromCharCount(largeCount + encodedJSONCharCount(rest))
+	}
+	return largeCount + countEncodedJSONTokensWithMode(rest, TokenCountModeTiktoken)
 }
 
 type sampleCountWriter struct {
@@ -122,12 +197,44 @@ func (w *sampleCountWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func countEncodedJSONTokens(value any) int {
+type runeCountWriter struct {
+	chars    int
+	lastByte byte
+	total    int
+}
+
+func (w *runeCountWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b&0xc0 != 0x80 {
+			w.chars++
+		}
+		w.lastByte = b
+	}
+	w.total += len(p)
+	return len(p), nil
+}
+
+func encodedJSONCharCount(value any) int {
+	var w runeCountWriter
+	if err := json.NewEncoder(&w).Encode(value); err != nil {
+		return 0
+	}
+	chars := w.chars
+	// 去掉 json.Encoder 末尾自动追加的单个换行符，使其与 json.Marshal 一致。
+	if w.total > 0 && w.lastByte == '\n' && chars > 0 {
+		chars--
+	}
+	return chars
+}
+
+func countEncodedJSONTokensWithMode(value any, mode TokenCountMode) int {
+	if mode == TokenCountModeChars {
+		return tokensFromCharCount(encodedJSONCharCount(value))
+	}
 	var w sampleCountWriter
 	if err := json.NewEncoder(&w).Encode(value); err != nil {
 		return 0
 	}
-	// Strip the single trailing newline added by json.Encoder.Encode so results match json.Marshal.
 	total := w.total
 	if total > 0 && (w.sampleLen < total || w.buf[w.sampleLen-1] == '\n') {
 		total--
@@ -146,8 +253,6 @@ func countEncodedJSONTokens(value any) int {
 func countSampleTokens(sample string) int {
 	codec, err := tokenCodec()
 	if err != nil {
-		// 词表内嵌在二进制里，正常构建不可能失败；真失败时退化估算
-		// 而不是让统计归零。
 		return len(sample) / 4
 	}
 	counted, err := codec.Count(sample)

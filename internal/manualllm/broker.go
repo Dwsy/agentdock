@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 var (
@@ -229,10 +231,12 @@ func (b *Broker) ServeResponses(ctx context.Context, w http.ResponseWriter, body
 		return
 	}
 
-	sse := NewLiveSSEWriter(w, req.ResponseID, req.Model, req.CreatedAt.Unix(), req.Tools, len(body))
+	opts := b.Options()
+	inTokens := observability.CountTextTokensWithMode(string(body), opts.TokenCountMode)
+	sse := NewLiveSSEWriter(w, req.ResponseID, req.Model, req.CreatedAt.Unix(), req.Tools, inTokens, opts.TokenCountMode)
 	sse.Start()
 
-	ticker := time.NewTicker(b.Options().KeepaliveInterval)
+	ticker := time.NewTicker(opts.KeepaliveInterval)
 	defer ticker.Stop()
 
 	drainAndApply := func(cursor *int) bool {

@@ -638,4 +638,17 @@ func TestFromEnvManualLLMTuning(t *testing.T) {
 	if err := badWaitCfg.Normalize(); err == nil || !strings.Contains(err.Error(), "AGENTDOCK_MANUAL_LLM_WAIT_MS") {
 		t.Fatalf("Normalize() expected wait_ms > max_wait_ms error, got %v", err)
 	}
+
+	if cfg.UsageCountMode != TokenCountModeTiktoken {
+		t.Fatalf("default UsageCountMode = %q, want tiktoken", cfg.UsageCountMode)
+	}
+	t.Setenv("AGENTDOCK_USAGE_COUNT_MODE", "chars")
+	charsCfg, err := FromEnv()
+	if err != nil || charsCfg.UsageCountMode != TokenCountModeChars {
+		t.Fatalf("AGENTDOCK_USAGE_COUNT_MODE=chars got (%+v, %v)", charsCfg.UsageCountMode, err)
+	}
+	t.Setenv("AGENTDOCK_USAGE_COUNT_MODE", "unknown")
+	if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "AGENTDOCK_USAGE_COUNT_MODE") {
+		t.Fatalf("expected error for invalid AGENTDOCK_USAGE_COUNT_MODE, got %v", err)
+	}
 }

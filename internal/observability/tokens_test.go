@@ -4,16 +4,30 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	toolcore "github.com/uvwt/agentdock/internal/tool/core"
 )
 
 func TestCountTextTokensHandlesEmptyAndSmallInput(t *testing.T) {
+	if CurrentTokenCountMode() != TokenCountModeTiktoken {
+		t.Fatalf("default TokenCountMode = %q, want %q", CurrentTokenCountMode(), TokenCountModeTiktoken)
+	}
 	if got := CountTextTokens(""); got != 0 {
 		t.Fatalf("empty text tokens = %d, want 0", got)
 	}
 	if got := CountTextTokens("hello world"); got <= 0 {
 		t.Fatalf("small text tokens = %d, want > 0", got)
+	}
+	if got := CountTextTokensWithMode("hello world", TokenCountModeChars); got != 3 {
+		t.Fatalf("chars mode small text tokens = %d, want 3", got)
+	}
+	// 多字节中文在 chars 模式下按字符数计算（4 个字符 -> 1 token），不按 12 字节计数。
+	if got := CountTextTokensWithMode("基于字符", TokenCountModeChars); got != 1 {
+		t.Fatalf("cjk 4-char tokens = %d, want 1", got)
+	}
+	if got := CountTextTokensWithMode("基于字符数", TokenCountModeChars); got != 2 {
+		t.Fatalf("cjk 5-char tokens = %d, want 2", got)
 	}
 }
 
@@ -102,8 +116,8 @@ func TestCountJSONTokensLargeResultMapBoundedAndAccurate(t *testing.T) {
 	}
 }
 
-// 超过采样上限的文本按字节比例外推，结果必须接近整段精确计数。
-func TestCountTextTokensScalesLongInput(t *testing.T) {
+// 默认 tiktoken 模式下，超过采样上限的文本按字节比例外推，结果必须接近整段精确计数。
+func TestCountTextTokensScalesLongInputAndSupportsModeSwitch(t *testing.T) {
 	long := strings.Repeat("agentdock token statistics ", 40000)
 	if len(long) <= tokenSampleBytes {
 		t.Fatalf("test text too short: %d bytes", len(long))
@@ -117,12 +131,31 @@ func TestCountTextTokensScalesLongInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	scaled := CountTextTokens(long)
-	// 重复文本的 token 密度均匀，外推误差应在 5% 以内。
 	diff := scaled - exact
 	if diff < 0 {
 		diff = -diff
 	}
 	if diff > exact/20 {
 		t.Fatalf("scaled tokens = %d, exact = %d, want within 5%%", scaled, exact)
+	}
+
+	// 验证全局模式可切换到 chars，且 Parity 仍严格一致。
+	t.Cleanup(func() { SetTokenCountMode(TokenCountModeTiktoken) })
+	SetTokenCountMode(TokenCountModeChars)
+	if CurrentTokenCountMode() != TokenCountModeChars {
+		t.Fatalf("CurrentTokenCountMode() = %q, want chars", CurrentTokenCountMode())
+	}
+	cjk := strings.Repeat("agentdock字符统计 ", 40000)
+	wantChars := (utf8.RuneCountInString(cjk) + 3) / 4
+	if got := CountTextTokens(cjk); got != wantChars {
+		t.Fatalf("CountTextTokens(cjk) = %d, want %d", got, wantChars)
+	}
+	payload := map[string]any{"msg": "基于字符计数", "ok": true}
+	raw, _ := json.Marshal(payload)
+	if got, want := CountJSONTokens(payload), CountTextTokens(string(raw)); got != want {
+		t.Fatalf("chars mode JSON parity mismatch: got=%d want=%d", got, want)
+	}
+	if _, err := ParseTokenCountMode("invalid-mode"); err == nil {
+		t.Fatal("expected ParseTokenCountMode error on invalid value")
 	}
 }

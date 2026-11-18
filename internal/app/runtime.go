@@ -76,6 +76,7 @@ type Runtime struct {
 }
 
 func NewRuntime(cfg config.Config) (*Runtime, error) {
+	observability.SetTokenCountMode(observability.TokenCountMode(cfg.UsageCountMode))
 	toolNames, toolValidators, err := compileAvailableToolContracts(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("initialize tool contracts: %w", err)
@@ -251,6 +252,7 @@ func (r *Runtime) manualLLMOptions() manualllm.Options {
 		CacheTTL:              time.Duration(cfg.ManualLLMCacheTTLSec) * time.Second,
 		KeepaliveInterval:     time.Duration(cfg.ManualLLMKeepaliveMS) * time.Millisecond,
 		MaxRetainedImageBytes: int64(cfg.ManualLLMCacheMaxImageMB) * 1024 * 1024,
+		TokenCountMode:        observability.TokenCountMode(cfg.UsageCountMode),
 	}).Normalized()
 }
 

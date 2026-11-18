@@ -16,6 +16,8 @@ import (
 	"unicode/utf8"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 func intPtr(v int) *int { return &v }
@@ -1076,5 +1078,201 @@ func TestPruneRetainsExactCapAndImageByteBudgetAndCustomOptions(t *testing.T) {
 	}
 	if len(imgsOlder) == 1 && len(imgsOlder[0].Data) != 0 {
 		t.Fatalf("expected older terminal image bytes pruned beyond 1500B budget, got %d bytes", len(imgsOlder[0].Data))
+	}
+}
+
+func TestCodexResponsesAdditionalToolsIncrementalContextAndSystemPrompt(t *testing.T) {
+	b := NewBroker()
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Build a multi-chunk 12 KiB system prompt (> default 4096B slice size).
+	var sysBuf strings.Builder
+	for i := 0; i < 60; i++ {
+		sysBuf.WriteString("You are Codex, collaborating in an AgentDock workspace. ")
+		sysBuf.WriteString("Follow repository guidelines, verify edits with targeted tests, and never fabricate tool outputs.\n")
+	}
+	systemPrompt := sysBuf.String()
+
+	additionalToolsItem := map[string]any{
+		"type": "additional_tools",
+		"role": "developer",
+		"tools": []any{
+			map[string]any{
+				"type": "namespace",
+				"name": "functions",
+				"tools": []any{
+					map[string]any{
+						"type":        "custom",
+						"name":        "exec",
+						"description": "Execute command in workspace",
+						"format":      map[string]any{"type": "text"},
+					},
+					map[string]any{
+						"type":        "function",
+						"name":        "read_file",
+						"description": "Read repository file",
+						"strict":      true,
+						"parameters":  map[string]any{"type": "object"},
+					},
+				},
+			},
+		},
+	}
+
+	// Turn 1 mirrors a real Codex Responses payload: instructions + additional_tools + developer + user + namespaced context output without call_id.
+	turn1Input := []any{
+		additionalToolsItem,
+		map[string]any{"type": "message", "role": "developer", "content": []any{map[string]any{"type": "input_text", "text": "workspace_ts=100"}}},
+		map[string]any{"type": "function_call_output", "name": "open_page", "namespace": "agent", "output": `{"page_id":null}`},
+		map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "Inspect repo status"}}},
+	}
+	b1, _ := json.Marshal(map[string]any{
+		"model":            "gpt-5.4-codex",
+		"stream":           true,
+		"prompt_cache_key": "codex_replay_1",
+		"instructions":     systemPrompt,
+		"input":            turn1Input,
+	})
+	rec1 := httptest.NewRecorder()
+	done1 := make(chan struct{})
+	go func() { defer close(done1); b.ServeResponses(ctx, rec1, b1) }()
+
+	w1, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w1.Turn == nil {
+		t.Fatalf("wait 1: %v %+v", err, w1)
+	}
+	// Verify additional_tools did not emit a bogus empty message and merged its tools cleanly,
+	// and namespaced function_call_output without call_id kept Name="agent.open_page".
+	if len(w1.Turn.NewMessages) != 3 {
+		t.Fatalf("expected 3 messages (excluding additional_tools), got %d: %+v", len(w1.Turn.NewMessages), w1.Turn.NewMessages)
+	}
+	if w1.Turn.NewMessages[1].Name != "agent.open_page" {
+		t.Fatalf("expected qualified tool output name agent.open_page, got %+v", w1.Turn.NewMessages[1])
+	}
+	if !w1.Turn.Context.HasSystemPrompt || !w1.Turn.Context.SystemPromptChanged || w1.Turn.Context.SystemPromptBytes != len(systemPrompt) {
+		t.Fatalf("unexpected system prompt manifest: %+v", w1.Turn.Context)
+	}
+	if !w1.Turn.Context.ToolsChanged || w1.Turn.Context.ToolCount != 2 {
+		t.Fatalf("expected 2 merged tools from additional_tools, got %+v", w1.Turn.Context)
+	}
+
+	// Page through the entire system prompt via llm_wait(action="prompt", include=["system_prompt"]).
+	var reassembledSys strings.Builder
+	offset := 0
+	chunks := 0
+	for {
+		pOut, _, pErr := b.Wait(ctx, WaitInput{
+			Action:      "prompt",
+			RequestID:   w1.Turn.RequestID,
+			Include:     []string{"system_prompt"},
+			OffsetBytes: offset,
+			MaxBytes:    4096,
+		})
+		if pErr != nil || pOut.Prompt == nil || pOut.Prompt.SystemPrompt == nil {
+			t.Fatalf("prompt chunk offset=%d error: %v %+v", offset, pErr, pOut)
+		}
+		reassembledSys.WriteString(pOut.Prompt.SystemPrompt.Content)
+		chunks++
+		if pOut.Prompt.SystemPrompt.EOF {
+			break
+		}
+		offset = pOut.Prompt.SystemPrompt.NextOffset
+	}
+	if chunks < 2 || reassembledSys.String() != systemPrompt {
+		t.Fatalf("reassembled system prompt mismatch: chunks=%d got=%d want=%d", chunks, reassembledSys.Len(), len(systemPrompt))
+	}
+
+	// Emit custom tool call (exec) and complete Turn 1.
+	if _, _, err := b.Submit(ctx, SubmitInput{
+		RequestID: w1.Turn.RequestID,
+		Events: []Event{
+			{Type: "tool_call", Name: "exec", CallID: "call_codex_1", Arguments: "git status -s"},
+			{Type: "done", Reason: "tool_calls"},
+		},
+	}); err != nil {
+		t.Fatalf("submit 1: %v", err)
+	}
+	<-done1
+
+	// Turn 2 replays full Codex transcript with reasoning item + large list custom_tool_call_output + updated developer ts.
+	largeCmdOut := strings.Repeat("modified: internal/manualllm/broker.go\n", 90)
+	turn2Input := append(append([]any(nil), turn1Input...),
+		map[string]any{"type": "reasoning", "encrypted_content": "opaque-encrypted-payload"},
+		map[string]any{"type": "custom_tool_call", "name": "exec", "call_id": "call_codex_1", "input": "git status -s"},
+		map[string]any{
+			"type":    "custom_tool_call_output",
+			"call_id": "call_codex_1",
+			"output":  []any{map[string]any{"type": "input_text", "text": largeCmdOut}},
+		},
+	)
+	b2, _ := json.Marshal(map[string]any{
+		"model":            "gpt-5.4-codex",
+		"stream":           true,
+		"prompt_cache_key": "codex_replay_1",
+		"instructions":     systemPrompt,
+		"input":            turn2Input,
+	})
+	rec2 := httptest.NewRecorder()
+	done2 := make(chan struct{})
+	go func() { defer close(done2); b.ServeResponses(ctx, rec2, b2) }()
+
+	w2, _, err := b.Wait(ctx, WaitInput{SessionID: w1.Turn.SessionID, WaitMs: intPtr(3000)})
+	if err != nil || w2.Turn == nil {
+		t.Fatalf("wait 2: %v %+v", err, w2)
+	}
+	if w2.Turn.Context.SystemPromptChanged || w2.Turn.Context.ToolsChanged {
+		t.Fatalf("expected warm system_prompt/tools hit on Turn 2, got %+v", w2.Turn.Context)
+	}
+	if len(w2.Turn.NewMessages) != 1 || w2.Turn.NewMessages[0].CallID != "call_codex_1" || !w2.Turn.NewMessages[0].Truncated {
+		t.Fatalf("expected only truncated incremental custom_tool_call_output in Turn 2, got %+v", w2.Turn.NewMessages)
+	}
+	if w2.Turn.Context.OmittedMessages != 4 {
+		t.Fatalf("expected 4 omitted prior messages, got %+v", w2.Turn.Context)
+	}
+	// Fetch full custom_tool_call_output via action="history" using call_id.
+	histOut, _, err := b.Wait(ctx, WaitInput{
+		Action:    "history",
+		RequestID: w2.Turn.RequestID,
+		CallID:    "call_codex_1",
+		MaxBytes:  8192,
+	})
+	if err != nil || histOut.Slice == nil || histOut.Slice.Content != largeCmdOut {
+		t.Fatalf("expected full history slice for call_codex_1: %v %+v", err, histOut)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{
+		RequestID: w2.Turn.RequestID,
+		Events:    []Event{{Type: "text", Text: "完成验证"}, {Type: "done", Reason: "stop"}},
+	}); err != nil {
+		t.Fatalf("submit 2: %v", err)
+	}
+	<-done2
+	frames2 := readSSEFrames(t, rec2.Body)
+	// 默认 tiktoken 模式下 "完成验证" 与输入均应按 cl100k_base 计算出正数 token。
+	if len(frames2) < 2 || !strings.Contains(frames2[len(frames2)-2].Data, `"total_tokens"`) {
+		t.Fatalf("expected usage in tiktoken mode, got %+v", frames2)
+	}
+	// 验证切换为 chars 模式后，4 个中文字符按字符数计数为 1 output_token。
+	bChars := NewBrokerWithOptions(Options{TokenCountMode: observability.TokenCountModeChars})
+	defer bChars.Close()
+	cBody, _ := json.Marshal(map[string]any{"model": "manual", "stream": true, "input": "基于字符"})
+	recChars := httptest.NewRecorder()
+	doneChars := make(chan struct{})
+	go func() { defer close(doneChars); bChars.ServeResponses(ctx, recChars, cBody) }()
+	wc, _, err := bChars.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || wc.Turn == nil {
+		t.Fatalf("chars broker wait: %v", err)
+	}
+	if _, _, err := bChars.Submit(ctx, SubmitInput{
+		RequestID: wc.Turn.RequestID,
+		Events:    []Event{{Type: "text", Text: "完成验证"}, {Type: "done", Reason: "stop"}},
+	}); err != nil {
+		t.Fatalf("chars broker submit: %v", err)
+	}
+	<-doneChars
+	framesChars := readSSEFrames(t, recChars.Body)
+	if len(framesChars) < 2 || !strings.Contains(framesChars[len(framesChars)-2].Data, `"output_tokens":1`) {
+		t.Fatalf("expected 4 CJK chars to count as 1 output_token in chars mode, got %+v", framesChars)
 	}
 }

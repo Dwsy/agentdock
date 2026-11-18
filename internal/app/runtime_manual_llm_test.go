@@ -9,6 +9,7 @@ import (
 
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/envstore"
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 func TestRuntimeManualLLMToggleAndConfigUpdate(t *testing.T) {
@@ -175,5 +176,31 @@ func TestRuntimeManualLLMToggleAndConfigUpdate(t *testing.T) {
 	parsedCustom, err := envstore.ParseFile(customEnvPath)
 	if err != nil || parsedCustom["AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES"] != "3072" {
 		t.Fatalf("expected persisted custom env value, got %+v err=%v", parsedCustom, err)
+	}
+
+	// Verify AGENTDOCK_USAGE_COUNT_MODE defaults to tiktoken, validates, persists, and switches to chars.
+	t.Cleanup(func() { observability.SetTokenCountMode(observability.TokenCountModeTiktoken) })
+	if cfgTunedVals["AGENTDOCK_USAGE_COUNT_MODE"] != "tiktoken" {
+		t.Fatalf("default RuntimeConfig AGENTDOCK_USAGE_COUNT_MODE = %q, want tiktoken", cfgTunedVals["AGENTDOCK_USAGE_COUNT_MODE"])
+	}
+	if _, err := rtTuned.RuntimeConfigUpdate(map[string]string{"AGENTDOCK_USAGE_COUNT_MODE": "bogus"}); err == nil {
+		t.Fatal("expected validation error for bogus AGENTDOCK_USAGE_COUNT_MODE")
+	}
+	if _, err := rtTuned.RuntimeConfigUpdate(map[string]string{"AGENTDOCK_USAGE_COUNT_MODE": "chars"}); err != nil {
+		t.Fatalf("RuntimeConfigUpdate chars error = %v", err)
+	}
+	cfgChars := cfgOff
+	cfgChars.ManualLLMEnabled = true
+	cfgChars.UsageCountMode = config.TokenCountModeChars
+	rtChars, err := NewRuntime(cfgChars)
+	if err != nil {
+		t.Fatalf("NewRuntime(chars) error = %v", err)
+	}
+	defer rtChars.Close()
+	if observability.CurrentTokenCountMode() != observability.TokenCountModeChars {
+		t.Fatalf("CurrentTokenCountMode() = %q, want chars", observability.CurrentTokenCountMode())
+	}
+	if gotMode := rtChars.ManualLLM().Options().TokenCountMode; gotMode != observability.TokenCountModeChars {
+		t.Fatalf("broker TokenCountMode = %q, want chars", gotMode)
 	}
 }

@@ -65,6 +65,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	flags.StringVar(&cfg.LogLevel, "log-level", cfg.LogLevel, "log level: debug, info, warn, error")
 	mcpAppsMode := string(cfg.MCPAppsMode)
 	flags.StringVar(&mcpAppsMode, "mcp-apps-mode", mcpAppsMode, "chat card mode: full, compact, off")
+	usageCountMode := string(cfg.UsageCountMode)
+	flags.StringVar(&usageCountMode, "usage-count-mode", usageCountMode, "token estimation mode: tiktoken, chars")
 	flags.BoolVar(&cfg.BrowserEnabled, "browser-enabled", cfg.BrowserEnabled, "expose optional browser automation tools")
 	flags.BoolVar(&cfg.ManualLLMEnabled, "manual-llm-enabled", cfg.ManualLLMEnabled, "expose manual /v1/responses and /mcp/manual LLM bridge")
 	flags.IntVar(&cfg.ManualLLMPreviewBytes, "manual-llm-preview-bytes", cfg.ManualLLMPreviewBytes, "inline message preview byte budget for manual llm_wait(wait)")
@@ -95,6 +97,11 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	cfg.MCPAppsMode = parsedMCPAppsMode
+	parsedUsageCountMode, err := config.ParseTokenCountMode(usageCountMode)
+	if err != nil {
+		return err
+	}
+	cfg.UsageCountMode = parsedUsageCountMode
 	if err := cfg.Normalize(); err != nil {
 		return err
 	}

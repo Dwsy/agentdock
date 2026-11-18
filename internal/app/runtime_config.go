@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/desktopruntime"
 	"github.com/uvwt/agentdock/internal/envstore"
 	"github.com/uvwt/agentdock/internal/fs/atomicfile"
@@ -41,6 +42,7 @@ var editableConfigKeys = []string{
 	"AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC",
 	"AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS",
 	"AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB",
+	"AGENTDOCK_USAGE_COUNT_MODE",
 	"AGENTDOCK_TRACE_MODE",
 	"AGENTDOCK_TRACE_RETENTION_DAYS",
 	"AGENTDOCK_NETWORK_CAPTURE_ENABLED",
@@ -109,6 +111,7 @@ func (r *Runtime) RuntimeConfig() Result {
 		"AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC":       strconv.Itoa(cfg.ManualLLMCacheTTLSec),
 		"AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS":        strconv.Itoa(cfg.ManualLLMKeepaliveMS),
 		"AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB":  strconv.Itoa(cfg.ManualLLMCacheMaxImageMB),
+		"AGENTDOCK_USAGE_COUNT_MODE":               string(effectiveUsageCountMode(cfg.UsageCountMode)),
 		"AGENTDOCK_TRACE_MODE":                     string(cfg.TraceMode),
 		"AGENTDOCK_TRACE_RETENTION_DAYS":           strconv.Itoa(cfg.TraceRetentionDays),
 		"AGENTDOCK_NETWORK_CAPTURE_ENABLED":        strconv.FormatBool(cfg.NetworkCaptureEnabled),
@@ -165,6 +168,12 @@ func validateConfigUpdate(key, value string) error {
 		default:
 			return errors.New("trace_mode 必须是 disk/memory/off")
 		}
+	case "AGENTDOCK_USAGE_COUNT_MODE":
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "tiktoken", "chars":
+		default:
+			return errors.New("usage_count_mode 必须是 tiktoken/chars")
+		}
 	case "AGENTDOCK_TRACE_RETENTION_DAYS":
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || n < 1 || n > 3650 {
@@ -219,6 +228,13 @@ func validateIntRange(value string, minVal, maxVal int, label string) error {
 		return fmt.Errorf("%s 必须是 %d-%d 的整数", label, minVal, maxVal)
 	}
 	return nil
+}
+
+func effectiveUsageCountMode(mode config.TokenCountMode) config.TokenCountMode {
+	if mode == config.TokenCountModeChars {
+		return config.TokenCountModeChars
+	}
+	return config.TokenCountModeTiktoken
 }
 
 func isEditableConfigKey(key string) bool {

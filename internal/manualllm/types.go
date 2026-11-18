@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 const (
@@ -74,6 +76,7 @@ type Options struct {
 	HistoryLimit          int
 	MaxHistoryLimit       int
 	MaxRetainedImageBytes int64
+	TokenCountMode        observability.TokenCountMode
 }
 
 // DefaultOptions returns production-safe defaults matching the compact progressive bridge contract.
@@ -91,6 +94,7 @@ func DefaultOptions() Options {
 		HistoryLimit:          DefaultHistoryLimit,
 		MaxHistoryLimit:       MaxHistoryLimit,
 		MaxRetainedImageBytes: int64(DefaultMaxRetainedImageMB) * 1024 * 1024,
+		TokenCountMode:        observability.CurrentTokenCountMode(),
 	}
 }
 
@@ -167,6 +171,13 @@ func (o Options) Normalized() Options {
 			o.MaxRetainedImageBytes = maxBytes
 		}
 	}
+	if o.TokenCountMode == "" {
+		o.TokenCountMode = def.TokenCountMode
+	} else if parsed, err := observability.ParseTokenCountMode(string(o.TokenCountMode)); err == nil {
+		o.TokenCountMode = parsed
+	} else {
+		o.TokenCountMode = observability.TokenCountModeTiktoken
+	}
 	return o
 }
 
@@ -184,21 +195,23 @@ func (o Options) TuningView() QueueTuning {
 		CacheTTLSeconds:    int(n.CacheTTL.Seconds()),
 		KeepaliveMs:        int(n.KeepaliveInterval.Milliseconds()),
 		MaxRetainedImageMB: int(n.MaxRetainedImageBytes / (1024 * 1024)),
+		TokenCountMode:     string(n.TokenCountMode),
 	}
 }
 
 // QueueTuning reports effective manual LLM broker parameters for diagnostics and UI.
 type QueueTuning struct {
-	PreviewBytes       int `json:"preview_bytes"`
-	SliceBytes         int `json:"slice_bytes"`
-	MaxSliceBytes      int `json:"max_slice_bytes"`
-	WaitMs             int `json:"wait_ms"`
-	MaxWaitMs          int `json:"max_wait_ms"`
-	MaxPending         int `json:"max_pending"`
-	CacheMaxResponses  int `json:"cache_max_responses"`
-	CacheTTLSeconds    int `json:"cache_ttl_sec"`
-	KeepaliveMs        int `json:"keepalive_ms"`
-	MaxRetainedImageMB int `json:"cache_max_image_mb"`
+	PreviewBytes       int    `json:"preview_bytes"`
+	SliceBytes         int    `json:"slice_bytes"`
+	MaxSliceBytes      int    `json:"max_slice_bytes"`
+	WaitMs             int    `json:"wait_ms"`
+	MaxWaitMs          int    `json:"max_wait_ms"`
+	MaxPending         int    `json:"max_pending"`
+	CacheMaxResponses  int    `json:"cache_max_responses"`
+	CacheTTLSeconds    int    `json:"cache_ttl_sec"`
+	KeepaliveMs        int    `json:"keepalive_ms"`
+	MaxRetainedImageMB int    `json:"cache_max_image_mb"`
+	TokenCountMode     string `json:"token_count_mode,omitempty"`
 }
 
 // RequestStatus tracks the lifecycle of one /v1/responses request in the queue.

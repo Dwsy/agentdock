@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/uvwt/agentdock/internal/observability"
 )
 
 // ResponsesError describes a structured OpenAI Responses API HTTP error.
@@ -58,14 +60,16 @@ type rawTextOptions struct {
 }
 
 type rawInputItem struct {
-	Type      string          `json:"type"`
-	Role      string          `json:"role"`
-	Name      string          `json:"name"`
-	CallID    string          `json:"call_id"`
-	Arguments string          `json:"arguments"`
-	Input     string          `json:"input"`
-	Content   json.RawMessage `json:"content"`
-	Output    json.RawMessage `json:"output"`
+	Type      string            `json:"type"`
+	Role      string            `json:"role"`
+	Namespace string            `json:"namespace"`
+	Name      string            `json:"name"`
+	CallID    string            `json:"call_id"`
+	Arguments string            `json:"arguments"`
+	Input     string            `json:"input"`
+	Content   json.RawMessage   `json:"content"`
+	Output    json.RawMessage   `json:"output"`
+	Tools     []json.RawMessage `json:"tools"`
 }
 
 type rawContentPart struct {
@@ -120,13 +124,16 @@ func ParseResponsesRequest(body []byte) (ResponsesInput, error) {
 	}
 
 	imageSeq := 0
-	messages, err := parseResponsesInputItems(raw.Input, &imageSeq)
+	messages, extraTools, err := parseResponsesInputItems(raw.Input, &imageSeq)
 	if err != nil {
 		return ResponsesInput{}, err
 	}
 	tools, err := parseResponsesTools(raw.Tools)
 	if err != nil {
 		return ResponsesInput{}, err
+	}
+	if len(extraTools) > 0 {
+		tools = append(tools, extraTools...)
 	}
 
 	var textFormat any
@@ -189,10 +196,10 @@ func parseConversationID(raw json.RawMessage) string {
 	return ""
 }
 
-func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, error) {
+func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, []ToolDef, error) {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
-		return nil, &ResponsesError{
+		return nil, nil, &ResponsesError{
 			StatusCode: http.StatusBadRequest,
 			Type:       "invalid_request_error",
 			Code:       "missing_input",
@@ -201,12 +208,12 @@ func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, er
 	}
 	var single string
 	if err := json.Unmarshal(raw, &single); err == nil {
-		return []Message{{Role: "user", Kind: "message", Text: single}}, nil
+		return []Message{{Role: "user", Kind: "message", Text: single}}, nil, nil
 	}
 
 	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
-		return nil, &ResponsesError{
+		return nil, nil, &ResponsesError{
 			StatusCode: http.StatusBadRequest,
 			Type:       "invalid_request_error",
 			Code:       "invalid_input",
@@ -215,10 +222,11 @@ func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, er
 	}
 
 	out := make([]Message, 0, len(items))
+	var extraTools []ToolDef
 	for _, rawItem := range items {
 		var item rawInputItem
 		if err := json.Unmarshal(rawItem, &item); err != nil {
-			return nil, &ResponsesError{
+			return nil, nil, &ResponsesError{
 				StatusCode: http.StatusBadRequest,
 				Type:       "invalid_request_error",
 				Code:       "invalid_input_item",
@@ -234,12 +242,12 @@ func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, er
 			role := normalizeRole(item.Role)
 			text, imgs, err := parseMessageContent(item.Content, imageSeq)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, Message{
 				Role:   role,
 				Kind:   "message",
-				Name:   strings.TrimSpace(item.Name),
+				Name:   qualifiedItemName(item.Namespace, item.Name),
 				Text:   text,
 				Images: imgs,
 			})
@@ -247,18 +255,19 @@ func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, er
 			out = append(out, Message{
 				Role:   "assistant",
 				Kind:   "tool_call",
-				Name:   strings.TrimSpace(item.Name),
+				Name:   qualifiedItemName(item.Namespace, item.Name),
 				CallID: strings.TrimSpace(item.CallID),
 				Text:   item.Arguments,
 			})
 		case "function_call_output":
 			text, imgs, err := parseMessageContent(item.Output, imageSeq)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, Message{
 				Role:   "tool",
 				Kind:   "tool_output",
+				Name:   qualifiedItemName(item.Namespace, item.Name),
 				CallID: strings.TrimSpace(item.CallID),
 				Text:   text,
 				Images: imgs,
@@ -267,22 +276,29 @@ func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, er
 			out = append(out, Message{
 				Role:   "assistant",
 				Kind:   "custom_tool_call",
-				Name:   strings.TrimSpace(item.Name),
+				Name:   qualifiedItemName(item.Namespace, item.Name),
 				CallID: strings.TrimSpace(item.CallID),
 				Text:   item.Input,
 			})
 		case "custom_tool_call_output":
 			text, imgs, err := parseMessageContent(item.Output, imageSeq)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			out = append(out, Message{
 				Role:   "tool",
 				Kind:   "custom_tool_call_output",
+				Name:   qualifiedItemName(item.Namespace, item.Name),
 				CallID: strings.TrimSpace(item.CallID),
 				Text:   text,
 				Images: imgs,
 			})
+		case "additional_tools":
+			parsedExtra, err := parseResponsesTools(item.Tools)
+			if err != nil {
+				return nil, nil, err
+			}
+			extraTools = append(extraTools, parsedExtra...)
 		case "reasoning", "compaction", "item_reference", "tool_search_call", "tool_search_output":
 			// Replay metadata from multi-turn Responses transcripts adds tokens without
 			// representing actionable turn messages.
@@ -292,19 +308,28 @@ func parseResponsesInputItems(raw json.RawMessage, imageSeq *int) ([]Message, er
 			if item.Role != "" {
 				text, imgs, err := parseMessageContent(item.Content, imageSeq)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				out = append(out, Message{
 					Role:   normalizeRole(item.Role),
 					Kind:   itemType,
-					Name:   strings.TrimSpace(item.Name),
+					Name:   qualifiedItemName(item.Namespace, item.Name),
 					Text:   text,
 					Images: imgs,
 				})
 			}
 		}
 	}
-	return out, nil
+	return out, extraTools, nil
+}
+
+func qualifiedItemName(namespace, name string) string {
+	ns := strings.TrimSpace(namespace)
+	n := strings.TrimSpace(name)
+	if ns != "" && n != "" {
+		return ns + "." + n
+	}
+	return n
 }
 
 func normalizeRole(role string) string {
@@ -537,14 +562,15 @@ type LiveSSEWriter struct {
 	createdAt  int64
 	seq        int
 
-	inputBytes  int
-	outputBytes int
-	outputItems []map[string]any
-	openReason  *openReasoningState
-	openMessage *openMessageState
-	finished    bool
-	toolCallSeq int
-	toolTypes   map[string]string
+	inputTokens  int
+	outputTokens int
+	tokenMode    observability.TokenCountMode
+	outputItems  []map[string]any
+	openReason   *openReasoningState
+	openMessage  *openMessageState
+	finished     bool
+	toolCallSeq  int
+	toolTypes    map[string]string
 }
 
 type openReasoningState struct {
@@ -560,11 +586,17 @@ type openMessageState struct {
 }
 
 // NewLiveSSEWriter configures SSE headers and prepares Responses frame emission.
-func NewLiveSSEWriter(w http.ResponseWriter, responseID, model string, createdAt int64, tools []ToolDef, inputBytes int) *LiveSSEWriter {
+func NewLiveSSEWriter(w http.ResponseWriter, responseID, model string, createdAt int64, tools []ToolDef, inputTokens int, tokenMode observability.TokenCountMode) *LiveSSEWriter {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+
+	if mode, err := observability.ParseTokenCountMode(string(tokenMode)); err == nil {
+		tokenMode = mode
+	} else {
+		tokenMode = observability.TokenCountModeTiktoken
+	}
 
 	toolTypes := make(map[string]string, len(tools))
 	for _, t := range tools {
@@ -577,13 +609,14 @@ func NewLiveSSEWriter(w http.ResponseWriter, responseID, model string, createdAt
 	}
 	flusher, _ := w.(http.Flusher)
 	return &LiveSSEWriter{
-		w:          w,
-		flusher:    flusher,
-		responseID: responseID,
-		model:      model,
-		createdAt:  createdAt,
-		inputBytes: inputBytes,
-		toolTypes:  toolTypes,
+		w:           w,
+		flusher:     flusher,
+		responseID:  responseID,
+		model:       model,
+		createdAt:   createdAt,
+		inputTokens: inputTokens,
+		tokenMode:   tokenMode,
+		toolTypes:   toolTypes,
 	}
 }
 
@@ -616,8 +649,8 @@ func (s *LiveSSEWriter) baseResponse(status string, output []map[string]any, err
 		"output":     output,
 	}
 	if status == "completed" || status == "incomplete" {
-		inTokens := (s.inputBytes + 3) / 4
-		outTokens := (s.outputBytes + 3) / 4
+		inTokens := s.inputTokens
+		outTokens := s.outputTokens
 		resp["usage"] = map[string]any{
 			"input_tokens":  inTokens,
 			"output_tokens": outTokens,
@@ -735,7 +768,6 @@ func (s *LiveSSEWriter) appendThinking(delta string) {
 		})
 	}
 	s.openReason.text.WriteString(delta)
-	s.outputBytes += len(delta)
 	s.writeEvent("response.reasoning_summary_text.delta", map[string]any{
 		"item_id":       s.openReason.itemID,
 		"output_index":  s.openReason.outputIndex,
@@ -751,6 +783,7 @@ func (s *LiveSSEWriter) closeReasoningItem() {
 	st := s.openReason
 	s.openReason = nil
 	full := st.text.String()
+	s.outputTokens += observability.CountTextTokensWithMode(full, s.tokenMode)
 	s.writeEvent("response.reasoning_summary_text.done", map[string]any{
 		"item_id":       st.itemID,
 		"output_index":  st.outputIndex,
@@ -809,7 +842,6 @@ func (s *LiveSSEWriter) appendText(delta string) {
 		})
 	}
 	s.openMessage.text.WriteString(delta)
-	s.outputBytes += len(delta)
 	s.writeEvent("response.output_text.delta", map[string]any{
 		"item_id":       s.openMessage.itemID,
 		"output_index":  s.openMessage.outputIndex,
@@ -825,6 +857,7 @@ func (s *LiveSSEWriter) closeMessageItem() *Message {
 	st := s.openMessage
 	s.openMessage = nil
 	full := st.text.String()
+	s.outputTokens += observability.CountTextTokensWithMode(full, s.tokenMode)
 	s.writeEvent("response.output_text.done", map[string]any{
 		"item_id":       st.itemID,
 		"output_index":  st.outputIndex,
@@ -879,7 +912,7 @@ func (s *LiveSSEWriter) emitToolCall(ev Event) Message {
 
 	if toolType == "custom" {
 		inputStr := formatCustomToolInput(ev)
-		s.outputBytes += len(inputStr)
+		s.outputTokens += observability.CountTextTokensWithMode(inputStr, s.tokenMode)
 		itemID := fmt.Sprintf("ctc_%s_%d", s.responseID, idx)
 		added := map[string]any{
 			"id":      itemID,
@@ -929,7 +962,7 @@ func (s *LiveSSEWriter) emitToolCall(ev Event) Message {
 	}
 
 	argsStr := formatFunctionArguments(ev)
-	s.outputBytes += len(argsStr)
+	s.outputTokens += observability.CountTextTokensWithMode(argsStr, s.tokenMode)
 	itemID := fmt.Sprintf("fc_%s_%d", s.responseID, idx)
 	added := map[string]any{
 		"id":        itemID,

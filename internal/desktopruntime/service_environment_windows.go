@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	agentconfig "github.com/uvwt/agentdock/internal/config"
+	"github.com/uvwt/agentdock/internal/envstore"
 	"golang.org/x/sys/windows"
 )
 
@@ -45,6 +46,21 @@ var managedCoreEnvironment = []string{
 	"AGENTDOCK_OAUTH_PASSWORD",
 	"AGENTDOCK_OAUTH_TOKEN_SECRET",
 	"AGENTDOCK_OAUTH_ACCESS_TOKEN_TTL",
+	"AGENTDOCK_MANUAL_LLM_ENABLED",
+	"AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES",
+	"AGENTDOCK_MANUAL_LLM_SLICE_BYTES",
+	"AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES",
+	"AGENTDOCK_MANUAL_LLM_WAIT_MS",
+	"AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS",
+	"AGENTDOCK_MANUAL_LLM_MAX_PENDING",
+	"AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES",
+	"AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC",
+	"AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS",
+	"AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB",
+	"AGENTDOCK_TRACE_MODE",
+	"AGENTDOCK_TRACE_RETENTION_DAYS",
+	"AGENTDOCK_NETWORK_CAPTURE_ENABLED",
+	"AGENTDOCK_NETWORK_CAPTURE_MAX",
 }
 
 type controlPanelSettings struct {
@@ -158,6 +174,18 @@ func platformPrepareCoreEnvironment(runtimeRoot string) error {
 	oauthAccessTokenTTL := effectiveOAuthAccessTokenTTL(settings.OAuthAccessTokenTTL, inheritedOAuthAccessTokenTTL)
 	if oauthAccessTokenTTL != "" {
 		managed["AGENTDOCK_OAUTH_ACCESS_TOKEN_TTL"] = oauthAccessTokenTTL
+	}
+
+	// 合并 Web 控制台与 API 持久写入 agentdock.env 的配置（如手动推理参数、追踪与抓包），
+	// 控制面板与 DPAPI 凭据仍保持权威覆盖。
+	if envValues, envErr := envstore.ParseFile(filepath.Join(root, "agentdock.env")); envErr == nil {
+		for key, value := range envValues {
+			if _, controlled := managed[key]; !controlled {
+				managed[key] = value
+			}
+		}
+	} else if !errors.Is(envErr, os.ErrNotExist) {
+		return fmt.Errorf("读取 agentdock.env 失败: %w", envErr)
 	}
 
 	for name, value := range managed {

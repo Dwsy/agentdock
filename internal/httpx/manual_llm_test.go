@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/auth"
+	"github.com/uvwt/agentdock/internal/envstore"
 	"github.com/uvwt/agentdock/internal/manualllm"
 	"github.com/uvwt/agentdock/internal/mcp"
 )
@@ -47,7 +50,7 @@ func TestManualLLMEndpointsDisabledByDefault(t *testing.T) {
 	mux := http.NewServeMux()
 	oauthStore := auth.NewOAuthStore()
 	registerRuntimeAPI(mux, runtime, cfg, oauthStore)
-	registerManualLLM(mux, manualLLMBroker(runtime), cfg, oauthStore)
+	registerManualLLM(mux, runtime, cfg, oauthStore)
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`)))
@@ -66,6 +69,45 @@ func TestManualLLMEndpointsDisabledByDefault(t *testing.T) {
 	if qRec.Code != http.StatusOK || !strings.Contains(qRec.Body.String(), `"enabled":false`) {
 		t.Fatalf("unexpected runtime manual-llm response: status=%d body=%s", qRec.Code, qRec.Body.String())
 	}
+
+	// Verify live toggle activates /v1/responses and /mcp/manual immediately without restart.
+	tRec := httptest.NewRecorder()
+	mux.ServeHTTP(tRec, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":true,"persist":false}`)))
+	if tRec.Code != http.StatusOK || !strings.Contains(tRec.Body.String(), `"enabled":true`) {
+		t.Fatalf("live toggle failed: status=%d body=%s", tRec.Code, tRec.Body.String())
+	}
+	liveRec := httptest.NewRecorder()
+	liveReq := newLocalRuntimeRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":false}`))
+	mux.ServeHTTP(liveRec, liveReq)
+	if liveRec.Code != http.StatusBadRequest || !strings.Contains(liveRec.Body.String(), "stream_required") {
+		t.Fatalf("expected active /v1/responses handler after toggle, got %d (%s)", liveRec.Code, liveRec.Body.String())
+	}
+
+	// Verify toggling back false closes routes to 404 again.
+	offRec := httptest.NewRecorder()
+	mux.ServeHTTP(offRec, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":false,"persist":false}`)))
+	if offRec.Code != http.StatusOK || !strings.Contains(offRec.Body.String(), `"enabled":false`) {
+		t.Fatalf("live toggle off failed: status=%d body=%s", offRec.Code, offRec.Body.String())
+	}
+	afterOffRec := httptest.NewRecorder()
+	mux.ServeHTTP(afterOffRec, newLocalRuntimeRequest(http.MethodPost, "/mcp/manual", strings.NewReader(`{}`)))
+	if afterOffRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on /mcp/manual after toggle off, got %d", afterOffRec.Code)
+	}
+
+	// Verify omitting persist defaults to persisting AGENTDOCK_MANUAL_LLM_ENABLED into agentdock.env.
+	runtimeRoot := t.TempDir()
+	t.Setenv("AGENTDOCK_RUNTIME_ROOT", runtimeRoot)
+	persistRec := httptest.NewRecorder()
+	mux.ServeHTTP(persistRec, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":true}`)))
+	if persistRec.Code != http.StatusOK || !strings.Contains(persistRec.Body.String(), `"persisted":true`) {
+		t.Fatalf("expected default persisted toggle, got status=%d body=%s", persistRec.Code, persistRec.Body.String())
+	}
+	envVals, envErr := envstore.ParseFile(filepath.Join(runtimeRoot, "agentdock.env"))
+	if envErr != nil || envVals["AGENTDOCK_MANUAL_LLM_ENABLED"] != "true" {
+		t.Fatalf("expected AGENTDOCK_MANUAL_LLM_ENABLED=true persisted in agentdock.env, got %+v err=%v", envVals, envErr)
+	}
+	_ = os.Remove(filepath.Join(runtimeRoot, "agentdock.env"))
 }
 
 func TestManualLLMAuthLoopbackAndEndToEndSSEBridge(t *testing.T) {
@@ -80,7 +122,7 @@ func TestManualLLMAuthLoopbackAndEndToEndSSEBridge(t *testing.T) {
 	defer rtNoAuth.Close()
 
 	noAuthMux := http.NewServeMux()
-	registerManualLLM(noAuthMux, manualLLMBroker(rtNoAuth), cfgNoAuth, auth.NewOAuthStore())
+	registerManualLLM(noAuthMux, rtNoAuth, cfgNoAuth, auth.NewOAuthStore())
 	evilReq := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"stream":true,"input":"hi"}`))
 	evilReq.RemoteAddr = "127.0.0.1:43210"
 	evilReq.Host = "127.0.0.1:8765"
@@ -105,7 +147,7 @@ func TestManualLLMAuthLoopbackAndEndToEndSSEBridge(t *testing.T) {
 	mux := http.NewServeMux()
 	registerRuntimeAPI(mux, runtime, cfg, oauthStore)
 	mux.HandleFunc("/mcp", mcpEndpointHandler(mcp.NewServer(runtime, cfg), cfg, oauthStore))
-	registerManualLLM(mux, manualLLMBroker(runtime), cfg, oauthStore)
+	registerManualLLM(mux, runtime, cfg, oauthStore)
 
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

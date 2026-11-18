@@ -336,12 +336,26 @@ export type ManualLLMQueueEntry = {
   error_message?: string;
 };
 
+export type ManualLLMTuning = {
+  preview_bytes: number;
+  slice_bytes: number;
+  max_slice_bytes: number;
+  wait_ms: number;
+  max_wait_ms: number;
+  max_pending: number;
+  cache_max_responses: number;
+  cache_ttl_sec: number;
+  keepalive_ms: number;
+  cache_max_image_mb: number;
+};
+
 export type ManualLLMQueue = {
   ok: boolean;
   enabled: boolean;
   responses_path: string;
   mcp_endpoint: string;
   idle_prompt: string;
+  tuning?: ManualLLMTuning;
   stats: {
     queued_count: number;
     active_count: number;
@@ -354,6 +368,14 @@ export type ManualLLMQueue = {
 export type ManualLLMCancelResult = {
   ok: boolean;
   request: ManualLLMQueueEntry;
+};
+
+export type ManualLLMToggleResult = {
+  ok: boolean;
+  enabled: boolean;
+  changed: boolean;
+  persisted: boolean;
+  persist_note?: string;
 };
 
 export const api = {
@@ -378,6 +400,8 @@ export const api = {
   manualLLM: () => get<ManualLLMQueue>('/manual-llm'),
   manualLLMCancel: (request_id: string, reason = 'cancelled from dashboard') =>
     post<ManualLLMCancelResult>('/manual-llm/cancel', { request_id, reason }),
+  manualLLMToggle: (enabled: boolean, persist = true) =>
+    post<ManualLLMToggleResult>('/manual-llm/toggle', { enabled, persist }),
 };
 
 export type EventKind = 'call' | 'task' | 'artifact' | 'ping';

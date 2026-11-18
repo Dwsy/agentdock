@@ -580,3 +580,62 @@ func TestFromEnvManualLLMEnabled(t *testing.T) {
 		t.Fatalf("FromEnv() error = %v, want AGENTDOCK_MANUAL_LLM_ENABLED validation error", err)
 	}
 }
+
+func TestFromEnvManualLLMTuning(t *testing.T) {
+	home := t.TempDir()
+	setTestUserHome(t, home)
+
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() defaults error = %v", err)
+	}
+	if cfg.ManualLLMPreviewBytes != 1800 || cfg.ManualLLMSliceBytes != 4096 || cfg.ManualLLMMaxSliceBytes != 16384 ||
+		cfg.ManualLLMWaitMs != 30000 || cfg.ManualLLMMaxWaitMs != 55000 || cfg.ManualLLMMaxPending != 32 ||
+		cfg.ManualLLMCacheMaxResponses != 256 || cfg.ManualLLMCacheTTLSec != 1800 ||
+		cfg.ManualLLMKeepaliveMS != 15000 || cfg.ManualLLMCacheMaxImageMB != 32 {
+		t.Fatalf("unexpected manual LLM defaults: %+v", cfg)
+	}
+
+	t.Setenv("AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES", "2400")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_SLICE_BYTES", "8192")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES", "32768")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_WAIT_MS", "20000")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS", "45000")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_MAX_PENDING", "64")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES", "512")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC", "3600")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS", "10000")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB", "16")
+
+	cfg, err = FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() overrides error = %v", err)
+	}
+	if cfg.ManualLLMPreviewBytes != 2400 || cfg.ManualLLMSliceBytes != 8192 || cfg.ManualLLMMaxSliceBytes != 32768 ||
+		cfg.ManualLLMWaitMs != 20000 || cfg.ManualLLMMaxWaitMs != 45000 || cfg.ManualLLMMaxPending != 64 ||
+		cfg.ManualLLMCacheMaxResponses != 512 || cfg.ManualLLMCacheTTLSec != 3600 ||
+		cfg.ManualLLMKeepaliveMS != 10000 || cfg.ManualLLMCacheMaxImageMB != 16 {
+		t.Fatalf("unexpected manual LLM overrides: %+v", cfg)
+	}
+
+	t.Setenv("AGENTDOCK_MANUAL_LLM_SLICE_BYTES", "65536")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES", "32768")
+	badSliceCfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() unexpected error: %v", err)
+	}
+	if err := badSliceCfg.Normalize(); err == nil || !strings.Contains(err.Error(), "AGENTDOCK_MANUAL_LLM_SLICE_BYTES") {
+		t.Fatalf("Normalize() expected slice > max_slice error, got %v", err)
+	}
+
+	t.Setenv("AGENTDOCK_MANUAL_LLM_SLICE_BYTES", "4096")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_WAIT_MS", "90000")
+	t.Setenv("AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS", "60000")
+	badWaitCfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() unexpected error: %v", err)
+	}
+	if err := badWaitCfg.Normalize(); err == nil || !strings.Contains(err.Error(), "AGENTDOCK_MANUAL_LLM_WAIT_MS") {
+		t.Fatalf("Normalize() expected wait_ms > max_wait_ms error, got %v", err)
+	}
+}

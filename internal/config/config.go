@@ -46,6 +46,32 @@ const (
 	// 默认开启会把每次请求的凭据都留在进程内存里。
 	defaultNetworkCaptureMax = 200
 	maxNetworkCaptureMax     = 2000
+
+	defaultManualLLMPreviewBytes      = 1800
+	minManualLLMPreviewBytes          = 256
+	maxManualLLMPreviewBytes          = 32 * 1024
+	defaultManualLLMSliceBytes        = 4096
+	minManualLLMSliceBytes            = 512
+	defaultManualLLMMaxSliceBytes     = 16 * 1024
+	maxManualLLMMaxSliceBytes         = 128 * 1024
+	defaultManualLLMWaitMs            = 30000
+	minManualLLMWaitMs                = 1000
+	defaultManualLLMMaxWaitMs         = 55000
+	maxManualLLMMaxWaitMs             = 120000
+	defaultManualLLMMaxPending        = 32
+	maxManualLLMMaxPending            = 512
+	defaultManualLLMCacheMaxResponses = 256
+	minManualLLMCacheMaxResponses     = 16
+	maxManualLLMCacheMaxResponses     = 4096
+	defaultManualLLMCacheTTLSec       = 1800
+	minManualLLMCacheTTLSec           = 60
+	maxManualLLMCacheTTLSec           = 86400
+	defaultManualLLMKeepaliveMS       = 15000
+	minManualLLMKeepaliveMS           = 1000
+	maxManualLLMKeepaliveMS           = 60000
+	defaultManualLLMCacheMaxImageMB   = 32
+	minManualLLMCacheMaxImageMB       = 1
+	maxManualLLMCacheMaxImageMB       = 512
 )
 
 func ParseTraceMode(value string) (TraceMode, error) {
@@ -133,6 +159,16 @@ type Config struct {
 	BrowserReuseExistingCDP      bool
 	ACPEnabled                   bool
 	ManualLLMEnabled             bool
+	ManualLLMPreviewBytes        int
+	ManualLLMSliceBytes          int
+	ManualLLMMaxSliceBytes       int
+	ManualLLMWaitMs              int
+	ManualLLMMaxWaitMs           int
+	ManualLLMMaxPending          int
+	ManualLLMCacheMaxResponses   int
+	ManualLLMCacheTTLSec         int
+	ManualLLMKeepaliveMS         int
+	ManualLLMCacheMaxImageMB     int
 	ACPProfiles                  []ACPProfile
 	ACPDefaultProfile            string
 	ACPMaxPrompts                int
@@ -229,6 +265,46 @@ func FromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	manualLLMPreviewBytes, err := getenvInt("AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES", defaultManualLLMPreviewBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMSliceBytes, err := getenvInt("AGENTDOCK_MANUAL_LLM_SLICE_BYTES", defaultManualLLMSliceBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMMaxSliceBytes, err := getenvInt("AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES", defaultManualLLMMaxSliceBytes)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMWaitMs, err := getenvInt("AGENTDOCK_MANUAL_LLM_WAIT_MS", defaultManualLLMWaitMs)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMMaxWaitMs, err := getenvInt("AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS", defaultManualLLMMaxWaitMs)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMMaxPending, err := getenvInt("AGENTDOCK_MANUAL_LLM_MAX_PENDING", defaultManualLLMMaxPending)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMCacheMaxResponses, err := getenvInt("AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES", defaultManualLLMCacheMaxResponses)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMCacheTTLSec, err := getenvInt("AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC", defaultManualLLMCacheTTLSec)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMKeepaliveMS, err := getenvInt("AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS", defaultManualLLMKeepaliveMS)
+	if err != nil {
+		return Config{}, err
+	}
+	manualLLMCacheMaxImageMB, err := getenvInt("AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB", defaultManualLLMCacheMaxImageMB)
+	if err != nil {
+		return Config{}, err
+	}
 	var acpProfiles []ACPProfile
 	acpDefaultProfile := ""
 	acpMaxPrompts := 2
@@ -278,6 +354,16 @@ func FromEnv() (Config, error) {
 		BrowserReuseExistingCDP:      browserReuseExistingCDP,
 		ACPEnabled:                   acpEnabled,
 		ManualLLMEnabled:             manualLLMEnabled,
+		ManualLLMPreviewBytes:        manualLLMPreviewBytes,
+		ManualLLMSliceBytes:          manualLLMSliceBytes,
+		ManualLLMMaxSliceBytes:       manualLLMMaxSliceBytes,
+		ManualLLMWaitMs:              manualLLMWaitMs,
+		ManualLLMMaxWaitMs:           manualLLMMaxWaitMs,
+		ManualLLMMaxPending:          manualLLMMaxPending,
+		ManualLLMCacheMaxResponses:   manualLLMCacheMaxResponses,
+		ManualLLMCacheTTLSec:         manualLLMCacheTTLSec,
+		ManualLLMKeepaliveMS:         manualLLMKeepaliveMS,
+		ManualLLMCacheMaxImageMB:     manualLLMCacheMaxImageMB,
 		ACPProfiles:                  acpProfiles,
 		ACPDefaultProfile:            acpDefaultProfile,
 		ACPMaxPrompts:                acpMaxPrompts,
@@ -358,6 +444,9 @@ func (c *Config) Normalize() error {
 	}
 	if c.NetworkCaptureMax < 1 || c.NetworkCaptureMax > maxNetworkCaptureMax {
 		return fmt.Errorf("AGENTDOCK_NETWORK_CAPTURE_MAX must be between 1 and %d: %d", maxNetworkCaptureMax, c.NetworkCaptureMax)
+	}
+	if err := c.normalizeManualLLM(); err != nil {
+		return err
 	}
 	c.TraceMode = TraceMode(strings.ToLower(strings.TrimSpace(string(c.TraceMode))))
 	if c.TraceMode == "" {
@@ -828,4 +917,66 @@ func validACPAgentName(value string) bool {
 		}
 	}
 	return true
+}
+
+func (c *Config) normalizeManualLLM() error {
+	if c.ManualLLMPreviewBytes == 0 {
+		c.ManualLLMPreviewBytes = defaultManualLLMPreviewBytes
+	}
+	if c.ManualLLMSliceBytes == 0 {
+		c.ManualLLMSliceBytes = defaultManualLLMSliceBytes
+	}
+	if c.ManualLLMMaxSliceBytes == 0 {
+		c.ManualLLMMaxSliceBytes = max(defaultManualLLMMaxSliceBytes, c.ManualLLMSliceBytes)
+	}
+	if c.ManualLLMWaitMs == 0 {
+		c.ManualLLMWaitMs = defaultManualLLMWaitMs
+	}
+	if c.ManualLLMMaxWaitMs == 0 {
+		c.ManualLLMMaxWaitMs = max(defaultManualLLMMaxWaitMs, c.ManualLLMWaitMs)
+	}
+	if c.ManualLLMMaxPending == 0 {
+		c.ManualLLMMaxPending = defaultManualLLMMaxPending
+	}
+	if c.ManualLLMCacheMaxResponses == 0 {
+		c.ManualLLMCacheMaxResponses = defaultManualLLMCacheMaxResponses
+	}
+	if c.ManualLLMCacheTTLSec == 0 {
+		c.ManualLLMCacheTTLSec = defaultManualLLMCacheTTLSec
+	}
+	if c.ManualLLMKeepaliveMS == 0 {
+		c.ManualLLMKeepaliveMS = defaultManualLLMKeepaliveMS
+	}
+	if c.ManualLLMCacheMaxImageMB == 0 {
+		c.ManualLLMCacheMaxImageMB = defaultManualLLMCacheMaxImageMB
+	}
+
+	checks := []struct {
+		name     string
+		val      int
+		min, max int
+	}{
+		{"AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES", c.ManualLLMPreviewBytes, minManualLLMPreviewBytes, maxManualLLMPreviewBytes},
+		{"AGENTDOCK_MANUAL_LLM_SLICE_BYTES", c.ManualLLMSliceBytes, minManualLLMSliceBytes, maxManualLLMMaxSliceBytes},
+		{"AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES", c.ManualLLMMaxSliceBytes, minManualLLMSliceBytes, maxManualLLMMaxSliceBytes},
+		{"AGENTDOCK_MANUAL_LLM_WAIT_MS", c.ManualLLMWaitMs, minManualLLMWaitMs, maxManualLLMMaxWaitMs},
+		{"AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS", c.ManualLLMMaxWaitMs, minManualLLMWaitMs, maxManualLLMMaxWaitMs},
+		{"AGENTDOCK_MANUAL_LLM_MAX_PENDING", c.ManualLLMMaxPending, 1, maxManualLLMMaxPending},
+		{"AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES", c.ManualLLMCacheMaxResponses, minManualLLMCacheMaxResponses, maxManualLLMCacheMaxResponses},
+		{"AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC", c.ManualLLMCacheTTLSec, minManualLLMCacheTTLSec, maxManualLLMCacheTTLSec},
+		{"AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS", c.ManualLLMKeepaliveMS, minManualLLMKeepaliveMS, maxManualLLMKeepaliveMS},
+		{"AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB", c.ManualLLMCacheMaxImageMB, minManualLLMCacheMaxImageMB, maxManualLLMCacheMaxImageMB},
+	}
+	for _, chk := range checks {
+		if chk.val < chk.min || chk.val > chk.max {
+			return fmt.Errorf("%s must be between %d and %d: %d", chk.name, chk.min, chk.max, chk.val)
+		}
+	}
+	if c.ManualLLMSliceBytes > c.ManualLLMMaxSliceBytes {
+		return fmt.Errorf("AGENTDOCK_MANUAL_LLM_SLICE_BYTES (%d) cannot exceed AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES (%d)", c.ManualLLMSliceBytes, c.ManualLLMMaxSliceBytes)
+	}
+	if c.ManualLLMWaitMs > c.ManualLLMMaxWaitMs {
+		return fmt.Errorf("AGENTDOCK_MANUAL_LLM_WAIT_MS (%d) cannot exceed AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS (%d)", c.ManualLLMWaitMs, c.ManualLLMMaxWaitMs)
+	}
+	return nil
 }

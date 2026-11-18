@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
@@ -47,14 +48,17 @@ type requestRecord struct {
 	SystemHash   string
 	Tools        []ToolDef
 	ToolsHash    string
+	ToolHashes   map[string]string
 	AllowedTools map[string]ToolDef
 	ToolChoice   any
 	TextFormat   any
 
-	FullMessages   []Message
-	NewMessages    []Message
-	CommittedAfter []Message
-	Images         map[string]ImageRef
+	FullMessages     []Message
+	NewMessages      []Message
+	NewIndices       []int
+	CommittedAfter   []Message
+	Images           map[string]ImageRef
+	ClaimedCallerKey string
 
 	pendingText     strings.Builder
 	emittedMessages []Message
@@ -69,20 +73,23 @@ type requestRecord struct {
 }
 
 type sessionState struct {
-	SessionID         string
-	ConversationKey   string
-	Turns             int
-	CommittedMessages []Message
-	LastResponseID    string
-	LastSystemHash    string
-	LastToolsHash     string
-	SentGuide         bool
-	UpdatedAt         time.Time
+	SessionID           string
+	ConversationKey     string
+	Turns               int
+	CommittedMessages   []Message
+	LastResponseID      string
+	ConfirmedCallerKey  string
+	ConfirmedSystemHash string
+	ConfirmedToolsHash  string
+	ConfirmedToolHashes map[string]string
+	ConfirmedGuide      bool
+	UpdatedAt           time.Time
 }
 
 // Broker coordinates manual LLM turn queueing, progressive retrieval, and SSE streaming.
 type Broker struct {
 	mu             sync.Mutex
+	opts           Options
 	closed         bool
 	closedCh       chan struct{}
 	waitNotify     chan struct{}
@@ -96,9 +103,15 @@ type Broker struct {
 	sessionWaiters map[string]int
 }
 
-// NewBroker constructs an active Broker ready to serve /v1/responses and /mcp/manual.
+// NewBroker constructs an active Broker using DefaultOptions.
 func NewBroker() *Broker {
+	return NewBrokerWithOptions(DefaultOptions())
+}
+
+// NewBrokerWithOptions constructs an active Broker with normalized tuning parameters.
+func NewBrokerWithOptions(opts Options) *Broker {
 	return &Broker{
+		opts:           opts.Normalized(),
 		closedCh:       make(chan struct{}),
 		waitNotify:     make(chan struct{}),
 		requests:       make(map[string]*requestRecord),
@@ -107,6 +120,20 @@ func NewBroker() *Broker {
 		convSessions:   make(map[string]*sessionState),
 		sessionWaiters: make(map[string]int),
 	}
+}
+
+// Options returns a copy of the broker's normalized tuning configuration.
+func (b *Broker) Options() Options {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.opts
+}
+
+// UpdateOptions updates live broker tuning parameters without dropping active sessions.
+func (b *Broker) UpdateOptions(opts Options) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.opts = opts.Normalized()
 }
 
 // Close shuts down the broker and terminates any waiting requests or HTTP streams.
@@ -205,7 +232,7 @@ func (b *Broker) ServeResponses(ctx context.Context, w http.ResponseWriter, body
 	sse := NewLiveSSEWriter(w, req.ResponseID, req.Model, req.CreatedAt.Unix(), req.Tools, len(body))
 	sse.Start()
 
-	ticker := time.NewTicker(SSEKeepaliveInterval)
+	ticker := time.NewTicker(b.Options().KeepaliveInterval)
 	defer ticker.Stop()
 
 	drainAndApply := func(cursor *int) bool {
@@ -276,7 +303,7 @@ func (b *Broker) enqueue(in ResponsesInput) (*requestRecord, error) {
 		return nil, ErrBrokerClosed
 	}
 	b.pruneLocked(time.Now().UTC())
-	if b.countPendingLocked() >= MaxPendingQueue {
+	if b.countPendingLocked() >= b.opts.MaxPendingQueue {
 		return nil, ErrQueueFull
 	}
 
@@ -291,7 +318,7 @@ func (b *Broker) enqueue(in ResponsesInput) (*requestRecord, error) {
 			baseCommitted = prevReq.CommittedAfter
 		}
 	}
-	fullMsgs, newMsgs := stitchConversationMessages(baseCommitted, in.Messages, hasPrevResp)
+	fullMsgs, newMsgs, newIndices := stitchConversationMessages(baseCommitted, in.Messages, hasPrevResp)
 	allowed := indexAllowedTools(in.Tools)
 	images := collectImages(fullMsgs)
 
@@ -313,11 +340,13 @@ func (b *Broker) enqueue(in ResponsesInput) (*requestRecord, error) {
 		SystemHash:         hashText(in.Instructions),
 		Tools:              slices.Clone(in.Tools),
 		ToolsHash:          hashTools(in.Tools),
+		ToolHashes:         hashToolsMap(in.Tools),
 		AllowedTools:       allowed,
 		ToolChoice:         in.ToolChoice,
 		TextFormat:         in.TextFormat,
 		FullMessages:       fullMsgs,
 		NewMessages:        newMsgs,
+		NewIndices:         newIndices,
 		Images:             images,
 		seenResponseIDs:    make(map[string]struct{}),
 		streamNotify:       make(chan struct{}),
@@ -372,10 +401,21 @@ func (b *Broker) resolveSessionLocked(in ResponsesInput) *sessionState {
 	return sess
 }
 
-func stitchConversationMessages(committed []Message, incoming []Message, hasPreviousResponseID bool) (full []Message, delta []Message) {
+func seqIndices(start, count int) []int {
+	if count <= 0 {
+		return nil
+	}
+	out := make([]int, count)
+	for i := 0; i < count; i++ {
+		out[i] = start + i
+	}
+	return out
+}
+
+func stitchConversationMessages(committed []Message, incoming []Message, hasPreviousResponseID bool) (full []Message, delta []Message, deltaIndices []int) {
 	if len(committed) == 0 {
 		copied := slices.Clone(incoming)
-		return copied, copied
+		return copied, copied, seqIndices(0, len(copied))
 	}
 	if hasPreviousResponseID {
 		prefix := commonPrefixLen(committed, incoming)
@@ -384,25 +424,71 @@ func stitchConversationMessages(committed []Message, incoming []Message, hasPrev
 			all := make([]Message, 0, len(committed)+len(newPart))
 			all = append(all, committed...)
 			all = append(all, newPart...)
-			return all, newPart
+			return all, newPart, seqIndices(len(committed), len(newPart))
 		}
 		all := make([]Message, 0, len(committed)+len(incoming))
 		all = append(all, committed...)
 		all = append(all, incoming...)
-		return all, slices.Clone(incoming)
+		return all, slices.Clone(incoming), seqIndices(len(committed), len(incoming))
 	}
 	// Stateless callers replay full transcript each turn via conversation or prompt_cache_key.
 	prefix := commonPrefixLen(committed, incoming)
 	if prefix == len(committed) && prefix <= len(incoming) {
-		return slices.Clone(incoming), slices.Clone(incoming[prefix:])
+		return slices.Clone(incoming), slices.Clone(incoming[prefix:]), seqIndices(prefix, len(incoming)-prefix)
 	}
-	// If client sent overlapping prefix after pruning earlier turns or compacting,
-	// return what changed cleanly without hiding new messages.
+	// If leading context (e.g. dynamic developer metadata) changed or early turns
+	// compacted, anchor on the longest matching suffix (>=2 msgs) of committed so
+	// unchanged history stays omitted with accurate message indices.
+	if anchorStart, anchorLen := findCommittedTailAnchor(committed[prefix:], incoming[prefix:]); anchorLen >= 2 {
+		absStart := prefix + anchorStart
+		absEnd := absStart + anchorLen
+		deltaLen := (absStart - prefix) + (len(incoming) - absEnd)
+		delta = make([]Message, 0, deltaLen)
+		deltaIndices = make([]int, 0, deltaLen)
+		for i := prefix; i < absStart; i++ {
+			delta = append(delta, incoming[i])
+			deltaIndices = append(deltaIndices, i)
+		}
+		for i := absEnd; i < len(incoming); i++ {
+			delta = append(delta, incoming[i])
+			deltaIndices = append(deltaIndices, i)
+		}
+		return slices.Clone(incoming), delta, deltaIndices
+	}
+	// Fallback when client sent partial overlapping prefix after pruning/truncation.
 	if prefix > 0 && prefix <= len(incoming) {
-		return slices.Clone(incoming), slices.Clone(incoming[prefix:])
+		return slices.Clone(incoming), slices.Clone(incoming[prefix:]), seqIndices(prefix, len(incoming)-prefix)
 	}
 	copied := slices.Clone(incoming)
-	return copied, copied
+	return copied, copied, seqIndices(0, len(copied))
+}
+
+func findCommittedTailAnchor(committedRem, incomingRem []Message) (anchorStart, anchorLen int) {
+	if len(committedRem) < 2 || len(incomingRem) < 2 {
+		return -1, 0
+	}
+	maxLen := min(len(committedRem), len(incomingRem))
+	for length := maxLen; length >= 2; length-- {
+		tail := committedRem[len(committedRem)-length:]
+		for pos := 0; pos <= len(incomingRem)-length; pos++ {
+			if messageSlicesEqual(tail, incomingRem[pos:pos+length]) {
+				return pos, length
+			}
+		}
+	}
+	return -1, 0
+}
+
+func messageSlicesEqual(a, b []Message) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !messagesEqual(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func commonPrefixLen(a, b []Message) int {
@@ -532,7 +618,7 @@ func (b *Broker) CancelRequest(requestID, reason string) (QueueEntryView, error)
 	req.pushTerminateLocked("cancelled", reason)
 	closeDoneOnce(&req.doneCh)
 	b.notifyWaitersLocked()
-	return b.toEntryViewLocked(req), nil
+	return b.toEntryViewLocked(req, b.opts), nil
 }
 
 // Wait implements the progressive llm_wait MCP tool (wait, history, prompt).
@@ -554,10 +640,12 @@ func (b *Broker) Wait(ctx context.Context, in WaitInput) (WaitOutput, []ImageRef
 }
 
 func (b *Broker) waitForRequest(ctx context.Context, in WaitInput) (WaitOutput, []ImageRef, error) {
-	waitMs := DefaultWaitTimeoutMs
+	opts := b.Options()
+	waitMs := opts.DefaultWaitMs
 	if in.WaitMs != nil {
-		waitMs = clampInt(*in.WaitMs, 0, MaxWaitTimeoutMs)
+		waitMs = clampInt(*in.WaitMs, 0, opts.MaxWaitMs)
 	}
+	callerKey := strings.TrimSpace(in.CallerKey)
 	targetReqID := strings.TrimSpace(in.RequestID)
 	targetSessID := strings.TrimSpace(in.SessionID)
 	if targetSessID != "" {
@@ -591,7 +679,10 @@ func (b *Broker) waitForRequest(ctx context.Context, in WaitInput) (WaitOutput, 
 			return WaitOutput{}, nil, err
 		}
 		if req != nil {
-			turn, imgs := b.buildClaimedTurnLocked(req)
+			if callerKey != "" {
+				req.ClaimedCallerKey = callerKey
+			}
+			turn, imgs := b.buildClaimedTurnLocked(req, in.Fresh)
 			b.mu.Unlock()
 			return WaitOutput{
 				Status: "claimed",
@@ -700,7 +791,7 @@ func (b *Broker) countQueuedLocked() int {
 	return n
 }
 
-func (b *Broker) buildClaimedTurnLocked(req *requestRecord) (ClaimedTurn, []ImageRef) {
+func (b *Broker) buildClaimedTurnLocked(req *requestRecord, forceFresh bool) (ClaimedTurn, []ImageRef) {
 	sess := b.sessions[req.SessionID]
 	startIdx := max(0, len(req.FullMessages)-len(req.NewMessages))
 	compactMsgs := make([]CompactMessage, 0, len(req.NewMessages))
@@ -708,7 +799,11 @@ func (b *Broker) buildClaimedTurnLocked(req *requestRecord) (ClaimedTurn, []Imag
 	truncatedItems := 0
 
 	for i, msg := range req.NewMessages {
-		cm := toCompactMessage(startIdx+i, msg)
+		msgIdx := startIdx + i
+		if i < len(req.NewIndices) {
+			msgIdx = req.NewIndices[i]
+		}
+		cm := toCompactMessage(msgIdx, msg, b.opts.PreviewBytes)
 		if cm.Truncated {
 			truncatedItems++
 		}
@@ -716,19 +811,32 @@ func (b *Broker) buildClaimedTurnLocked(req *requestRecord) (ClaimedTurn, []Imag
 		imgs = append(imgs, msg.Images...)
 	}
 
-	sysChanged := req.SystemPrompt != "" && (sess == nil || sess.LastSystemHash != req.SystemHash)
-	toolsChanged := len(req.Tools) > 0 && (sess == nil || sess.LastToolsHash != req.ToolsHash)
+	toolNames := canonicalToolNames(req.Tools)
+	callerChanged := req.ClaimedCallerKey != "" && sess != nil && sess.ConfirmedCallerKey != "" && sess.ConfirmedCallerKey != req.ClaimedCallerKey
+	hasConfirmed := sess != nil && sess.ConfirmedGuide
+	cacheReset := hasConfirmed && (forceFresh || callerChanged)
 
-	nameCounts := make(map[string]int, len(req.Tools))
-	for _, t := range req.Tools {
-		nameCounts[t.Name]++
-	}
-	toolNames := make([]string, 0, len(req.Tools))
-	for _, t := range req.Tools {
-		if t.Namespace != "" && nameCounts[t.Name] > 1 {
-			toolNames = append(toolNames, displayToolName(t))
-		} else {
-			toolNames = append(toolNames, t.Name)
+	var (
+		sysChanged   bool
+		toolsChanged bool
+		changedTools []string
+		removedTools []string
+	)
+	if !hasConfirmed || cacheReset {
+		sysChanged = req.SystemPrompt != ""
+		toolsChanged = len(req.Tools) > 0
+	} else {
+		sysChanged = req.SystemPrompt != "" && sess.ConfirmedSystemHash != req.SystemHash
+		if req.ToolsHash != sess.ConfirmedToolsHash {
+			if len(sess.ConfirmedToolHashes) > 0 {
+				changedTools, removedTools = diffToolHashes(toolNames, req.ToolHashes, sess.ConfirmedToolHashes)
+				toolsChanged = len(changedTools) > 0
+				if len(changedTools) == len(toolNames) {
+					changedTools = nil
+				}
+			} else if len(req.Tools) > 0 {
+				toolsChanged = true
+			}
 		}
 	}
 
@@ -737,15 +845,8 @@ func (b *Broker) buildClaimedTurnLocked(req *requestRecord) (ClaimedTurn, []Imag
 	hasHistoryData := omittedCount > 0 || truncatedItems > 0
 
 	var guide string
-	if sess == nil || !sess.SentGuide {
-		guide = buildTurnGuide(hasPromptData, hasHistoryData)
-		if sess != nil {
-			sess.SentGuide = true
-		}
-	}
-	if sess != nil {
-		sess.LastSystemHash = req.SystemHash
-		sess.LastToolsHash = req.ToolsHash
+	if !hasConfirmed || cacheReset {
+		guide = buildTurnGuide(hasPromptData, hasHistoryData, b.opts.DefaultWaitMs)
 	}
 
 	return ClaimedTurn{
@@ -765,6 +866,9 @@ func (b *Broker) buildClaimedTurnLocked(req *requestRecord) (ClaimedTurn, []Imag
 			ToolCount:           len(req.Tools),
 			ToolNames:           toolNames,
 			ToolsChanged:        toolsChanged,
+			ChangedTools:        changedTools,
+			RemovedTools:        removedTools,
+			CacheReset:          cacheReset,
 			ToolChoice:          req.ToolChoice,
 			TextFormat:          req.TextFormat,
 			TruncatedItems:      truncatedItems,
@@ -773,7 +877,34 @@ func (b *Broker) buildClaimedTurnLocked(req *requestRecord) (ClaimedTurn, []Imag
 	}, imgs
 }
 
-func buildTurnGuide(hasPrompt, hasHistory bool) string {
+func diffToolHashes(orderedNames []string, current, confirmed map[string]string) (changed, removed []string) {
+	for _, name := range orderedNames {
+		if prevHash, ok := confirmed[name]; !ok || prevHash != current[name] {
+			changed = append(changed, name)
+		}
+	}
+	for name := range confirmed {
+		if _, ok := current[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	if len(removed) > 1 {
+		sort.Strings(removed)
+	}
+	return changed, removed
+}
+
+func cloneStringMap(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	return maps.Clone(m)
+}
+
+func buildTurnGuide(hasPrompt, hasHistory bool, defaultWaitMs int) string {
+	if defaultWaitMs <= 0 {
+		defaultWaitMs = DefaultWaitTimeoutMs
+	}
 	parts := make([]string, 0, 3)
 	if hasPrompt {
 		parts = append(parts, `Fetch system_prompt/tool schemas on demand: llm_wait(action="prompt", request_id, include=["system_prompt","tools"], tool_names=[...]).`)
@@ -781,7 +912,7 @@ func buildTurnGuide(hasPrompt, hasHistory bool) string {
 	if hasHistory {
 		parts = append(parts, `Fetch clipped/earlier text: llm_wait(action="history", request_id, call_id|cursor).`)
 	}
-	parts = append(parts, `Reply via llm_submit(request_id, events=[...], wait_ms=30000); events: thinking{text}, text{text}, tool_call{name,arguments,call_id?}, done{reason:stop|tool_calls}, error{text}.`)
+	parts = append(parts, fmt.Sprintf(`Reply via llm_submit(request_id, events=[...], wait_ms=%d); events: thinking{text}, text{text}, tool_call{name,arguments,call_id?}, done{reason:stop|tool_calls}, error{text}.`, defaultWaitMs))
 	return strings.Join(parts, " ")
 }
 
@@ -792,8 +923,8 @@ func displayToolName(t ToolDef) string {
 	return t.Name
 }
 
-func toCompactMessage(index int, msg Message) CompactMessage {
-	preview, totalBytes, truncated := CompactPreview(msg.Text, DefaultPreviewBytes)
+func toCompactMessage(index int, msg Message, previewBytes int) CompactMessage {
+	preview, totalBytes, truncated := CompactPreview(msg.Text, previewBytes)
 	var imgRefs []string
 	if len(msg.Images) > 0 {
 		imgRefs = make([]string, 0, len(msg.Images))
@@ -817,6 +948,7 @@ func toCompactMessage(index int, msg Message) CompactMessage {
 func (b *Broker) readHistory(in WaitInput) (WaitOutput, []ImageRef, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	opts := b.opts
 	req, err := b.resolveReadableRequestLocked(in.RequestID, in.SessionID)
 	if err != nil {
 		return WaitOutput{}, nil, err
@@ -829,7 +961,7 @@ func (b *Broker) readHistory(in WaitInput) (WaitOutput, []ImageRef, error) {
 		if !ok {
 			return WaitOutput{}, nil, fmt.Errorf("target message not found in request %q", req.ID)
 		}
-		maxBytes := clampSliceBytes(in.MaxBytes)
+		maxBytes := clampSliceBytesWithOptions(in.MaxBytes, opts.SliceBytes, opts.MaxSliceBytes)
 		chunk, startB, endB, totalB, eof := SliceUTF8Bytes(msg.Text, in.OffsetBytes, maxBytes)
 		return WaitOutput{
 			Status: "ok",
@@ -851,9 +983,9 @@ func (b *Broker) readHistory(in WaitInput) (WaitOutput, []ImageRef, error) {
 	}
 
 	total := len(req.FullMessages)
-	limit := clampInt(in.Limit, 1, MaxHistoryLimit)
+	limit := clampInt(in.Limit, 1, opts.MaxHistoryLimit)
 	if in.Limit <= 0 {
-		limit = DefaultHistoryLimit
+		limit = opts.HistoryLimit
 	}
 	start := 0
 	if in.Cursor != nil {
@@ -864,7 +996,7 @@ func (b *Broker) readHistory(in WaitInput) (WaitOutput, []ImageRef, error) {
 	items := make([]CompactMessage, 0, max(0, end-start))
 	var imgs []ImageRef
 	for i := start; i < end; i++ {
-		items = append(items, toCompactMessage(i, req.FullMessages[i]))
+		items = append(items, toCompactMessage(i, req.FullMessages[i], opts.PreviewBytes))
 		imgs = append(imgs, req.FullMessages[i].Images...)
 	}
 	var nextCursor *int
@@ -905,6 +1037,7 @@ func findTargetMessage(msgs []Message, callID string, cursor *int) (int, Message
 func (b *Broker) readPrompt(in WaitInput) (WaitOutput, []ImageRef, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	opts := b.opts
 	req, err := b.resolveReadableRequestLocked(in.RequestID, in.SessionID)
 	if err != nil {
 		return WaitOutput{}, nil, err
@@ -922,7 +1055,7 @@ func (b *Broker) readPrompt(in WaitInput) (WaitOutput, []ImageRef, error) {
 
 	payload := &PromptPayload{}
 	if includes["system_prompt"] {
-		chunk, startB, endB, totalB, eof := SliceUTF8Bytes(req.SystemPrompt, in.OffsetBytes, clampSliceBytes(in.MaxBytes))
+		chunk, startB, endB, totalB, eof := SliceUTF8Bytes(req.SystemPrompt, in.OffsetBytes, clampSliceBytesWithOptions(in.MaxBytes, opts.SliceBytes, opts.MaxSliceBytes))
 		payload.SystemPrompt = &SliceResult{
 			Target:     "system_prompt",
 			Content:    chunk,
@@ -943,9 +1076,9 @@ func (b *Broker) readPrompt(in WaitInput) (WaitOutput, []ImageRef, error) {
 		}
 		limit := totalTools
 		if in.Limit > 0 {
-			limit = min(in.Limit, MaxHistoryLimit)
-		} else if totalTools > 10 && len(in.ToolNames) == 0 {
-			limit = 10
+			limit = min(in.Limit, opts.MaxHistoryLimit)
+		} else if totalTools > opts.HistoryLimit && len(in.ToolNames) == 0 {
+			limit = opts.HistoryLimit
 		}
 		end := min(totalTools, start+limit)
 		tools := make([]ToolSummary, 0, max(0, end-start))
@@ -969,7 +1102,7 @@ func (b *Broker) readPrompt(in WaitInput) (WaitOutput, []ImageRef, error) {
 	}
 
 	if includes["guide"] {
-		payload.Guide = buildTurnGuide(true, true)
+		payload.Guide = buildTurnGuide(true, true, opts.DefaultWaitMs)
 	}
 
 	return WaitOutput{
@@ -1136,6 +1269,13 @@ func (b *Broker) Submit(ctx context.Context, in SubmitInput) (SubmitOutput, []Im
 		if sess := b.sessions[req.SessionID]; sess != nil {
 			sess.CommittedMessages = committed
 			sess.LastResponseID = req.ResponseID
+			sess.ConfirmedSystemHash = req.SystemHash
+			sess.ConfirmedToolsHash = req.ToolsHash
+			sess.ConfirmedToolHashes = cloneStringMap(req.ToolHashes)
+			sess.ConfirmedGuide = true
+			if req.ClaimedCallerKey != "" {
+				sess.ConfirmedCallerKey = req.ClaimedCallerKey
+			}
 			sess.UpdatedAt = time.Now().UTC()
 		}
 		req.Status = StatusCompleted
@@ -1165,6 +1305,7 @@ func (b *Broker) Submit(ctx context.Context, in SubmitInput) (SubmitOutput, []Im
 		waitRes, imgs, waitErr := b.waitForRequest(ctx, WaitInput{
 			Action:    "wait",
 			SessionID: sessID,
+			CallerKey: in.CallerKey,
 			WaitMs:    in.WaitMs,
 		})
 		if waitErr == nil && waitRes.Turn != nil {
@@ -1313,22 +1454,81 @@ func validateToolCallAllowed(req *requestRecord, name string) (ToolDef, bool, st
 	return def, true, ""
 }
 
+func isTerminalStatus(s RequestStatus) bool {
+	return s == StatusCompleted || s == StatusFailed || s == StatusCancelled
+}
+
 func (b *Broker) pruneLocked(now time.Time) {
-	cutoff := now.Add(-CompletedRetention)
-	kept := make([]*requestRecord, 0, len(b.queue))
+	cutoff := now.Add(-b.opts.CacheTTL)
+	afterTTL := make([]*requestRecord, 0, len(b.queue))
+	termCount := 0
 	for _, r := range b.queue {
-		isTerminal := r.Status == StatusCompleted || r.Status == StatusFailed || r.Status == StatusCancelled
-		overLimit := isTerminal && len(b.queue)-len(kept) > MaxStoredResponses
-		if isTerminal && (!r.CompletedAt.IsZero() && r.CompletedAt.Before(cutoff) || overLimit) {
+		isTerm := isTerminalStatus(r.Status)
+		if isTerm && !r.CompletedAt.IsZero() && r.CompletedAt.Before(cutoff) {
 			delete(b.requests, r.ID)
 			delete(b.responses, r.ResponseID)
 			continue
 		}
-		kept = append(kept, r)
+		if isTerm {
+			termCount++
+		}
+		afterTTL = append(afterTTL, r)
 	}
-	b.queue = kept
+
+	finalQueue := afterTTL
+	if termCount > b.opts.CacheMaxResponses {
+		finalQueue = make([]*requestRecord, 0, len(afterTTL)-(termCount-b.opts.CacheMaxResponses))
+		for _, r := range afterTTL {
+			if termCount > b.opts.CacheMaxResponses && isTerminalStatus(r.Status) {
+				delete(b.requests, r.ID)
+				delete(b.responses, r.ResponseID)
+				termCount--
+				continue
+			}
+			finalQueue = append(finalQueue, r)
+		}
+	}
+	b.queue = finalQueue
+
+	// Retain binary image bytes for all active turns and newest terminal turns within budget.
+	var (
+		keptImgPtrs   map[*byte]struct{}
+		usedTermBytes int64
+	)
+	markImgKept := func(data []byte) {
+		if len(data) == 0 {
+			return
+		}
+		if keptImgPtrs == nil {
+			keptImgPtrs = make(map[*byte]struct{})
+		}
+		keptImgPtrs[&data[0]] = struct{}{}
+	}
+	for _, r := range finalQueue {
+		if !isTerminalStatus(r.Status) {
+			for _, img := range r.Images {
+				markImgKept(img.Data)
+			}
+		}
+	}
+	for i := len(finalQueue) - 1; i >= 0; i-- {
+		r := finalQueue[i]
+		if !isTerminalStatus(r.Status) {
+			continue
+		}
+		reqImgBytes := uniqueImageBytes(r.Images, keptImgPtrs)
+		if b.opts.MaxRetainedImageBytes > 0 && usedTermBytes+reqImgBytes <= b.opts.MaxRetainedImageBytes {
+			usedTermBytes += reqImgBytes
+			for _, img := range r.Images {
+				markImgKept(img.Data)
+			}
+			continue
+		}
+		stripRequestImages(r, keptImgPtrs)
+	}
 
 	for id, sess := range b.sessions {
+		stripUnretainedMessageImages(sess.CommittedMessages, keptImgPtrs)
 		if sess.UpdatedAt.Before(cutoff) {
 			hasActive := false
 			for _, r := range b.queue {
@@ -1347,11 +1547,64 @@ func (b *Broker) pruneLocked(now time.Time) {
 	}
 }
 
+func uniqueImageBytes(imgs map[string]ImageRef, alreadyKept map[*byte]struct{}) int64 {
+	var total int64
+	var seen map[*byte]struct{}
+	for _, img := range imgs {
+		if len(img.Data) == 0 {
+			continue
+		}
+		ptr := &img.Data[0]
+		if _, ok := alreadyKept[ptr]; ok {
+			continue
+		}
+		if seen == nil {
+			seen = make(map[*byte]struct{})
+		}
+		if _, dup := seen[ptr]; dup {
+			continue
+		}
+		seen[ptr] = struct{}{}
+		total += int64(len(img.Data))
+	}
+	return total
+}
+
+func stripRequestImages(r *requestRecord, keptImgPtrs map[*byte]struct{}) {
+	for k, img := range r.Images {
+		if len(img.Data) > 0 {
+			if _, ok := keptImgPtrs[&img.Data[0]]; !ok {
+				img.Data = nil
+				r.Images[k] = img
+			}
+		}
+	}
+	stripUnretainedMessageImages(r.FullMessages, keptImgPtrs)
+	stripUnretainedMessageImages(r.NewMessages, keptImgPtrs)
+	stripUnretainedMessageImages(r.CommittedAfter, keptImgPtrs)
+}
+
+func stripUnretainedMessageImages(msgs []Message, keptImgPtrs map[*byte]struct{}) {
+	for i := range msgs {
+		for j := range msgs[i].Images {
+			data := msgs[i].Images[j].Data
+			if len(data) == 0 {
+				continue
+			}
+			if _, ok := keptImgPtrs[&data[0]]; !ok {
+				msgs[i].Images[j].Data = nil
+			}
+		}
+	}
+}
+
 // Snapshot returns the current manual queue state and single copyable prompt for Web UI.
 func (b *Broker) Snapshot(enabled bool, responsesPath, mcpEndpoint string) QueueSnapshot {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.pruneLocked(time.Now().UTC())
+	opts := b.opts
+	tuning := opts.TuningView()
 
 	var stats QueueStats
 	stats.SessionsCount = len(b.sessions)
@@ -1372,20 +1625,21 @@ func (b *Broker) Snapshot(enabled bool, responsesPath, mcpEndpoint string) Queue
 		case StatusCompleted:
 			stats.CompletedCount++
 		}
-		views = append(views, b.toEntryViewLocked(r))
+		views = append(views, b.toEntryViewLocked(r, opts))
 	}
 
 	return QueueSnapshot{
 		Enabled:       enabled,
 		ResponsesPath: responsesPath,
 		MCPEndpoint:   mcpEndpoint,
-		IdlePrompt:    BuildManualPrompt("", ""),
+		IdlePrompt:    BuildManualPromptWithOptions("", "", opts.DefaultWaitMs, false),
+		Tuning:        &tuning,
 		Stats:         stats,
 		Requests:      views,
 	}
 }
 
-func (b *Broker) toEntryViewLocked(r *requestRecord) QueueEntryView {
+func (b *Broker) toEntryViewLocked(r *requestRecord, opts Options) QueueEntryView {
 	previewText := ""
 	for i := len(r.NewMessages) - 1; i >= 0; i-- {
 		if strings.TrimSpace(r.NewMessages[i].Text) != "" {
@@ -1410,7 +1664,7 @@ func (b *Broker) toEntryViewLocked(r *requestRecord) QueueEntryView {
 		NewMessageCount: len(r.NewMessages),
 		ToolCount:       len(r.Tools),
 		Preview:         preview,
-		CopyPrompt:      BuildManualPrompt(r.ID, r.SessionID),
+		CopyPrompt:      BuildManualPromptWithOptions(r.ID, r.SessionID, opts.DefaultWaitMs, r.Turn > 1),
 		ErrorMessage:    r.ErrorMessage,
 	}
 	if !r.ClaimedAt.IsZero() {
@@ -1422,12 +1676,12 @@ func (b *Broker) toEntryViewLocked(r *requestRecord) QueueEntryView {
 	return view
 }
 
-func clampSliceBytes(n int) int {
+func clampSliceBytesWithOptions(n, defaultBytes, maxBytes int) int {
 	if n <= 0 {
-		return DefaultHistorySliceBytes
+		return defaultBytes
 	}
-	if n > MaxHistorySliceBytes {
-		return MaxHistorySliceBytes
+	if n > maxBytes {
+		return maxBytes
 	}
 	return n
 }

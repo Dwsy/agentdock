@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -662,5 +663,418 @@ func TestPromptDesignAndBranchingAndSessionIsolationAndUsage(t *testing.T) {
 	frames3 := readSSEFrames(t, rec3.Body)
 	if len(frames3) < 2 || !strings.Contains(frames3[len(frames3)-2].Data, "branch error via text") {
 		t.Fatalf("expected error text on SSE failure frame, got %+v", frames3)
+	}
+}
+
+func TestContextCacheCancelledAndFailedTurnDoNotPoisonSession(t *testing.T) {
+	b := NewBroker()
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tools1 := []any{map[string]any{"type": "function", "name": "ping", "parameters": map[string]any{"type": "object"}}}
+	tools2 := []any{
+		map[string]any{"type": "function", "name": "ping", "parameters": map[string]any{"type": "object"}},
+		map[string]any{"type": "function", "name": "pong", "parameters": map[string]any{"type": "object"}},
+	}
+
+	// Turn 1 fails via error: must NOT mark Guide/SystemPrompt/Tools as confirmed.
+	b1, _ := json.Marshal(map[string]any{
+		"model": "manual", "stream": true, "prompt_cache_key": "ck_cancel",
+		"instructions": "sys v1", "tools": tools1, "input": "attempt 1",
+	})
+	rec1 := httptest.NewRecorder()
+	done1 := make(chan struct{})
+	go func() { defer close(done1); b.ServeResponses(ctx, rec1, b1) }()
+	w1, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w1.Turn == nil || w1.Turn.Guide == "" || !w1.Turn.Context.SystemPromptChanged || !w1.Turn.Context.ToolsChanged {
+		t.Fatalf("unexpected Turn 1: %v %+v", err, w1)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w1.Turn.RequestID, Events: []Event{{Type: "error", Text: "transient failure"}}}); err != nil {
+		t.Fatalf("submit error: %v", err)
+	}
+	<-done1
+
+	// Retry same prompt/tools on Turn 2: because Turn 1 failed, Guide & changed flags MUST stay true.
+	b2, _ := json.Marshal(map[string]any{
+		"model": "manual", "stream": true, "prompt_cache_key": "ck_cancel",
+		"instructions": "sys v1", "tools": tools1, "input": "attempt 2",
+	})
+	rec2 := httptest.NewRecorder()
+	done2 := make(chan struct{})
+	go func() { defer close(done2); b.ServeResponses(ctx, rec2, b2) }()
+	w2, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w2.Turn == nil {
+		t.Fatalf("wait 2: %v", err)
+	}
+	if w2.Turn.Guide == "" || !w2.Turn.Context.SystemPromptChanged || !w2.Turn.Context.ToolsChanged {
+		t.Fatalf("failed Turn 1 poisoned Turn 2 cache: %+v", w2.Turn)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w2.Turn.RequestID, Events: []Event{{Type: "text", Text: "ok"}, {Type: "done", Reason: "stop"}}}); err != nil {
+		t.Fatalf("submit 2: %v", err)
+	}
+	<-done2
+
+	// Turn 3 updates system_prompt & adds pong, then is cancelled before completion.
+	b3, _ := json.Marshal(map[string]any{
+		"model": "manual", "stream": true, "prompt_cache_key": "ck_cancel",
+		"instructions": "sys v2", "tools": tools2, "input": []any{
+			map[string]any{"role": "user", "content": "attempt 2"},
+			map[string]any{"role": "assistant", "content": "ok"},
+			map[string]any{"role": "user", "content": "turn 3"},
+		},
+	})
+	rec3 := httptest.NewRecorder()
+	done3 := make(chan struct{})
+	go func() { defer close(done3); b.ServeResponses(ctx, rec3, b3) }()
+	w3, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w3.Turn == nil || !w3.Turn.Context.SystemPromptChanged || !w3.Turn.Context.ToolsChanged {
+		t.Fatalf("wait 3: %v %+v", err, w3)
+	}
+	if !slices.Equal(w3.Turn.Context.ChangedTools, []string{"pong"}) {
+		t.Fatalf("expected ChangedTools=[pong], got %+v", w3.Turn.Context.ChangedTools)
+	}
+	if _, err := b.CancelRequest(w3.Turn.RequestID, "abort turn 3"); err != nil {
+		t.Fatalf("cancel 3: %v", err)
+	}
+	<-done3
+
+	// Turn 4 resends sys v2 + tools2: cancelled Turn 3 must NOT have committed S2/tools2!
+	b4, _ := json.Marshal(map[string]any{
+		"model": "manual", "stream": true, "prompt_cache_key": "ck_cancel",
+		"instructions": "sys v2", "tools": tools2, "input": []any{
+			map[string]any{"role": "user", "content": "attempt 2"},
+			map[string]any{"role": "assistant", "content": "ok"},
+			map[string]any{"role": "user", "content": "turn 4 retry"},
+		},
+	})
+	rec4 := httptest.NewRecorder()
+	done4 := make(chan struct{})
+	go func() { defer close(done4); b.ServeResponses(ctx, rec4, b4) }()
+	w4, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w4.Turn == nil {
+		t.Fatalf("wait 4: %v", err)
+	}
+	if !w4.Turn.Context.SystemPromptChanged || !w4.Turn.Context.ToolsChanged || !slices.Equal(w4.Turn.Context.ChangedTools, []string{"pong"}) {
+		t.Fatalf("cancelled Turn 3 poisoned Turn 4 delta flags: %+v", w4.Turn.Context)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w4.Turn.RequestID, Events: []Event{{Type: "text", Text: "done4"}, {Type: "done"}}}); err != nil {
+		t.Fatalf("submit 4: %v", err)
+	}
+	<-done4
+}
+
+func TestContextCacheColdStartFreshAndCallerSwitchResetsManifest(t *testing.T) {
+	b := NewBroker()
+	defer b.Close()
+	mcpHandler := NewMCPHTTPHandler(b, "test")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	callMCPWait := func(metaSession string, args map[string]any) WaitOutput {
+		t.Helper()
+		params := map[string]any{
+			"name":      "llm_wait",
+			"arguments": args,
+		}
+		if metaSession != "" {
+			params["_meta"] = map[string]any{"openai/session": metaSession}
+		}
+		rpcBody, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "tools/call",
+			"params":  params,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/mcp/manual", bytes.NewReader(rpcBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		resp := httptest.NewRecorder()
+		mcpHandler.ServeHTTP(resp, req)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("MCP HTTP status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		var rpcResp struct {
+			Result struct {
+				IsError bool `json:"isError"`
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &rpcResp); err != nil {
+			t.Fatalf("unmarshal MCP response %q: %v", resp.Body.String(), err)
+		}
+		if rpcResp.Result.IsError || len(rpcResp.Result.Content) == 0 {
+			t.Fatalf("unexpected MCP error result: %+v", rpcResp)
+		}
+		var out WaitOutput
+		if err := json.Unmarshal([]byte(rpcResp.Result.Content[0].Text), &out); err != nil {
+			t.Fatalf("unmarshal WaitOutput %q: %v", rpcResp.Result.Content[0].Text, err)
+		}
+		return out
+	}
+
+	toolsA := []any{map[string]any{"type": "function", "name": "ping", "parameters": map[string]any{"type": "object"}}}
+	spawnTurn := func(prevResp, input string) (<-chan struct{}, *httptest.ResponseRecorder) {
+		payload := map[string]any{"model": "manual", "stream": true, "instructions": "system stable", "tools": toolsA, "input": input}
+		if prevResp != "" {
+			payload["previous_response_id"] = prevResp
+		}
+		raw, _ := json.Marshal(payload)
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { defer close(done); b.ServeResponses(ctx, rec, raw) }()
+		return done, rec
+	}
+
+	// Turn 1 claimed by chat-A.
+	d1, _ := spawnTurn("", "hello 1")
+	w1 := callMCPWait("chat-A", map[string]any{"wait_ms": 3000})
+	if w1.Turn == nil || w1.Turn.Guide == "" || w1.Turn.Context.CacheReset {
+		t.Fatalf("unexpected Turn 1: %+v", w1)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w1.Turn.RequestID, CallerKey: "meta:openai/session:chat-A", Events: []Event{{Type: "text", Text: "a1"}, {Type: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	<-d1
+
+	// Turn 2 claimed by SAME chat-A: Guide omitted, no reset, changes false.
+	d2, _ := spawnTurn(w1.Turn.ResponseID, "hello 2")
+	w2 := callMCPWait("chat-A", map[string]any{"session_id": w1.Turn.SessionID, "wait_ms": 3000})
+	if w2.Turn == nil || w2.Turn.Guide != "" || w2.Turn.Context.CacheReset || w2.Turn.Context.SystemPromptChanged || w2.Turn.Context.ToolsChanged {
+		t.Fatalf("expected warm hit on chat-A Turn 2, got %+v", w2.Turn)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w2.Turn.RequestID, CallerKey: "meta:openai/session:chat-A", Events: []Event{{Type: "text", Text: "a2"}, {Type: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	<-d2
+
+	// Turn 3 claimed by DIFFERENT chat-B via _meta["openai/session"]: automatic cold-start reset!
+	// Also check Snapshot CopyPrompt includes fresh=true for Turn > 1!
+	d3, _ := spawnTurn(w2.Turn.ResponseID, "hello 3")
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snap := b.Snapshot(true, "/v1/responses", "/mcp/manual")
+		if len(snap.Requests) > 0 && snap.Requests[0].Turn == 3 {
+			if !strings.Contains(snap.Requests[0].CopyPrompt, "fresh=true") {
+				t.Fatalf("expected CopyPrompt for Turn>1 to include fresh=true, got %q", snap.Requests[0].CopyPrompt)
+			}
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	w3 := callMCPWait("chat-B", map[string]any{"session_id": w1.Turn.SessionID, "wait_ms": 3000})
+	if w3.Turn == nil || w3.Turn.Guide == "" || !w3.Turn.Context.CacheReset || !w3.Turn.Context.SystemPromptChanged || !w3.Turn.Context.ToolsChanged {
+		t.Fatalf("expected automatic cache reset on chat-B switch, got %+v", w3.Turn)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w3.Turn.RequestID, CallerKey: "meta:openai/session:chat-B", Events: []Event{{Type: "text", Text: "a3"}, {Type: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	<-d3
+
+	// Turn 4 on SAME chat-B with explicit fresh=true also resets cleanly.
+	d4, _ := spawnTurn(w3.Turn.ResponseID, "hello 4")
+	w4 := callMCPWait("chat-B", map[string]any{"session_id": w1.Turn.SessionID, "fresh": true, "wait_ms": 3000})
+	if w4.Turn == nil || w4.Turn.Guide == "" || !w4.Turn.Context.CacheReset || !w4.Turn.Context.SystemPromptChanged || !w4.Turn.Context.ToolsChanged {
+		t.Fatalf("expected explicit fresh=true reset, got %+v", w4.Turn)
+	}
+	_, _, _ = b.Submit(ctx, SubmitInput{RequestID: w4.Turn.RequestID, Events: []Event{{Type: "done"}}})
+	<-d4
+}
+
+func TestContextCachePerToolDiffAndResilientStatelessDedup(t *testing.T) {
+	b := NewBroker()
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	toolDef := func(name, desc string) map[string]any {
+		return map[string]any{"type": "function", "name": name, "description": desc, "parameters": map[string]any{"type": "object"}}
+	}
+
+	// Stateless Turn 1 with dynamic developer index-0 message + 3 tools [a, b, c].
+	b1, _ := json.Marshal(map[string]any{
+		"model":            "manual",
+		"stream":           true,
+		"prompt_cache_key": "ck_resilient",
+		"tools":            []any{toolDef("a", "v1"), toolDef("b", "v1"), toolDef("c", "v1")},
+		"input": []any{
+			map[string]any{"role": "developer", "content": "env ts=1000"},
+			map[string]any{"role": "user", "content": "first question"},
+		},
+	})
+	rec1 := httptest.NewRecorder()
+	done1 := make(chan struct{})
+	go func() { defer close(done1); b.ServeResponses(ctx, rec1, b1) }()
+	w1, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w1.Turn == nil {
+		t.Fatalf("wait 1: %v", err)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w1.Turn.RequestID, Events: []Event{{Type: "text", Text: "first answer"}, {Type: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	<-done1
+
+	// Turn 2: index-0 developer updated (ts=2000!), [first question, first answer] unchanged, user asks turn 2.
+	// Tools: b modified -> v2, d added -> ChangedTools=["b", "d"].
+	b2, _ := json.Marshal(map[string]any{
+		"model":            "manual",
+		"stream":           true,
+		"prompt_cache_key": "ck_resilient",
+		"tools":            []any{toolDef("a", "v1"), toolDef("b", "v2"), toolDef("c", "v1"), toolDef("d", "v1")},
+		"input": []any{
+			map[string]any{"role": "developer", "content": "env ts=2000"},
+			map[string]any{"role": "user", "content": "first question"},
+			map[string]any{"role": "assistant", "content": "first answer"},
+			map[string]any{"role": "user", "content": "second question"},
+		},
+	})
+	rec2 := httptest.NewRecorder()
+	done2 := make(chan struct{})
+	go func() { defer close(done2); b.ServeResponses(ctx, rec2, b2) }()
+	w2, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w2.Turn == nil {
+		t.Fatalf("wait 2: %v", err)
+	}
+	if len(w2.Turn.NewMessages) != 2 || w2.Turn.Context.OmittedMessages != 2 {
+		t.Fatalf("expected resilient dedup to emit [dev_v2, second question] with 2 omitted, got %+v", w2.Turn)
+	}
+	if w2.Turn.NewMessages[0].Index != 0 || w2.Turn.NewMessages[0].Preview != "env ts=2000" {
+		t.Fatalf("expected index 0 for updated developer msg, got %+v", w2.Turn.NewMessages[0])
+	}
+	if w2.Turn.NewMessages[1].Index != 3 || w2.Turn.NewMessages[1].Preview != "second question" {
+		t.Fatalf("expected index 3 for trailing user msg, got %+v", w2.Turn.NewMessages[1])
+	}
+	if !w2.Turn.Context.ToolsChanged || !slices.Equal(w2.Turn.Context.ChangedTools, []string{"b", "d"}) || len(w2.Turn.Context.RemovedTools) != 0 {
+		t.Fatalf("expected per-tool diff ChangedTools=[b d], got %+v", w2.Turn.Context)
+	}
+	// History cursor=0 resolves updated developer prompt.
+	h0, _, err := b.Wait(ctx, WaitInput{Action: "history", RequestID: w2.Turn.RequestID, Cursor: intPtr(0), MaxBytes: 1024})
+	if err != nil || h0.Slice == nil || h0.Slice.Content != "env ts=2000" {
+		t.Fatalf("history cursor=0 mismatch: %v %+v", err, h0)
+	}
+	if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w2.Turn.RequestID, Events: []Event{{Type: "text", Text: "second answer"}, {Type: "done"}}}); err != nil {
+		t.Fatal(err)
+	}
+	<-done2
+
+	// Turn 3 removes tool a without changing remaining tools -> ToolsChanged=false, RemovedTools=["a"].
+	b3, _ := json.Marshal(map[string]any{
+		"model":            "manual",
+		"stream":           true,
+		"prompt_cache_key": "ck_resilient",
+		"tools":            []any{toolDef("b", "v2"), toolDef("c", "v1"), toolDef("d", "v1")},
+		"input": []any{
+			map[string]any{"role": "developer", "content": "env ts=2000"},
+			map[string]any{"role": "user", "content": "first question"},
+			map[string]any{"role": "assistant", "content": "first answer"},
+			map[string]any{"role": "user", "content": "second question"},
+			map[string]any{"role": "assistant", "content": "second answer"},
+			map[string]any{"role": "user", "content": "third question"},
+		},
+	})
+	rec3 := httptest.NewRecorder()
+	done3 := make(chan struct{})
+	go func() { defer close(done3); b.ServeResponses(ctx, rec3, b3) }()
+	w3, _, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+	if err != nil || w3.Turn == nil {
+		t.Fatalf("wait 3: %v", err)
+	}
+	if w3.Turn.Context.ToolsChanged || len(w3.Turn.Context.ChangedTools) != 0 || !slices.Equal(w3.Turn.Context.RemovedTools, []string{"a"}) {
+		t.Fatalf("expected RemovedTools=[a] with ToolsChanged=false, got %+v", w3.Turn.Context)
+	}
+	_, _, _ = b.Submit(ctx, SubmitInput{RequestID: w3.Turn.RequestID, Events: []Event{{Type: "done"}}})
+	<-done3
+}
+
+func TestPruneRetainsExactCapAndImageByteBudgetAndCustomOptions(t *testing.T) {
+	b := NewBrokerWithOptions(Options{
+		PreviewBytes:          300,
+		SliceBytes:            512,
+		MaxSliceBytes:         1024,
+		DefaultWaitMs:         2000,
+		MaxWaitMs:             5000,
+		CacheMaxResponses:     16,
+		MaxRetainedImageBytes: 1500, // holds at most 1 x 1000-byte completed image
+	})
+	defer b.Close()
+
+	// Override lower for targeted unit test of prune math cleanly (normalized min is 16 for config, force 2 in-package).
+	b.mu.Lock()
+	b.opts.CacheMaxResponses = 2
+	b.mu.Unlock()
+
+	if opts := b.Options(); opts.PreviewBytes != 300 || opts.SliceBytes != 512 || opts.DefaultWaitMs != 2000 {
+		t.Fatalf("unexpected custom options: %+v", opts)
+	}
+	// Verify MCP schema reflects custom options.
+	waitSchema := waitInputSchemaForOptions(b.Options())
+	if waitSchema.Properties["max_bytes"].Maximum == nil || *waitSchema.Properties["max_bytes"].Maximum != 1024 {
+		t.Fatalf("expected schema max_bytes max=1024, got %+v", waitSchema.Properties["max_bytes"])
+	}
+	if waitSchema.Properties["wait_ms"].Maximum == nil || *waitSchema.Properties["wait_ms"].Maximum != 5000 {
+		t.Fatalf("expected schema wait_ms max=5000, got %+v", waitSchema.Properties["wait_ms"])
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	imgBytes := bytes.Repeat([]byte{0x89, 0x50, 0x4e, 0x47}, 250) // 1000 bytes
+	imgURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(imgBytes)
+
+	var reqIDs []string
+	for i := 0; i < 4; i++ {
+		raw, _ := json.Marshal(map[string]any{
+			"model":  "manual",
+			"stream": true,
+			"input": []any{map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": strings.Repeat("Z", 450)},
+					map[string]any{"type": "input_image", "image_url": imgURL},
+				},
+			}},
+		})
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { defer close(done); b.ServeResponses(ctx, rec, raw) }()
+		w, imgs, err := b.Wait(ctx, WaitInput{WaitMs: intPtr(3000)})
+		if err != nil || w.Turn == nil || len(imgs) != 1 {
+			t.Fatalf("turn %d wait: err=%v turn=%+v imgs=%d", i, err, w.Turn, len(imgs))
+		}
+		if i == 0 && (!w.Turn.NewMessages[0].Truncated || len(w.Turn.NewMessages[0].Preview) > 360) {
+			t.Fatalf("expected custom PreviewBytes=300 truncation, got %+v", w.Turn.NewMessages[0])
+		}
+		reqIDs = append(reqIDs, w.Turn.RequestID)
+		if _, _, err := b.Submit(ctx, SubmitInput{RequestID: w.Turn.RequestID, Events: []Event{{Type: "text", Text: "ok"}, {Type: "done"}}}); err != nil {
+			t.Fatal(err)
+		}
+		<-done
+	}
+
+	// Trigger pruneLocked via Snapshot: must keep EXACTLY 2 newest terminal requests (reqIDs[2], reqIDs[3]).
+	snap := b.Snapshot(true, "/v1/responses", "/mcp/manual")
+	if len(snap.Requests) != 2 || snap.Stats.CompletedCount != 2 {
+		t.Fatalf("expected exact 2 surviving terminal requests, got len=%d stats=%+v", len(snap.Requests), snap.Stats)
+	}
+	if snap.Requests[0].RequestID != reqIDs[3] || snap.Requests[1].RequestID != reqIDs[2] {
+		t.Fatalf("expected newest [req3 req2], got [%s %s]", snap.Requests[0].RequestID, snap.Requests[1].RequestID)
+	}
+	if !strings.Contains(snap.IdlePrompt, "wait_ms=2000") {
+		t.Fatalf("expected IdlePrompt wait_ms=2000, got %q", snap.IdlePrompt)
+	}
+
+	// Newest completed request (reqIDs[3], 1000B <= 1500B) still returns binary image; older (reqIDs[2]) was stripped.
+	_, imgsNewest, err := b.Wait(ctx, WaitInput{Action: "history", RequestID: reqIDs[3], Cursor: intPtr(0), MaxBytes: 512})
+	if err != nil || len(imgsNewest) != 1 || len(imgsNewest[0].Data) != 1000 {
+		t.Fatalf("expected newest terminal request to retain 1000B image, got err=%v imgs=%+v", err, imgsNewest)
+	}
+	hOlder, imgsOlder, err := b.Wait(ctx, WaitInput{Action: "history", RequestID: reqIDs[2], Cursor: intPtr(0), MaxBytes: 512})
+	if err != nil || hOlder.Slice == nil || !strings.Contains(hOlder.Slice.Content, "[image:img_1 (image/png)]") {
+		t.Fatalf("expected older terminal request text/marker preserved, got %v %+v", err, hOlder)
+	}
+	if len(imgsOlder) == 1 && len(imgsOlder[0].Data) != 0 {
+		t.Fatalf("expected older terminal image bytes pruned beyond 1500B budget, got %d bytes", len(imgsOlder[0].Data))
 	}
 }

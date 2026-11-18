@@ -497,6 +497,36 @@ func hashTools(tools []ToolDef) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+func hashToolsMap(tools []ToolDef) map[string]string {
+	if len(tools) == 0 {
+		return nil
+	}
+	names := canonicalToolNames(tools)
+	out := make(map[string]string, len(tools))
+	for i, t := range tools {
+		raw, _ := json.Marshal(t)
+		sum := sha256.Sum256(raw)
+		out[names[i]] = hex.EncodeToString(sum[:8])
+	}
+	return out
+}
+
+func canonicalToolNames(tools []ToolDef) []string {
+	nameCounts := make(map[string]int, len(tools))
+	for _, t := range tools {
+		nameCounts[t.Name]++
+	}
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if t.Namespace != "" && nameCounts[t.Name] > 1 {
+			out = append(out, displayToolName(t))
+		} else {
+			out = append(out, t.Name)
+		}
+	}
+	return out
+}
+
 // LiveSSEWriter renders incremental manual LLM events as OpenAI Responses SSE frames.
 // All methods must be called from the single HTTP response goroutine.
 type LiveSSEWriter struct {

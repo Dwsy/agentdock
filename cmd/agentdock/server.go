@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/desktopcontrol"
 	"github.com/uvwt/agentdock/internal/desktopruntime"
+	"github.com/uvwt/agentdock/internal/envstore"
 	"github.com/uvwt/agentdock/internal/httpx"
 	"github.com/uvwt/agentdock/internal/mcp"
 	"github.com/uvwt/agentdock/internal/nexusbridge"
@@ -31,12 +33,17 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	// 继续留在进程环境并被后续启动的本地工具继承。
 	_ = os.Unsetenv("AGENTDOCK_NEXUS_ENDPOINT")
 	_ = os.Unsetenv("AGENTDOCK_NEXUS_TOKEN")
+	envFilePath, err := loadConfiguredEnvFile(args)
+	if err != nil {
+		return err
+	}
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err
 	}
 	flags := flag.NewFlagSet("agentdock", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.String("env-file", envFilePath, "optional path to agentdock.env configuration file (or AGENTDOCK_ENV_FILE)")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "用法：")
 		fmt.Fprintln(stderr, "  agentdock [服务参数]")
@@ -60,6 +67,16 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	flags.StringVar(&mcpAppsMode, "mcp-apps-mode", mcpAppsMode, "chat card mode: full, compact, off")
 	flags.BoolVar(&cfg.BrowserEnabled, "browser-enabled", cfg.BrowserEnabled, "expose optional browser automation tools")
 	flags.BoolVar(&cfg.ManualLLMEnabled, "manual-llm-enabled", cfg.ManualLLMEnabled, "expose manual /v1/responses and /mcp/manual LLM bridge")
+	flags.IntVar(&cfg.ManualLLMPreviewBytes, "manual-llm-preview-bytes", cfg.ManualLLMPreviewBytes, "inline message preview byte budget for manual llm_wait(wait)")
+	flags.IntVar(&cfg.ManualLLMSliceBytes, "manual-llm-slice-bytes", cfg.ManualLLMSliceBytes, "default UTF-8 byte chunk size for manual llm_wait(history/prompt)")
+	flags.IntVar(&cfg.ManualLLMMaxSliceBytes, "manual-llm-max-slice-bytes", cfg.ManualLLMMaxSliceBytes, "maximum UTF-8 byte chunk size for manual llm_wait(history/prompt)")
+	flags.IntVar(&cfg.ManualLLMWaitMs, "manual-llm-wait-ms", cfg.ManualLLMWaitMs, "default long-poll milliseconds for manual llm_wait/llm_submit")
+	flags.IntVar(&cfg.ManualLLMMaxWaitMs, "manual-llm-max-wait-ms", cfg.ManualLLMMaxWaitMs, "maximum long-poll milliseconds for manual llm_wait/llm_submit")
+	flags.IntVar(&cfg.ManualLLMMaxPending, "manual-llm-max-pending", cfg.ManualLLMMaxPending, "maximum queued or in-flight manual /v1/responses turns")
+	flags.IntVar(&cfg.ManualLLMCacheMaxResponses, "manual-llm-cache-max-responses", cfg.ManualLLMCacheMaxResponses, "maximum retained completed turns for session/history/branch cache")
+	flags.IntVar(&cfg.ManualLLMCacheTTLSec, "manual-llm-cache-ttl-sec", cfg.ManualLLMCacheTTLSec, "completed turn and session cache retention seconds")
+	flags.IntVar(&cfg.ManualLLMKeepaliveMS, "manual-llm-keepalive-ms", cfg.ManualLLMKeepaliveMS, "SSE keepalive frame interval milliseconds on manual /v1/responses")
+	flags.IntVar(&cfg.ManualLLMCacheMaxImageMB, "manual-llm-cache-max-image-mb", cfg.ManualLLMCacheMaxImageMB, "maximum MiB of completed-turn image payloads retained in memory")
 	flags.StringVar(&cfg.BrowserExecutablePath, "browser-executable-path", cfg.BrowserExecutablePath, "optional absolute Chrome, Chromium, or Edge executable path")
 	flags.StringVar(&cfg.BrowserCDPURL, "browser-cdp-url", cfg.BrowserCDPURL, "optional existing Chromium CDP endpoint to attach")
 	flags.BoolVar(&cfg.BrowserReuseExistingCDP, "browser-reuse-existing-cdp", cfg.BrowserReuseExistingCDP, "discover and reuse a unique local existing CDP browser before launching one")
@@ -171,4 +188,71 @@ func serveStdio(ctx context.Context, server *mcp.Server) error {
 	case <-ctx.Done():
 		return nil
 	}
+}
+
+func loadConfiguredEnvFile(args []string) (string, error) {
+	explicit := false
+	path := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			i = len(args)
+		case arg == "--env-file" || arg == "-env-file":
+			if i+1 < len(args) {
+				path = strings.TrimSpace(args[i+1])
+				explicit = true
+				i++
+			}
+		case strings.HasPrefix(arg, "--env-file="):
+			path = strings.TrimSpace(strings.TrimPrefix(arg, "--env-file="))
+			explicit = true
+		case strings.HasPrefix(arg, "-env-file="):
+			path = strings.TrimSpace(strings.TrimPrefix(arg, "-env-file="))
+			explicit = true
+		}
+	}
+	if !explicit {
+		if envPath := strings.TrimSpace(os.Getenv("AGENTDOCK_ENV_FILE")); envPath != "" {
+			path = envPath
+			explicit = true
+		} else if root := strings.TrimSpace(os.Getenv("AGENTDOCK_RUNTIME_ROOT")); root != "" {
+			path = filepath.Join(root, "agentdock.env")
+		}
+	}
+	if path == "" {
+		return "", nil
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve env file %q: %w", path, err)
+	}
+	values, err := envstore.ParseFile(absPath)
+	if err != nil {
+		if !explicit && errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("load env file %s: %w", absPath, err)
+	}
+	if err := applyLoadedEnv(absPath, explicit, values); err != nil {
+		return "", err
+	}
+	return absPath, nil
+}
+
+func applyLoadedEnv(absPath string, explicit bool, values map[string]string) error {
+	for key, value := range values {
+		// 显式传入的进程环境优先于配置文件，不覆盖调用方临时覆盖。
+		if _, exists := os.LookupEnv(key); !exists {
+			if err := os.Setenv(key, value); err != nil {
+				return fmt.Errorf("set env %s from %s: %w", key, absPath, err)
+			}
+		}
+	}
+	if explicit && strings.TrimSpace(os.Getenv("AGENTDOCK_ENV_FILE")) == "" {
+		if err := os.Setenv("AGENTDOCK_ENV_FILE", absPath); err != nil {
+			return fmt.Errorf("set AGENTDOCK_ENV_FILE=%s: %w", absPath, err)
+		}
+	}
+	return nil
 }

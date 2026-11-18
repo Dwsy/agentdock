@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uvwt/agentdock/internal/auth"
@@ -22,12 +23,12 @@ func manualLLMBroker(runtime runtimeapi.Runtime) *manualllm.Broker {
 	return nil
 }
 
-func registerManualLLM(mux *http.ServeMux, broker *manualllm.Broker, cfg config.Config, oauthStore *auth.OAuthStore) {
-	if broker == nil {
+func registerManualLLM(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) {
+	if _, ok := runtime.(runtimeapi.ManualLLMSource); !ok {
 		return
 	}
-	mux.HandleFunc("/v1/responses", manualResponsesHandler(broker, cfg, oauthStore))
-	mcpHandler := manualMCPEndpointHandler(broker, cfg, oauthStore)
+	mux.HandleFunc("/v1/responses", manualResponsesHandler(runtime, cfg, oauthStore))
+	mcpHandler := manualMCPEndpointHandler(runtime, cfg, oauthStore)
 	mux.HandleFunc("/mcp/manual", mcpHandler)
 	mux.HandleFunc("/mcp/manual/", mcpHandler)
 }
@@ -51,8 +52,13 @@ func authorizeManualLLMRequest(w http.ResponseWriter, r *http.Request, cfg confi
 	return true
 }
 
-func manualResponsesHandler(broker *manualllm.Broker, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
+func manualResponsesHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		broker := manualLLMBroker(runtime)
+		if broker == nil {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -79,9 +85,28 @@ func manualResponsesHandler(broker *manualllm.Broker, cfg config.Config, oauthSt
 	}
 }
 
-func manualMCPEndpointHandler(broker *manualllm.Broker, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
-	transport := manualllm.NewMCPHTTPHandler(broker, buildinfo.Version)
+func manualMCPEndpointHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
+	var (
+		mu          sync.Mutex
+		cachedFor   *manualllm.Broker
+		cachedTrans http.Handler
+	)
+	transportFor := func(broker *manualllm.Broker) http.Handler {
+		mu.Lock()
+		defer mu.Unlock()
+		if cachedFor != broker || cachedTrans == nil {
+			cachedFor = broker
+			cachedTrans = manualllm.NewMCPHTTPHandler(broker, buildinfo.Version)
+		}
+		return cachedTrans
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
+		broker := manualLLMBroker(runtime)
+		if broker == nil {
+			http.NotFound(w, r)
+			return
+		}
 		if !authorizeManualLLMRequest(w, r, cfg, oauthStore) {
 			return
 		}
@@ -90,6 +115,6 @@ func manualMCPEndpointHandler(broker *manualllm.Broker, cfg config.Config, oauth
 		}
 		// llm_wait long-polls up to 55s per MCP request.
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
-		transport.ServeHTTP(w, r)
+		transportFor(broker).ServeHTTP(w, r)
 	}
 }

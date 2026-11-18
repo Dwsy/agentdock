@@ -60,7 +60,7 @@ func Serve(ctx context.Context, server *mcp.Server, runtime runtimeapi.Runtime, 
 	// 只读 Web 控制台：静态页 + loopback-only API 代理（内部注入 token）。
 	registerDashboard(mux, cfg, runtimeAPIHandler(runtime, cfg, oauthStore))
 	mux.HandleFunc("/mcp", mcpEndpointHandler(server, cfg, oauthStore))
-	registerManualLLM(mux, manualLLMBroker(runtime), cfg, oauthStore)
+	registerManualLLM(mux, runtime, cfg, oauthStore)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	httpServer := newHTTPServer(addr, captureHandler(loggingMiddleware(mux), networkCaptureStore(runtime)))

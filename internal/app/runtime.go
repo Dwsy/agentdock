@@ -38,38 +38,41 @@ import (
 type Result = toolcore.Result
 
 type Runtime struct {
-	cfg            config.Config
-	toolNames      []string
-	toolValidators map[string]*toolcontract.InputValidator
-	ws             *workspace.Workspace
-	skills         *toolskill.Service
-	command        *toolcommand.Service
-	files          *toolfile.Service
-	dynamicMCP     *toolmcp.Service
-	plugins        *toolplugin.Service
-	media          *toolmedia.Service
-	browser        *toolbrowser.Service
-	recall         *toolrecall.Service
-	evolution      *evolution.Service
-	taskTools      *tooltask.Service
-	acp            *toolacp.Service
-	manualLLM      *manualllm.Broker
-	observer       *observability.Recorder
-	events         *observability.EventBus
-	alerts         alertTracker
-	traces         *observability.TraceStore
-	networkCapture *observability.CaptureStore
-	artifacts      publicartifacts.Store
-	tracing        *observability.Tracing
-	resourceOnce   sync.Once
-	resourceSvc    *resourcelibrary.Service
-	resourceErr    error
-	lifecycleMu    sync.RWMutex
-	commandCtx     context.Context
-	commandCancel  context.CancelFunc
-	closing        bool
-	closeOnce      sync.Once
-	closeErr       error
+	cfg               config.Config
+	toolNames         []string
+	toolValidators    map[string]*toolcontract.InputValidator
+	ws                *workspace.Workspace
+	skills            *toolskill.Service
+	command           *toolcommand.Service
+	files             *toolfile.Service
+	dynamicMCP        *toolmcp.Service
+	plugins           *toolplugin.Service
+	media             *toolmedia.Service
+	browser           *toolbrowser.Service
+	recall            *toolrecall.Service
+	evolution         *evolution.Service
+	taskTools         *tooltask.Service
+	acp               *toolacp.Service
+	manualLLMMu       sync.RWMutex
+	manualLLMEnabled  bool
+	manualLLM         *manualllm.Broker
+	onManualLLMChange func()
+	observer          *observability.Recorder
+	events            *observability.EventBus
+	alerts            alertTracker
+	traces            *observability.TraceStore
+	networkCapture    *observability.CaptureStore
+	artifacts         publicartifacts.Store
+	tracing           *observability.Tracing
+	resourceOnce      sync.Once
+	resourceSvc       *resourcelibrary.Service
+	resourceErr       error
+	lifecycleMu       sync.RWMutex
+	commandCtx        context.Context
+	commandCancel     context.CancelFunc
+	closing           bool
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 func NewRuntime(cfg config.Config) (*Runtime, error) {
@@ -226,14 +229,64 @@ func NewRuntime(cfg config.Config) (*Runtime, error) {
 		runtime.acp = toolacp.NewMulti(cfg.EffectiveACPDefaultProfile(), managers)
 	}
 	if cfg.ManualLLMEnabled {
-		runtime.manualLLM = manualllm.NewBroker()
+		runtime.manualLLMEnabled = true
+		runtime.manualLLM = manualllm.NewBrokerWithOptions(runtime.manualLLMOptions())
 	}
 	return runtime, nil
 }
 
+func (r *Runtime) manualLLMOptions() manualllm.Options {
+	if r == nil {
+		return manualllm.DefaultOptions()
+	}
+	cfg := r.cfg
+	return (manualllm.Options{
+		PreviewBytes:          cfg.ManualLLMPreviewBytes,
+		SliceBytes:            cfg.ManualLLMSliceBytes,
+		MaxSliceBytes:         cfg.ManualLLMMaxSliceBytes,
+		DefaultWaitMs:         cfg.ManualLLMWaitMs,
+		MaxWaitMs:             cfg.ManualLLMMaxWaitMs,
+		MaxPendingQueue:       cfg.ManualLLMMaxPending,
+		CacheMaxResponses:     cfg.ManualLLMCacheMaxResponses,
+		CacheTTL:              time.Duration(cfg.ManualLLMCacheTTLSec) * time.Second,
+		KeepaliveInterval:     time.Duration(cfg.ManualLLMKeepaliveMS) * time.Millisecond,
+		MaxRetainedImageBytes: int64(cfg.ManualLLMCacheMaxImageMB) * 1024 * 1024,
+	}).Normalized()
+}
+
 func (r *Runtime) Config() config.Config           { return r.cfg }
 func (r *Runtime) Workspace() *workspace.Workspace { return r.ws }
-func (r *Runtime) ManualLLM() *manualllm.Broker    { return r.manualLLM }
+
+// ManualLLM returns the live manual LLM broker when enabled, or nil.
+func (r *Runtime) ManualLLM() *manualllm.Broker {
+	if r == nil {
+		return nil
+	}
+	r.manualLLMMu.RLock()
+	defer r.manualLLMMu.RUnlock()
+	return r.manualLLM
+}
+
+// ManualLLMEnabled reports whether manual LLM bridging is currently active.
+func (r *Runtime) ManualLLMEnabled() bool {
+	if r == nil {
+		return false
+	}
+	r.manualLLMMu.RLock()
+	defer r.manualLLMMu.RUnlock()
+	return r.manualLLMEnabled
+}
+
+// SetManualLLMChangeHook registers a callback invoked asynchronously whenever
+// manual LLM availability changes, allowing NexusBridge to re-handshake tools.
+func (r *Runtime) SetManualLLMChangeHook(fn func()) {
+	if r == nil {
+		return
+	}
+	r.manualLLMMu.Lock()
+	r.onManualLLMChange = fn
+	r.manualLLMMu.Unlock()
+}
 
 func (r *Runtime) Close() error {
 	if r == nil {
@@ -258,8 +311,14 @@ func (r *Runtime) Close() error {
 		if commandCancel != nil {
 			commandCancel()
 		}
-		if r.manualLLM != nil {
-			r.manualLLM.Close()
+		r.manualLLMMu.Lock()
+		manualBroker := r.manualLLM
+		r.manualLLM = nil
+		r.manualLLMEnabled = false
+		r.onManualLLMChange = nil
+		r.manualLLMMu.Unlock()
+		if manualBroker != nil {
+			manualBroker.Close()
 		}
 		if r.acp != nil {
 			if err := r.acp.Close(); err != nil {

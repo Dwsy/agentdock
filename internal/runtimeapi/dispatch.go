@@ -61,7 +61,7 @@ func MethodAllowed(method, path string) bool {
 	if cleanPath == "/internal/runtime/config/restart" {
 		return method == http.MethodPost
 	}
-	if cleanPath == "/internal/runtime/manual-llm/cancel" {
+	if cleanPath == "/internal/runtime/manual-llm/cancel" || cleanPath == "/internal/runtime/manual-llm/toggle" {
 		return method == http.MethodPost
 	}
 	if cleanPath == "/internal/runtime/config" {
@@ -103,7 +103,7 @@ func AllowHeader(path string) string {
 	if cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" {
 		return "GET, POST"
 	}
-	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/config/restart" || cleanPath == "/internal/runtime/manual-llm/cancel" {
+	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/config/restart" || cleanPath == "/internal/runtime/manual-llm/cancel" || cleanPath == "/internal/runtime/manual-llm/toggle" {
 		return "POST"
 	}
 	if cleanPath == "/internal/runtime/config" {
@@ -468,6 +468,27 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		result, err := manualRuntime.RuntimeManualLLMCancel(payload.RequestID, payload.Reason)
 		if err != nil {
 			return nil, &app.ToolError{Code: "MANUAL_LLM_CANCEL_FAILED", Message: err.Error(), Category: "validation"}
+		}
+		return map[string]any(result), nil
+	case path == "/internal/runtime/manual-llm/toggle" && method == http.MethodPost:
+		manualRuntime, ok := runtime.(ManualLLMRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "MANUAL_LLM_UNSUPPORTED", Message: "runtime does not support manual LLM toggle", Category: "not_found"}
+		}
+		var payload struct {
+			Enabled bool  `json:"enabled"`
+			Persist *bool `json:"persist,omitempty"`
+		}
+		if err := json.Unmarshal(request.Body, &payload); err != nil {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "manual-llm toggle body must be valid JSON", Category: "validation"}
+		}
+		persist := true
+		if payload.Persist != nil {
+			persist = *payload.Persist
+		}
+		result, err := manualRuntime.RuntimeManualLLMToggle(payload.Enabled, persist)
+		if err != nil {
+			return nil, &app.ToolError{Code: "MANUAL_LLM_TOGGLE_FAILED", Message: err.Error(), Category: "validation"}
 		}
 		return map[string]any(result), nil
 	case path == "/internal/runtime/config/restart" && method == http.MethodPost:

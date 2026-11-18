@@ -2,6 +2,7 @@ package nexusbridge
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	protocol "github.com/uvwt/agentdock-protocol"
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/buildinfo"
+	"github.com/uvwt/agentdock/internal/manualllm"
 	"github.com/uvwt/agentdock/internal/observability"
 	"github.com/uvwt/agentdock/internal/publicartifacts"
 	"github.com/uvwt/agentdock/internal/runtimeapi"
@@ -230,14 +232,13 @@ func (c *Client) connect(ctx context.Context, rawEndpoint string) connectionOutc
 	defer stopContextClose()
 	socket.SetReadLimit(maxMessageBytes)
 
-	tools := c.node.ToolNames()
-	descriptors, err := bridgeToolDescriptors(c.node.ToolDescriptors())
+	tools, descriptors, contractHash, err := c.bridgeContract()
 	if err != nil {
 		return connectionOutcome{err: err}
 	}
 	if err := c.write(socket, protocol.Message{
 		Type: protocol.MessageNodeHello, ProtocolVersion: protocol.ConnectionProtocolVersion,
-		Hello: bridgeHello(c.identity, tools, descriptors, c.node.UIResources(), c.node.ToolContractHash()),
+		Hello: bridgeHello(c.identity, tools, descriptors, c.node.UIResources(), contractHash),
 	}); err != nil {
 		return connectionOutcome{err: err, fallbackAllowed: true}
 	}
@@ -285,6 +286,12 @@ func (c *Client) connect(ctx context.Context, rawEndpoint string) connectionOutc
 	})
 	c.state.SetConnectedServer(serverInfo)
 	defer c.state.SetConnected(false)
+	if source, ok := c.runtime.(runtimeapi.ManualLLMSource); ok {
+		source.SetManualLLMChangeHook(func() {
+			_ = socket.Close()
+		})
+		defer source.SetManualLLMChangeHook(nil)
+	}
 	connectedAt := time.Now()
 	slog.Info("NexusDock node connected",
 		"node_id", c.identity.NodeID,
@@ -400,7 +407,16 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 			toolCtx = observability.WithUpstreamHeaders(toolCtx, request.Headers)
 			// Nexus 调用没有本地 HTTP UA；附带对端 edition/protocol 以便本地 trace 识别云中继版本。
 			toolCtx = observability.WithUserAgent(toolCtx, bridgeUA)
-			result, err = c.node.Invoke(toolCtx, request.Tool, request.Arguments)
+			if isManualBridgeTool(request.Tool) {
+				broker := c.manualLLMBroker()
+				if broker == nil {
+					err = &app.ToolError{Code: "MANUAL_LLM_DISABLED", Message: "manual LLM mode is disabled on this node", Category: "validation"}
+				} else {
+					result, err = manualllm.InvokeBridgeTool(toolCtx, broker, request.Tool, request.Arguments)
+				}
+			} else {
+				result, err = c.node.Invoke(toolCtx, request.Tool, request.Arguments)
+			}
 		}
 	case protocol.OperationResourceRead:
 		var request struct {
@@ -559,6 +575,43 @@ func (c *Client) dispatchRuntimeRequest(ctx context.Context, request runtimeapi.
 		return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "runtime request body is too large", Category: "validation"}
 	}
 	return runtimeapi.Dispatch(ctx, c.runtime, request)
+}
+
+func (c *Client) manualLLMBroker() *manualllm.Broker {
+	if source, ok := c.runtime.(runtimeapi.ManualLLMSource); ok {
+		return source.ManualLLM()
+	}
+	return nil
+}
+
+func isManualBridgeTool(name string) bool {
+	return name == "llm_wait" || name == "llm_submit"
+}
+
+func (c *Client) bridgeContract() ([]string, []protocol.ToolDescriptor, string, error) {
+	baseTools := c.node.ToolNames()
+	rawDescriptors := c.node.ToolDescriptors()
+	broker := c.manualLLMBroker()
+	if broker == nil {
+		descriptors, err := bridgeToolDescriptors(rawDescriptors)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		return baseTools, descriptors, c.node.ToolContractHash(), nil
+	}
+
+	tools := append(append([]string(nil), baseTools...), manualllm.BridgeToolNames()...)
+	mergedRaw := append(append([]map[string]any(nil), rawDescriptors...), manualllm.BridgeToolDescriptorsForOptions(broker.Options())...)
+	descriptors, err := bridgeToolDescriptors(mergedRaw)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	encoded, err := json.Marshal(mergedRaw)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	contractHash := fmt.Sprintf("sha256:%x", sha256.Sum256(encoded))
+	return tools, descriptors, contractHash, nil
 }
 
 func bridgeToolDescriptors(descriptors []map[string]any) ([]protocol.ToolDescriptor, error) {

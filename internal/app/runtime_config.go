@@ -15,6 +15,7 @@ import (
 	"github.com/uvwt/agentdock/internal/desktopruntime"
 	"github.com/uvwt/agentdock/internal/envstore"
 	"github.com/uvwt/agentdock/internal/fs/atomicfile"
+	"github.com/uvwt/agentdock/internal/manualllm"
 )
 
 // 配置 API 只暴露这份白名单里的键：token、OAuth 密钥、设备身份等敏感项
@@ -30,6 +31,16 @@ var editableConfigKeys = []string{
 	"AGENTDOCK_ACP_ENABLED",
 	"AGENTDOCK_ACP_DEFAULT_PROFILE",
 	"AGENTDOCK_MANUAL_LLM_ENABLED",
+	"AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES",
+	"AGENTDOCK_MANUAL_LLM_SLICE_BYTES",
+	"AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES",
+	"AGENTDOCK_MANUAL_LLM_WAIT_MS",
+	"AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS",
+	"AGENTDOCK_MANUAL_LLM_MAX_PENDING",
+	"AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES",
+	"AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC",
+	"AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS",
+	"AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB",
 	"AGENTDOCK_TRACE_MODE",
 	"AGENTDOCK_TRACE_RETENTION_DAYS",
 	"AGENTDOCK_NETWORK_CAPTURE_ENABLED",
@@ -59,26 +70,52 @@ func configRuntimeRoot() (string, error) {
 	return root, nil
 }
 
+func configEnvFilePath() (string, error) {
+	if explicit := strings.TrimSpace(os.Getenv("AGENTDOCK_ENV_FILE")); explicit != "" {
+		abs, err := filepath.Abs(explicit)
+		if err != nil {
+			return "", fmt.Errorf("解析 AGENTDOCK_ENV_FILE 失败: %w", err)
+		}
+		return abs, nil
+	}
+	root, err := configRuntimeRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, "agentdock.env"), nil
+}
+
 // RuntimeConfig 回显当前生效的可编辑配置（来自进程环境，非 env 文件），值均已脱敏。
 func (r *Runtime) RuntimeConfig() Result {
 	cfg := r.cfg
 	values := map[string]string{
-		"AGENTDOCK_HOST":                       cfg.Host,
-		"AGENTDOCK_PORT":                       strconv.Itoa(cfg.Port),
-		"AGENTDOCK_LOG_LEVEL":                  cfg.LogLevel,
-		"AGENTDOCK_MCP_APPS_MODE":              string(cfg.MCPAppsMode),
-		"AGENTDOCK_BROWSER_ENABLED":            strconv.FormatBool(cfg.BrowserEnabled),
-		"AGENTDOCK_BROWSER_CDP_URL":            cfg.BrowserCDPURL,
-		"AGENTDOCK_BROWSER_REUSE_EXISTING_CDP": strconv.FormatBool(cfg.BrowserReuseExistingCDP),
-		"AGENTDOCK_ACP_ENABLED":                strconv.FormatBool(cfg.ACPEnabled),
-		"AGENTDOCK_ACP_DEFAULT_PROFILE":        cfg.ACPDefaultProfile,
-		"AGENTDOCK_MANUAL_LLM_ENABLED":         strconv.FormatBool(cfg.ManualLLMEnabled),
-		"AGENTDOCK_TRACE_MODE":                 string(cfg.TraceMode),
-		"AGENTDOCK_TRACE_RETENTION_DAYS":       strconv.Itoa(cfg.TraceRetentionDays),
-		"AGENTDOCK_NETWORK_CAPTURE_ENABLED":    strconv.FormatBool(cfg.NetworkCaptureEnabled),
-		"AGENTDOCK_NETWORK_CAPTURE_MAX":        strconv.Itoa(cfg.NetworkCaptureMax),
+		"AGENTDOCK_HOST":                           cfg.Host,
+		"AGENTDOCK_PORT":                           strconv.Itoa(cfg.Port),
+		"AGENTDOCK_LOG_LEVEL":                      cfg.LogLevel,
+		"AGENTDOCK_MCP_APPS_MODE":                  string(cfg.MCPAppsMode),
+		"AGENTDOCK_BROWSER_ENABLED":                strconv.FormatBool(cfg.BrowserEnabled),
+		"AGENTDOCK_BROWSER_CDP_URL":                cfg.BrowserCDPURL,
+		"AGENTDOCK_BROWSER_REUSE_EXISTING_CDP":     strconv.FormatBool(cfg.BrowserReuseExistingCDP),
+		"AGENTDOCK_ACP_ENABLED":                    strconv.FormatBool(cfg.ACPEnabled),
+		"AGENTDOCK_ACP_DEFAULT_PROFILE":            cfg.ACPDefaultProfile,
+		"AGENTDOCK_MANUAL_LLM_ENABLED":             strconv.FormatBool(r.ManualLLMEnabled()),
+		"AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES":       strconv.Itoa(cfg.ManualLLMPreviewBytes),
+		"AGENTDOCK_MANUAL_LLM_SLICE_BYTES":         strconv.Itoa(cfg.ManualLLMSliceBytes),
+		"AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES":     strconv.Itoa(cfg.ManualLLMMaxSliceBytes),
+		"AGENTDOCK_MANUAL_LLM_WAIT_MS":             strconv.Itoa(cfg.ManualLLMWaitMs),
+		"AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS":         strconv.Itoa(cfg.ManualLLMMaxWaitMs),
+		"AGENTDOCK_MANUAL_LLM_MAX_PENDING":         strconv.Itoa(cfg.ManualLLMMaxPending),
+		"AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES": strconv.Itoa(cfg.ManualLLMCacheMaxResponses),
+		"AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC":       strconv.Itoa(cfg.ManualLLMCacheTTLSec),
+		"AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS":        strconv.Itoa(cfg.ManualLLMKeepaliveMS),
+		"AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB":  strconv.Itoa(cfg.ManualLLMCacheMaxImageMB),
+		"AGENTDOCK_TRACE_MODE":                     string(cfg.TraceMode),
+		"AGENTDOCK_TRACE_RETENTION_DAYS":           strconv.Itoa(cfg.TraceRetentionDays),
+		"AGENTDOCK_NETWORK_CAPTURE_ENABLED":        strconv.FormatBool(cfg.NetworkCaptureEnabled),
+		"AGENTDOCK_NETWORK_CAPTURE_MAX":            strconv.Itoa(cfg.NetworkCaptureMax),
 	}
-	root, rootErr := configRuntimeRoot()
+	_, rootErr := configRuntimeRoot()
+	configFile, fileErr := configEnvFilePath()
 	return Result{
 		"ok":          true,
 		"source":      runtimeAPISource,
@@ -86,8 +123,8 @@ func (r *Runtime) RuntimeConfig() Result {
 		"keys":        editableConfigKeys,
 		"restartable": rootErr == nil,
 		"config_file": func() string {
-			if rootErr == nil {
-				return filepath.Join(root, "agentdock.env")
+			if fileErr == nil {
+				return configFile
 			}
 			return ""
 		}(),
@@ -138,8 +175,48 @@ func validateConfigUpdate(key, value string) error {
 		if err != nil || n < 1 || n > 100000 {
 			return errors.New("network_capture_max 必须是 1-100000 的整数")
 		}
+	case "AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES":
+		if err := validateIntRange(value, manualllm.ConfigMinPreview, manualllm.ConfigMaxPreview, "preview_bytes"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_SLICE_BYTES", "AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES":
+		if err := validateIntRange(value, manualllm.ConfigMinSliceBytes, manualllm.ConfigMaxSliceBytes, "slice_bytes"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_WAIT_MS", "AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS":
+		if err := validateIntRange(value, manualllm.ConfigMinWaitTimeoutMs, manualllm.ConfigMaxWaitTimeoutMs, "wait_ms"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_MAX_PENDING":
+		if err := validateIntRange(value, 1, manualllm.ConfigMaxPendingQueue, "max_pending"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES":
+		if err := validateIntRange(value, manualllm.ConfigMinCacheResponses, manualllm.ConfigMaxCacheResponses, "cache_max_responses"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC":
+		if err := validateIntRange(value, int(manualllm.ConfigMinCacheTTL.Seconds()), int(manualllm.ConfigMaxCacheTTL.Seconds()), "cache_ttl_sec"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS":
+		if err := validateIntRange(value, int(manualllm.ConfigMinKeepalive.Milliseconds()), int(manualllm.ConfigMaxKeepalive.Milliseconds()), "keepalive_ms"); err != nil {
+			return err
+		}
+	case "AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB":
+		if err := validateIntRange(value, 1, manualllm.ConfigMaxRetainedImageMB, "cache_max_image_mb"); err != nil {
+			return err
+		}
 	case "AGENTDOCK_BROWSER_CDP_URL", "AGENTDOCK_ACP_DEFAULT_PROFILE":
 		// 自由文本，允许为空。
+	}
+	return nil
+}
+
+func validateIntRange(value string, minVal, maxVal int, label string) error {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < minVal || n > maxVal {
+		return fmt.Errorf("%s 必须是 %d-%d 的整数", label, minVal, maxVal)
 	}
 	return nil
 }
@@ -155,7 +232,7 @@ func isEditableConfigKey(key string) bool {
 
 // RuntimeConfigUpdate 原子更新 env 文件：保留未知 key，只覆盖白名单里的值。
 func (r *Runtime) RuntimeConfigUpdate(updates map[string]string) (Result, error) {
-	root, err := configRuntimeRoot()
+	path, err := configEnvFilePath()
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +247,6 @@ func (r *Runtime) RuntimeConfigUpdate(updates map[string]string) (Result, error)
 			return nil, fmt.Errorf("%s: %w", key, err)
 		}
 	}
-	path := filepath.Join(root, "agentdock.env")
 	values, err := envstore.ParseFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("读取配置失败: %w", err)
@@ -181,6 +257,9 @@ func (r *Runtime) RuntimeConfigUpdate(updates map[string]string) (Result, error)
 	for key, value := range updates {
 		values[key] = value
 	}
+	if err := r.validateManualLLMConfigCrossFields(values); err != nil {
+		return nil, err
+	}
 	if err := atomicfile.Write(path, envstore.Marshal(values), 0o600); err != nil {
 		return nil, fmt.Errorf("写入配置失败: %w", err)
 	}
@@ -190,6 +269,32 @@ func (r *Runtime) RuntimeConfigUpdate(updates map[string]string) (Result, error)
 		"updated": len(updates),
 		"hint":    "配置已保存，重启 Core 后生效。",
 	}, nil
+}
+
+func (r *Runtime) validateManualLLMConfigCrossFields(values map[string]string) error {
+	opts := r.manualLLMOptions()
+	intOrDefault := func(key string, fallback int) int {
+		raw := strings.TrimSpace(values[key])
+		if raw == "" {
+			return fallback
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return fallback
+		}
+		return n
+	}
+	sliceBytes := intOrDefault("AGENTDOCK_MANUAL_LLM_SLICE_BYTES", opts.SliceBytes)
+	maxSliceBytes := intOrDefault("AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES", opts.MaxSliceBytes)
+	if sliceBytes > maxSliceBytes {
+		return fmt.Errorf("AGENTDOCK_MANUAL_LLM_SLICE_BYTES (%d) 不能大于 AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES (%d)", sliceBytes, maxSliceBytes)
+	}
+	waitMs := intOrDefault("AGENTDOCK_MANUAL_LLM_WAIT_MS", opts.DefaultWaitMs)
+	maxWaitMs := intOrDefault("AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS", opts.MaxWaitMs)
+	if waitMs > maxWaitMs {
+		return fmt.Errorf("AGENTDOCK_MANUAL_LLM_WAIT_MS (%d) 不能大于 AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS (%d)", waitMs, maxWaitMs)
+	}
+	return nil
 }
 
 // RuntimeConfigRestart 重启 Core。只有 launchd/SMAppService 管理的实例能重启；

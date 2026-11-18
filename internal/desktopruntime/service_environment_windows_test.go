@@ -213,4 +213,19 @@ func TestPlatformPrepareCoreEnvironmentRecoversCorruptGeneratedCredentialsConsis
 	if got := os.Getenv("AGENTDOCK_SERVER_URL"); got != "https://agentdock.example" {
 		t.Fatalf("AGENTDOCK_SERVER_URL = %q", got)
 	}
+	if err := os.WriteFile(filepath.Join(root, "agentdock.env"), []byte("AGENTDOCK_MANUAL_LLM_ENABLED=true\nAGENTDOCK_MANUAL_LLM_PREVIEW_BYTES=2500\nAGENTDOCK_AUTH_TOKEN=spoofed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := platformPrepareCoreEnvironment(root); err != nil {
+		t.Fatalf("second platformPrepareCoreEnvironment() error = %v", err)
+	}
+	if got := os.Getenv("AGENTDOCK_MANUAL_LLM_ENABLED"); got != "true" {
+		t.Fatalf("AGENTDOCK_MANUAL_LLM_ENABLED = %q, want true", got)
+	}
+	if got := os.Getenv("AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES"); got != "2500" {
+		t.Fatalf("AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES = %q, want 2500", got)
+	}
+	if got := os.Getenv("AGENTDOCK_AUTH_TOKEN"); got == "spoofed" || got == "" {
+		t.Fatalf("DPAPI auth token must override spoofed agentdock.env entry, got %q", got)
+	}
 }

@@ -169,17 +169,19 @@ type ConfigRuntime interface {
 	RuntimeConfigRestart(context.Context) (app.Result, error)
 }
 
-// ManualLLMRuntime is an optional Runtime capability exposing the manual LLM queue
-// and cancellation actions to the runtime API and dashboard.
+// ManualLLMRuntime is an optional Runtime capability exposing the manual LLM queue,
+// live enable/disable toggle, and cancellation actions to the runtime API and dashboard.
 type ManualLLMRuntime interface {
 	RuntimeManualLLMQueue() app.Result
 	RuntimeManualLLMCancel(requestID, reason string) (app.Result, error)
+	RuntimeManualLLMToggle(enabled, persist bool) (app.Result, error)
 }
 
 // ManualLLMSource is an optional Runtime capability exposing the live manual LLM broker
-// for /v1/responses and /mcp/manual HTTP routing when enabled.
+// for /v1/responses, /mcp/manual HTTP routing, and NexusBridge tool bridging.
 type ManualLLMSource interface {
 	ManualLLM() *manualllm.Broker
+	SetManualLLMChangeHook(func())
 }
 
 // Request 是 HTTP 与 Nexus Bridge 共用的 Runtime API 请求表示。

@@ -12,34 +12,194 @@ const (
 	// DefaultWaitTimeoutMs bounds a single llm_wait call so HTTP MCP clients do
 	// not hit 60s reverse-proxy or transport timeouts while waiting for input.
 	DefaultWaitTimeoutMs = 30_000
-	// MaxWaitTimeoutMs caps long-polling duration on llm_wait and llm_submit.
+	// MaxWaitTimeoutMs is the default upper bound for long-polling on llm_wait/llm_submit.
 	MaxWaitTimeoutMs = 55_000
+	// ConfigMinWaitTimeoutMs and ConfigMaxWaitTimeoutMs bound configurable wait timeouts.
+	ConfigMinWaitTimeoutMs = 1_000
+	ConfigMaxWaitTimeoutMs = 120_000
 
 	// MaxPendingQueue prevents unbounded memory growth if no LLM operator
 	// claims queued /v1/responses requests.
 	MaxPendingQueue = 32
+	// ConfigMaxPendingQueue caps configurable active/queued queue depth.
+	ConfigMaxPendingQueue = 512
 	// MaxStoredResponses retains recent completed turns so multi-turn callers
 	// referencing previous_response_id or fetching late history continue working.
-	MaxStoredResponses = 256
+	MaxStoredResponses      = 256
+	ConfigMinCacheResponses = 16
+	ConfigMaxCacheResponses = 4096
 	// CompletedRetention bounds how long completed request snapshots remain
 	// addressable by request_id or previous_response_id.
 	CompletedRetention = 30 * time.Minute
+	ConfigMinCacheTTL  = 60 * time.Second
+	ConfigMaxCacheTTL  = 24 * time.Hour
 	// SSEKeepaliveInterval emits periodic progress/comment frames so upstream
 	// clients keep the streaming /v1/responses socket open during manual work.
 	SSEKeepaliveInterval = 15 * time.Second
+	ConfigMinKeepalive   = 1 * time.Second
+	ConfigMaxKeepalive   = 60 * time.Second
 
 	// DefaultPreviewBytes limits inline message text returned by llm_wait(wait)
 	// so large file dumps or command outputs do not flood the LLM context.
 	DefaultPreviewBytes = 1800
+	ConfigMinPreview    = 256
+	ConfigMaxPreview    = 32 * 1024
 	// DefaultHistorySliceBytes is the default chunk size for byte-sliced reads.
 	DefaultHistorySliceBytes = 4096
-	// MaxHistorySliceBytes caps single-call byte slices in llm_wait(history/prompt).
+	ConfigMinSliceBytes      = 512
+	// MaxHistorySliceBytes is the default cap on single-call byte slices.
 	MaxHistorySliceBytes = 16 * 1024
+	// ConfigMaxSliceBytes caps configurable slice chunks at 128 KiB.
+	ConfigMaxSliceBytes = 128 * 1024
 	// DefaultHistoryLimit is the default message page size in action="history".
 	DefaultHistoryLimit = 10
 	// MaxHistoryLimit caps message page size in action="history".
 	MaxHistoryLimit = 50
+	// DefaultMaxRetainedImageMB bounds image payload bytes retained across completed requests.
+	DefaultMaxRetainedImageMB = 32
+	ConfigMaxRetainedImageMB  = 512
 )
+
+// Options controls progressive slicing, long-polling, and session/cache retention in Broker.
+type Options struct {
+	PreviewBytes          int
+	SliceBytes            int
+	MaxSliceBytes         int
+	DefaultWaitMs         int
+	MaxWaitMs             int
+	MaxPendingQueue       int
+	CacheMaxResponses     int
+	CacheTTL              time.Duration
+	KeepaliveInterval     time.Duration
+	HistoryLimit          int
+	MaxHistoryLimit       int
+	MaxRetainedImageBytes int64
+}
+
+// DefaultOptions returns production-safe defaults matching the compact progressive bridge contract.
+func DefaultOptions() Options {
+	return Options{
+		PreviewBytes:          DefaultPreviewBytes,
+		SliceBytes:            DefaultHistorySliceBytes,
+		MaxSliceBytes:         MaxHistorySliceBytes,
+		DefaultWaitMs:         DefaultWaitTimeoutMs,
+		MaxWaitMs:             MaxWaitTimeoutMs,
+		MaxPendingQueue:       MaxPendingQueue,
+		CacheMaxResponses:     MaxStoredResponses,
+		CacheTTL:              CompletedRetention,
+		KeepaliveInterval:     SSEKeepaliveInterval,
+		HistoryLimit:          DefaultHistoryLimit,
+		MaxHistoryLimit:       MaxHistoryLimit,
+		MaxRetainedImageBytes: int64(DefaultMaxRetainedImageMB) * 1024 * 1024,
+	}
+}
+
+// Normalized fills unset (zero) options with defaults and clamps every knob to safe bounds.
+func (o Options) Normalized() Options {
+	def := DefaultOptions()
+	if o.PreviewBytes <= 0 {
+		o.PreviewBytes = def.PreviewBytes
+	} else {
+		o.PreviewBytes = max(ConfigMinPreview, min(o.PreviewBytes, ConfigMaxPreview))
+	}
+	if o.MaxSliceBytes <= 0 {
+		o.MaxSliceBytes = def.MaxSliceBytes
+	} else {
+		o.MaxSliceBytes = max(ConfigMinSliceBytes, min(o.MaxSliceBytes, ConfigMaxSliceBytes))
+	}
+	if o.SliceBytes <= 0 {
+		o.SliceBytes = min(def.SliceBytes, o.MaxSliceBytes)
+	} else {
+		o.SliceBytes = max(ConfigMinSliceBytes, min(o.SliceBytes, o.MaxSliceBytes))
+	}
+	if o.MaxWaitMs <= 0 {
+		o.MaxWaitMs = def.MaxWaitMs
+	} else {
+		o.MaxWaitMs = max(ConfigMinWaitTimeoutMs, min(o.MaxWaitMs, ConfigMaxWaitTimeoutMs))
+	}
+	if o.DefaultWaitMs <= 0 {
+		o.DefaultWaitMs = min(def.DefaultWaitMs, o.MaxWaitMs)
+	} else {
+		o.DefaultWaitMs = max(ConfigMinWaitTimeoutMs, min(o.DefaultWaitMs, o.MaxWaitMs))
+	}
+	if o.MaxPendingQueue <= 0 {
+		o.MaxPendingQueue = def.MaxPendingQueue
+	} else {
+		o.MaxPendingQueue = max(1, min(o.MaxPendingQueue, ConfigMaxPendingQueue))
+	}
+	if o.CacheMaxResponses <= 0 {
+		o.CacheMaxResponses = def.CacheMaxResponses
+	} else {
+		o.CacheMaxResponses = max(ConfigMinCacheResponses, min(o.CacheMaxResponses, ConfigMaxCacheResponses))
+	}
+	if o.CacheTTL <= 0 {
+		o.CacheTTL = def.CacheTTL
+	} else if o.CacheTTL < ConfigMinCacheTTL {
+		o.CacheTTL = ConfigMinCacheTTL
+	} else if o.CacheTTL > ConfigMaxCacheTTL {
+		o.CacheTTL = ConfigMaxCacheTTL
+	}
+	if o.KeepaliveInterval <= 0 {
+		o.KeepaliveInterval = def.KeepaliveInterval
+	} else if o.KeepaliveInterval < ConfigMinKeepalive {
+		o.KeepaliveInterval = ConfigMinKeepalive
+	} else if o.KeepaliveInterval > ConfigMaxKeepalive {
+		o.KeepaliveInterval = ConfigMaxKeepalive
+	}
+	if o.MaxHistoryLimit <= 0 {
+		o.MaxHistoryLimit = def.MaxHistoryLimit
+	} else {
+		o.MaxHistoryLimit = max(1, min(o.MaxHistoryLimit, 200))
+	}
+	if o.HistoryLimit <= 0 {
+		o.HistoryLimit = min(def.HistoryLimit, o.MaxHistoryLimit)
+	} else {
+		o.HistoryLimit = max(1, min(o.HistoryLimit, o.MaxHistoryLimit))
+	}
+	if o.MaxRetainedImageBytes < 0 {
+		// Negative disables retained binary images for completed turns.
+		o.MaxRetainedImageBytes = 0
+	} else if o.MaxRetainedImageBytes == 0 {
+		o.MaxRetainedImageBytes = def.MaxRetainedImageBytes
+	} else {
+		maxBytes := int64(ConfigMaxRetainedImageMB) * 1024 * 1024
+		if o.MaxRetainedImageBytes > maxBytes {
+			o.MaxRetainedImageBytes = maxBytes
+		}
+	}
+	return o
+}
+
+// TuningView returns a JSON-friendly snapshot of effective Broker parameters.
+func (o Options) TuningView() QueueTuning {
+	n := o.Normalized()
+	return QueueTuning{
+		PreviewBytes:       n.PreviewBytes,
+		SliceBytes:         n.SliceBytes,
+		MaxSliceBytes:      n.MaxSliceBytes,
+		WaitMs:             n.DefaultWaitMs,
+		MaxWaitMs:          n.MaxWaitMs,
+		MaxPending:         n.MaxPendingQueue,
+		CacheMaxResponses:  n.CacheMaxResponses,
+		CacheTTLSeconds:    int(n.CacheTTL.Seconds()),
+		KeepaliveMs:        int(n.KeepaliveInterval.Milliseconds()),
+		MaxRetainedImageMB: int(n.MaxRetainedImageBytes / (1024 * 1024)),
+	}
+}
+
+// QueueTuning reports effective manual LLM broker parameters for diagnostics and UI.
+type QueueTuning struct {
+	PreviewBytes       int `json:"preview_bytes"`
+	SliceBytes         int `json:"slice_bytes"`
+	MaxSliceBytes      int `json:"max_slice_bytes"`
+	WaitMs             int `json:"wait_ms"`
+	MaxWaitMs          int `json:"max_wait_ms"`
+	MaxPending         int `json:"max_pending"`
+	CacheMaxResponses  int `json:"cache_max_responses"`
+	CacheTTLSeconds    int `json:"cache_ttl_sec"`
+	KeepaliveMs        int `json:"keepalive_ms"`
+	MaxRetainedImageMB int `json:"cache_max_image_mb"`
+}
 
 // RequestStatus tracks the lifecycle of one /v1/responses request in the queue.
 type RequestStatus string
@@ -117,11 +277,16 @@ type WaitInput struct {
 	CallID      string   `json:"call_id,omitempty" jsonschema:"Exact call_id to inspect full output in action=history."`
 	Cursor      *int     `json:"cursor,omitempty" jsonschema:"0-based message index for action=history or tool offset for action=prompt."`
 	OffsetBytes int      `json:"offset_bytes,omitempty" jsonschema:"Byte offset when reading a truncated item or system_prompt slice."`
-	MaxBytes    int      `json:"max_bytes,omitempty" jsonschema:"Maximum UTF-8 bytes per slice in history/prompt (default 4096, max 16384)."`
-	Limit       int      `json:"limit,omitempty" jsonschema:"Maximum items to return per page (history default 10, prompt tools default all matching)."`
+	MaxBytes    int      `json:"max_bytes,omitempty" jsonschema:"Maximum UTF-8 bytes per slice in history/prompt."`
+	Limit       int      `json:"limit,omitempty" jsonschema:"Maximum items to return per page (history or prompt tools)."`
 	Include     []string `json:"include,omitempty" jsonschema:"Sections to return when action=prompt: system_prompt, tools, guide."`
 	ToolNames   []string `json:"tool_names,omitempty" jsonschema:"Optional tool name filter when action=prompt includes tools."`
-	WaitMs      *int     `json:"wait_ms,omitempty" jsonschema:"Long-poll milliseconds for action=wait (0 for non-blocking, default 30000, max 55000)."`
+	Fresh       bool     `json:"fresh,omitempty" jsonschema:"Set true when resuming this session in a new chat so guide and prompt/tool change flags reset cleanly."`
+	WaitMs      *int     `json:"wait_ms,omitempty" jsonschema:"Long-poll milliseconds for action=wait (0 for non-blocking)."`
+
+	// CallerKey carries the MCP transport/chat session fingerprint (e.g. _meta openai/session)
+	// so switching chats mid-session resets progressive guide/prompt caches automatically.
+	CallerKey string `json:"-"`
 }
 
 // SubmitInput is the MCP schema input for llm_submit.
@@ -130,7 +295,9 @@ type SubmitInput struct {
 	SessionID  string  `json:"session_id,omitempty" jsonschema:"Session id bound to the request (optional if request_id uniquely identifies it)."`
 	ResponseID string  `json:"response_id,omitempty" jsonschema:"Optional caller idempotency key for batch retries."`
 	Events     []Event `json:"events" jsonschema:"Ordered output events: thinking, text, tool_call, done, error."`
-	WaitMs     *int    `json:"wait_ms,omitempty" jsonschema:"When events ends with done, optionally wait this many ms (max 55000) and return the next follow-up turn inline."`
+	WaitMs     *int    `json:"wait_ms,omitempty" jsonschema:"When events ends with done, optionally wait this many ms and return the next follow-up turn inline."`
+
+	CallerKey string `json:"-"`
 }
 
 // CompactMessage is the low-token projection returned in wait and history pages.
@@ -156,6 +323,9 @@ type ContextManifest struct {
 	ToolCount           int      `json:"tool_count,omitempty"`
 	ToolNames           []string `json:"tool_names,omitempty"`
 	ToolsChanged        bool     `json:"tools_changed,omitempty"`
+	ChangedTools        []string `json:"changed_tools,omitempty"`
+	RemovedTools        []string `json:"removed_tools,omitempty"`
+	CacheReset          bool     `json:"cache_reset,omitempty"`
 	ToolChoice          any      `json:"tool_choice,omitempty"`
 	TextFormat          any      `json:"text_format,omitempty"`
 	TruncatedItems      int      `json:"truncated_items,omitempty"`
@@ -266,6 +436,7 @@ type QueueSnapshot struct {
 	ResponsesPath string           `json:"responses_path"`
 	MCPEndpoint   string           `json:"mcp_endpoint"`
 	IdlePrompt    string           `json:"idle_prompt"`
+	Tuning        *QueueTuning     `json:"tuning,omitempty"`
 	Stats         QueueStats       `json:"stats"`
 	Requests      []QueueEntryView `json:"requests"`
 }
@@ -273,6 +444,14 @@ type QueueSnapshot struct {
 // BuildManualPrompt produces the single ultra-compact copyable entry prompt
 // mentioning only llm_wait; further rules are revealed progressively via calls.
 func BuildManualPrompt(requestID, sessionID string) string {
+	return BuildManualPromptWithOptions(requestID, sessionID, DefaultWaitTimeoutMs, false)
+}
+
+// BuildManualPromptWithOptions formats the single compact entry prompt using configured defaults.
+func BuildManualPromptWithOptions(requestID, sessionID string, waitMs int, fresh bool) string {
+	if waitMs <= 0 {
+		waitMs = DefaultWaitTimeoutMs
+	}
 	var args []string
 	targeted := false
 	if strings.TrimSpace(requestID) != "" {
@@ -283,7 +462,10 @@ func BuildManualPrompt(requestID, sessionID string) string {
 		args = append(args, fmt.Sprintf("session_id=%q", strings.TrimSpace(sessionID)))
 		targeted = true
 	}
-	args = append(args, fmt.Sprintf("wait_ms=%d", DefaultWaitTimeoutMs))
+	if fresh {
+		args = append(args, "fresh=true")
+	}
+	args = append(args, fmt.Sprintf("wait_ms=%d", waitMs))
 	if targeted {
 		return fmt.Sprintf("Call llm_wait(%s). Follow its returned instructions and turn data strictly.", strings.Join(args, ", "))
 	}

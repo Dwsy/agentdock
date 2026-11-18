@@ -34,7 +34,21 @@ const FIELDS: { group: string; icon: any; fields: Field[] }[] = [
       { key: 'AGENTDOCK_BROWSER_REUSE_EXISTING_CDP', label: '复用已有浏览器', kind: 'bool' },
       { key: 'AGENTDOCK_ACP_ENABLED', label: 'ACP 编码代理', kind: 'bool' },
       { key: 'AGENTDOCK_ACP_DEFAULT_PROFILE', label: '默认 ACP Profile', kind: 'text' },
-      { key: 'AGENTDOCK_MANUAL_LLM_ENABLED', label: '手动推理桥接', kind: 'bool', hint: '开放 /v1/responses（SSE）与精简 2 工具 /mcp/manual；保存后需重启生效' },
+      { key: 'AGENTDOCK_MANUAL_LLM_ENABLED', label: '手动推理桥接', kind: 'bool', hint: '开放 /v1/responses（SSE）与精简 2 工具 /mcp/manual；支持热切换，其余调优参数重启生效' },
+    ],
+  },
+  {
+    group: '手动推理调优', icon: Monitor, fields: [
+      { key: 'AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES', label: '摘要预览上限 (B)', kind: 'int', min: 256, max: 32768, hint: 'wait 单条消息内联预览字节阈值（默认 1800），超出需按需切片' },
+      { key: 'AGENTDOCK_MANUAL_LLM_SLICE_BYTES', label: '默认切片大小 (B)', kind: 'int', min: 512, max: 131072, hint: 'history/prompt 默认单次 UTF-8 分片字节数（默认 4096）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_MAX_SLICE_BYTES', label: '最大切片上限 (B)', kind: 'int', min: 512, max: 131072, hint: 'history/prompt 单次 max_bytes 允许上限（默认 16384）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_WAIT_MS', label: '默认长轮询 (ms)', kind: 'int', min: 1000, max: 120000, hint: 'llm_wait 默认等待与提示词默认 wait_ms（默认 30000）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_MAX_WAIT_MS', label: '最大长轮询上限 (ms)', kind: 'int', min: 1000, max: 120000, hint: 'wait_ms 硬上限，建议低于反向代理/Workers 超时（默认 55000）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_MAX_PENDING', label: '待处理队列上限', kind: 'int', min: 1, max: 512, hint: '同时排队或进行中的 /v1/responses 请求数上限（默认 32）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_CACHE_MAX_RESPONSES', label: '完成轮次缓存上限', kind: 'int', min: 16, max: 4096, hint: '保留历史切片、previous_response_id 与增量去重缓存（默认 256）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC', label: '会话缓存保留 (s)', kind: 'int', min: 60, max: 86400, hint: '已完成请求与会话上下文缓存有效期（默认 1800 秒）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS', label: 'SSE 心跳间隔 (ms)', kind: 'int', min: 1000, max: 60000, hint: '人工推理期间 /v1/responses 保活帧间隔（默认 15000）' },
+      { key: 'AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB', label: '历史图片内存上限 (MB)', kind: 'int', min: 1, max: 512, hint: '已完结轮次在内存中保留的图片二进制字节预算（默认 32 MB）' },
     ],
   },
   {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -138,5 +140,60 @@ func TestRunTunnelHelp(t *testing.T) {
 	}
 	if output := stdout.String(); !strings.Contains(output, "agentdock tunnel status") || !strings.Contains(output, "[--runtime-root <目录>]") {
 		t.Fatalf("unexpected tunnel help: %s", output)
+	}
+}
+
+func TestLoadConfiguredEnvFilePrecedenceAndFailures(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, "custom.env")
+	if err := os.WriteFile(envPath, []byte("AGENTDOCK_MANUAL_LLM_ENABLED=true\nAGENTDOCK_MANUAL_LLM_PREVIEW_BYTES=2400\nAGENTDOCK_HOST=0.0.0.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Isolate and auto-restore any modified env vars cleanly.
+	for _, k := range []string{"AGENTDOCK_ENV_FILE", "AGENTDOCK_RUNTIME_ROOT", "AGENTDOCK_MANUAL_LLM_ENABLED", "AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES", "AGENTDOCK_HOST"} {
+		prev, existed := os.LookupEnv(k)
+		_ = os.Unsetenv(k)
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv(k, prev)
+			} else {
+				_ = os.Unsetenv(k)
+			}
+		})
+	}
+	_ = os.Setenv("AGENTDOCK_HOST", "127.0.0.1")
+
+	loaded, err := loadConfiguredEnvFile([]string{"--env-file=" + envPath})
+	if err != nil {
+		t.Fatalf("loadConfiguredEnvFile(--env-file) error = %v", err)
+	}
+	if loaded != envPath {
+		t.Fatalf("loaded = %q, want %q", loaded, envPath)
+	}
+	if got := os.Getenv("AGENTDOCK_MANUAL_LLM_ENABLED"); got != "true" {
+		t.Fatalf("AGENTDOCK_MANUAL_LLM_ENABLED = %q, want true", got)
+	}
+	if got := os.Getenv("AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES"); got != "2400" {
+		t.Fatalf("AGENTDOCK_MANUAL_LLM_PREVIEW_BYTES = %q, want 2400", got)
+	}
+	// Explicit env takes precedence over file value.
+	if got := os.Getenv("AGENTDOCK_HOST"); got != "127.0.0.1" {
+		t.Fatalf("AGENTDOCK_HOST = %q, want 127.0.0.1 override", got)
+	}
+	if got := os.Getenv("AGENTDOCK_ENV_FILE"); got != envPath {
+		t.Fatalf("AGENTDOCK_ENV_FILE = %q, want %q", got, envPath)
+	}
+
+	// Explicit missing file must error.
+	if _, err := loadConfiguredEnvFile([]string{"--env-file", filepath.Join(dir, "missing.env")}); err == nil {
+		t.Fatal("expected error for missing explicit --env-file")
+	}
+
+	// Implicit missing agentdock.env under AGENTDOCK_RUNTIME_ROOT should be ignored.
+	_ = os.Unsetenv("AGENTDOCK_ENV_FILE")
+	_ = os.Setenv("AGENTDOCK_RUNTIME_ROOT", filepath.Join(dir, "empty-runtime"))
+	if got, err := loadConfiguredEnvFile(nil); err != nil || got != "" {
+		t.Fatalf("expected missing implicit runtime env ignored cleanly, got (%q, %v)", got, err)
 	}
 }

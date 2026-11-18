@@ -35,6 +35,7 @@ export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) 
   const [autoPoll, setAutoPoll] = useState(true);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [busyID, setBusyID] = useState<string | null>(null);
+  const [toggleBusy, setToggleBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -74,25 +75,59 @@ export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) 
     }
   };
 
+  const handleToggle = async (enabled: boolean) => {
+    setToggleBusy(true);
+    setActionError(null);
+    try {
+      await api.manualLLMToggle(enabled, true);
+      await onRefresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '切换手动推理开关失败');
+    } finally {
+      setToggleBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
-      {!data.enabled && (
+      {!data.enabled ? (
         <Panel className="border border-amber-500/30 bg-amber-500/10 p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <div className="text-sm font-semibold">手动推理桥接当前未启用</div>
               <p className="mt-1 text-xs text-muted-foreground">
-                默认关闭以保持最小暴露面。可在「配置」中开启 <span className="font-mono">AGENTDOCK_MANUAL_LLM_ENABLED</span> 并重启 Core，
-                即可开放流式 <span className="font-mono">/v1/responses</span> 与精简 2 工具 <span className="font-mono">/mcp/manual</span> 端点。
+                默认关闭以保持最小暴露面。点击右侧「立即启用」即可热开启（同时同步写入配置并刷新 Nexus 节点工具），无需重启 Core。
               </p>
             </div>
-            <button
-              onClick={onOpenConfig}
-              className="u-press glass-primary flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-primary-foreground"
-            >
-              <Settings2 size={14} /> 前往配置开启
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                disabled={toggleBusy}
+                onClick={() => void handleToggle(true)}
+                className="u-press glass-primary flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+              >
+                <Play size={14} /> {toggleBusy ? '开启中…' : '立即启用'}
+              </button>
+              <button
+                onClick={onOpenConfig}
+                className="u-press glass-control flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium"
+              >
+                <Settings2 size={14} /> 配置详情
+              </button>
+            </div>
           </div>
+        </Panel>
+      ) : (
+        <Panel className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <div className="text-xs text-muted-foreground">
+            手动推理桥接已开启：<span className="font-mono text-foreground">/v1/responses</span> 与 <span className="font-mono text-foreground">/mcp/manual</span> 运行中。
+          </div>
+          <button
+            disabled={toggleBusy}
+            onClick={() => void handleToggle(false)}
+            className="u-press flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-500 hover:bg-red-500/20 disabled:opacity-50"
+          >
+            <Pause size={13} /> {toggleBusy ? '关闭中…' : '关闭手动推理'}
+          </button>
         </Panel>
       )}
 
@@ -186,6 +221,15 @@ export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) 
           <p className="mt-2.5 text-[11px] text-muted-foreground">
             将上述提示词粘贴到已连接 <span className="font-mono">/mcp/manual</span> 的对话中即可监听。首轮仅下发新增输入与摘要清单，系统提示词、工具 Schema 与超长工具输出均按需切片读取。
           </p>
+          {data.tuning && (
+            <div className="mt-2.5 flex flex-wrap gap-1.5 text-[10px] text-muted-foreground">
+              <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">预览 {data.tuning.preview_bytes}B</span>
+              <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">切片 {data.tuning.slice_bytes}/{data.tuning.max_slice_bytes}B</span>
+              <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">轮询 {data.tuning.wait_ms}/{data.tuning.max_wait_ms}ms</span>
+              <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">缓存 {data.tuning.cache_max_responses}轮 · {data.tuning.cache_ttl_sec}s · 图{data.tuning.cache_max_image_mb}MB</span>
+              <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">队列 {data.tuning.max_pending} · 心跳 {data.tuning.keepalive_ms}ms</span>
+            </div>
+          )}
         </Panel>
       </div>
 

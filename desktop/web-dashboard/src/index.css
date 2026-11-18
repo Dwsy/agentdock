@@ -15,6 +15,122 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- App shell -----------------------------------------------------------
+   悬浮侧栏 + 单行顶栏共用同一套外距与圆角；侧栏在桌面端是固定在页面
+   边缘之外的玻璃板，移动端变成抽屉。尺寸用变量收在一处。 */
+
+:root {
+  --shell-gap: 14px;
+  --shell-sidebar-width: 220px;
+  --shell-radius: 24px;
+}
+
+.app-sidebar {
+  top: max(var(--shell-gap), env(safe-area-inset-top));
+  bottom: max(var(--shell-gap), env(safe-area-inset-bottom));
+  left: var(--shell-gap);
+  width: var(--shell-sidebar-width);
+  visibility: hidden;
+  transform: translateX(calc(-100% - var(--shell-gap) * 2));
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* 抽屉压着页面内容，比普通 panel 更实一点，保证导航文字可读。 */
+  background-color: color-mix(in oklch, var(--panel) 84%, transparent);
+}
+
+.app-sidebar.is-open {
+  visibility: visible;
+  transform: translateX(0);
+}
+
+.app-main {
+  padding-left: var(--shell-gap);
+  padding-right: var(--shell-gap);
+}
+
+.app-topbar {
+  position: sticky;
+  top: max(var(--shell-gap), env(safe-area-inset-top));
+  z-index: 20;
+  margin-top: max(var(--shell-gap), env(safe-area-inset-top));
+  border-radius: var(--shell-radius);
+  min-height: 48px;
+  padding-block: 6px;
+  /* background 本身不透明，混色后仍保留足够实的底色遮住滚动正文。 */
+  background-color: color-mix(in oklch, var(--background) 90%, transparent);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+}
+
+/* 默认 32px 控件让桌面顶栏保持 48px；文字放大时允许控件和顶栏增长。 */
+.app-topbar button {
+  width: max(32px, 1.6rem);
+  height: max(32px, 1.6rem);
+  flex-shrink: 0;
+}
+
+.task-workspace .glass-panel {
+  background-color: var(--background);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* 项目导航跟随顶栏停在下方，避免与悬浮顶栏重叠。 */
+.task-project-nav {
+  position: sticky;
+  top: calc(var(--shell-gap) + 64px);
+}
+
+/* 按下时只做很小的缩放；位移/缩放都尊重 reduced-motion。 */
+.u-press {
+  transition: transform 120ms cubic-bezier(0.22, 1, 0.36, 1), background-color 120ms ease;
+}
+
+.u-press:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* 所有按钮共享很轻的按下反馈；关键控件用 .u-press 再深一档。 */
+.app-shell :where(button):active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.app-overlay {
+  animation: sg-fade-in 180ms ease-out;
+}
+
+@media (min-width: 1024px) {
+  .app-sidebar {
+    top: var(--shell-gap);
+    bottom: var(--shell-gap);
+    visibility: visible;
+    transform: none;
+    transition: none;
+  }
+
+  .app-main {
+    padding-left: calc(var(--shell-sidebar-width) + var(--shell-gap) * 2);
+  }
+
+  .app-topbar {
+    top: var(--shell-gap);
+    margin-top: var(--shell-gap);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar,
+  .app-overlay,
+  .u-press {
+    transition: none;
+    animation: none;
+  }
+
+  .u-press:active:not(:disabled),
+  .app-shell :where(button):active:not(:disabled) {
+    transform: none;
+  }
+}
+
 /* highlight.js 精简主题（适配 Solid Glass 明暗双色） */
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type { color: #f59e0b; }
 .hljs-string, .hljs-attr, .hljs-addition, .hljs-regexp { color: #10b981; }

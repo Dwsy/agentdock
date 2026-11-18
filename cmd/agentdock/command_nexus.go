@@ -61,7 +61,8 @@ func runNexusPairCommand(ctx context.Context, args []string, stdout, stderr io.W
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "NexusDock 配对凭据已保存，node_id=%s（后台服务连接状态需另行验证）。\n", identity.NodeID)
+	summary := formatNexusServerSummary(identity.ServerEdition, identity.ProtocolVersion, identity.ContractVersion, identity.ServerVersion)
+	fmt.Fprintf(stdout, "NexusDock 配对凭据已保存，node_id=%s%s（后台服务连接状态需另行验证）。\n", identity.NodeID, summary)
 	fmt.Fprintf(stdout, "设备凭据位置：%s；Core 必须使用相同的 AGENTDOCK_HOME。\n", filepath.Join(cfg.AgentDockHome, "nexus", "device.json"))
 	return nil
 }
@@ -97,8 +98,33 @@ func runNexusStatusCommand(args []string, stdout, stderr io.Writer) error {
 		_, err = fmt.Fprintf(stdout, "AgentDock 尚未与 NexusDock 配对（当前数据目录：%s）。\n", cfg.AgentDockHome)
 		return err
 	}
-	_, err = fmt.Fprintf(stdout, "AgentDock 已配对到 %s，node_id=%s，Device Token 已保存（数据目录：%s）。\n", status.Endpoint, status.NodeID, cfg.AgentDockHome)
+	summary := formatNexusServerSummary(status.ServerEdition, status.ProtocolVersion, status.ContractVersion, status.ServerVersion)
+	_, err = fmt.Fprintf(stdout, "AgentDock 已配对到 %s，node_id=%s%s，Device Token 已保存（数据目录：%s）。\n", status.Endpoint, status.NodeID, summary, cfg.AgentDockHome)
 	return err
+}
+
+func formatNexusServerSummary(edition, protocolVersion, contractVersion, serverVersion string) string {
+	parts := make([]string, 0, 3)
+	if edition = strings.TrimSpace(edition); edition != "" {
+		parts = append(parts, "edition="+edition)
+	}
+	proto := strings.TrimSpace(protocolVersion)
+	contract := strings.TrimSpace(contractVersion)
+	switch {
+	case proto != "" && contract != "":
+		parts = append(parts, "protocol=v"+proto+"/"+contract)
+	case proto != "":
+		parts = append(parts, "protocol=v"+proto)
+	case contract != "":
+		parts = append(parts, "contract="+contract)
+	}
+	if ver := strings.TrimSpace(serverVersion); ver != "" {
+		parts = append(parts, "version="+ver)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "（" + strings.Join(parts, ", ") + "）"
 }
 func nexusCommandUsageError() error {
 	return errors.New("用法：agentdock nexus <pair --endpoint <URL> --code <配对码> [--name <名称>] [--agentdock-home <目录>] | status [--json] [--agentdock-home <目录>]>")

@@ -23,6 +23,9 @@ type runtimeStub struct {
 	traceCalled   bool
 	changeQuery   string
 	changeLimit   int
+	// upstreamHeaders 记录 dispatch 期间上下文里的上游客户端头，
+	// 用来断言 Nexus 转发来的 headers 确实传到了应用能力层。
+	upstreamHeaders observability.UpstreamHeaders
 }
 
 func (r *runtimeStub) RuntimeStatus() app.Result    { return app.Result{"status": "ok"} }
@@ -61,7 +64,8 @@ func (r *runtimeStub) RuntimeTasks(status string, limit int) (app.Result, error)
 }
 func (r *runtimeStub) RuntimeTask(string) (app.Result, error)       { return app.Result{}, nil }
 func (r *runtimeStub) RuntimeTaskDelete(string) (app.Result, error) { return app.Result{}, nil }
-func (r *runtimeStub) RuntimeCapabilities(context.Context, bool) (app.Result, error) {
+func (r *runtimeStub) RuntimeCapabilities(ctx context.Context, _ bool) (app.Result, error) {
+	r.upstreamHeaders = observability.UpstreamHeadersFromContext(ctx)
 	return app.Result{}, nil
 }
 

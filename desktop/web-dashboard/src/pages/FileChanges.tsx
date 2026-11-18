@@ -1,8 +1,10 @@
 import { useMemo, useState } from 'react';
-import { FolderTree, Search, GitCompare, FileText, Columns2, ChevronDown, Clock3, Copy, Check } from 'lucide-react';
-import type { FileChanges as FileChangesData, FileChange } from '../api';
-import { Panel, SectionTitle, Badge, fmt, relTime, shortPath } from '../ui';
+import { FolderTree, FolderGit2, Search, GitCompare, FileText, Columns2, ChevronDown, ChevronRight, Clock3, Copy, Check } from 'lucide-react';
+import type { FileChanges as FileChangesData, FileChange, Tasks as TasksData } from '../api';
+import { Panel, SectionTitle, Badge, fmt, relTime } from '../ui';
 import FileTree from '../components/FileTree';
+import { buildProjectGroups } from '../lib/taskProjects';
+import { changeDisplayPath, groupChangesByProject, type ChangeProjectGroup } from '../lib/changeProjects';
 import DiffViewer from '../components/DiffViewer';
 import MarkdownView, { markdownFromDiff } from '../components/MarkdownView';
 
@@ -56,13 +58,65 @@ function FileDetail({ change }: { change: FileChange }) {
   );
 }
 
-export default function FileChanges({ data }: { data: FileChangesData }) {
+/** 项目分组的一段：项目头可折叠，下面平铺该项目的文件变更。 */
+function ProjectGroupBlock({
+  group,
+  selectedId,
+  onSelect,
+}: {
+  group: ChangeProjectGroup;
+  selectedId: string | null;
+  onSelect: (change: FileChange) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1 rounded-md py-1 pr-2 text-left text-xs text-muted-foreground hover:bg-muted/40"
+        title={group.full || group.name}
+      >
+        {open ? <ChevronDown size={13} className="shrink-0" /> : <ChevronRight size={13} className="shrink-0" />}
+        <FolderGit2 size={13} className={`shrink-0 ${group.matched ? 'text-amber-400/80' : 'text-muted-foreground/50'}`} />
+        <span className={`min-w-0 truncate font-medium ${group.matched ? '' : 'italic'}`}>{group.name}</span>
+        <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] tabular text-muted-foreground/60">
+          <span>{group.changes.length}</span>
+          {group.insertions > 0 && <span className="text-emerald-500">+{group.insertions}</span>}
+          {group.deletions > 0 && <span className="text-red-500">-{group.deletions}</span>}
+        </span>
+      </button>
+      {open &&
+        group.changes.map((change) => (
+          <button
+            key={change.id}
+            onClick={() => onSelect(change)}
+            className={`flex w-full items-center gap-1 rounded-md py-1 pl-7 pr-2 text-left text-xs ${selectedId === String(change.id) ? 'glass-chosen text-foreground' : 'text-muted-foreground hover:bg-muted/40'}`}
+            title={change.path}
+          >
+            <span className="min-w-0 truncate">{changeDisplayPath(change, group)}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] tabular">
+              {change.insertions > 0 && <span className="text-emerald-500">+{change.insertions}</span>}
+              {change.deletions ? <span className="text-red-500">-{change.deletions}</span> : null}
+            </span>
+          </button>
+        ))}
+      {open && group.changes.length === 0 && <div className="py-1 pl-7 text-[11px] text-muted-foreground">没有文件</div>}
+    </div>
+  );
+}
+
+export default function FileChanges({ data, tasks }: { data: FileChangesData; tasks: TasksData }) {
   const [q, setQ] = useState('');
+  // 两种分组只是左侧选择器的视图切换；选中项、搜索、右侧详情共用一套状态。
+  const [mode, setMode] = useState<'tree' | 'project'>('tree');
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
   const filtered = useMemo(() => data.changes.filter((c) => !q || c.path.toLowerCase().includes(q.toLowerCase())), [data.changes, q]);
+  const projectGroups = useMemo(() => buildProjectGroups(tasks.tasks), [tasks.tasks]);
+  const grouped = useMemo(() => groupChangesByProject(filtered, projectGroups), [filtered, projectGroups]);
   const selected = filtered.find((c) => String(c.id) === String(selectedId)) || filtered[0];
   const totalIns = data.changes.reduce((s, c) => s + (c.insertions || 0), 0);
   const totalDel = data.changes.reduce((s, c) => s + (c.deletions || 0), 0);
+  const selectedKey = selected ? String(selected.id) : null;
 
   return (
     <Panel className="p-5">
@@ -78,12 +132,31 @@ export default function FileChanges({ data }: { data: FileChangesData }) {
         }
       />
       <div className="grid gap-4 lg:grid-cols-[300px_1fr]">
-        {/* 左：文件树 */}
+        {/* 左：目录树 / 按任务项目分组 */}
         <div className="rounded-xl border border-border/60 bg-muted/10 p-2">
-          <div className="mb-2 flex items-center gap-1.5 px-2 pt-1 text-[11px] font-medium text-muted-foreground">
-            <FolderTree size={13} /> 目录树 <span className="ml-auto tabular text-muted-foreground/60">{filtered.length}</span>
+          <div className="mb-2 flex items-center gap-1 px-1 pt-1">
+            {([['tree', '目录树', FolderTree], ['project', '按项目', FolderGit2]] as const).map(([key, label, Icon]) => (
+              <button
+                key={key}
+                onClick={() => setMode(key)}
+                aria-pressed={mode === key}
+                className={`glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${mode === key ? 'text-foreground' : 'text-muted-foreground'}`}
+              >
+                <Icon size={12} /> {label}
+              </button>
+            ))}
+            <span className="ml-auto tabular text-[11px] text-muted-foreground/60">{filtered.length}</span>
           </div>
-          <FileTree changes={filtered} selected={selected ? String(selected.id) : undefined} onSelect={(c) => setSelectedId(c.id)} />
+          {mode === 'tree' ? (
+            <FileTree changes={filtered} selected={selectedKey ?? undefined} onSelect={(c) => setSelectedId(c.id)} />
+          ) : (
+            <div className="scrollbar-thin max-h-[640px] space-y-1 overflow-auto pr-1">
+              {grouped.map((group) => (
+                <ProjectGroupBlock key={group.key || '__unclassified__'} group={group} selectedId={selectedKey} onSelect={(c) => setSelectedId(c.id)} />
+              ))}
+              {grouped.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">没有文件</div>}
+            </div>
+          )}
         </div>
         {/* 右：详情 */}
         <div className="min-w-0">

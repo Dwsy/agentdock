@@ -57,3 +57,47 @@ func TestNexusPairUsesExplicitServiceDataDirectory(t *testing.T) {
 		t.Fatalf("login user's identity must remain separate: %s", output.String())
 	}
 }
+
+func TestNexusPairAndStatusExposeWorkersEditionAndProtocolVersion(t *testing.T) {
+	home := t.TempDir()
+	pairServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{
+			"node":{"id":"node_wk_cli"},
+			"device_token":"nx_cli_secret",
+			"server_edition":"workers",
+			"server_version":"0.1.0-workers",
+			"protocol_version":"2",
+			"contract_version":"0.9.0"
+		}`))
+	}))
+	defer pairServer.Close()
+
+	var output bytes.Buffer
+	err := run(t.Context(), []string{"nexus", "pair", "--endpoint", pairServer.URL, "--code", "pair_cli", "--agentdock-home", home}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "edition=workers") || !strings.Contains(output.String(), "protocol=v2/0.9.0") {
+		t.Fatalf("pair output missing workers/protocol summary: %s", output.String())
+	}
+
+	output.Reset()
+	err = run(t.Context(), []string{"nexus", "status", "--json", "--agentdock-home", home}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"server_edition":"workers"`) || !strings.Contains(output.String(), `"is_workers":true`) || !strings.Contains(output.String(), `"protocol_version":"2"`) {
+		t.Fatalf("status json missing workers/protocol fields: %s", output.String())
+	}
+
+	output.Reset()
+	err = run(t.Context(), []string{"nexus", "status", "--agentdock-home", home}, &output, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "edition=workers") || !strings.Contains(output.String(), "protocol=v2/0.9.0") {
+		t.Fatalf("status output missing workers/protocol summary: %s", output.String())
+	}
+}

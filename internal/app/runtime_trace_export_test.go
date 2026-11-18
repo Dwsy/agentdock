@@ -91,17 +91,17 @@ func TestRuntimeTracesExportCSVHeaderAndEscaping(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("csv line count = %d\n%s", len(lines), body)
 	}
-	header := "id,started_at,tool,source,user_agent,trace_id,duration_ms,success,error_code,arguments,result,error,command,stdout,stderr,exit_code,image_preview_mime_type,image_preview_size_bytes"
+	header := "id,started_at,tool,source,user_agent,trace_id,duration_ms,success,error_code,arguments,result,error,command,stdout,stderr,exit_code,image_preview_mime_type,image_preview_size_bytes,upstream_headers"
 	if lines[0] != header {
 		t.Fatalf("csv header = %q", lines[0])
 	}
 	// 引号翻倍、含逗号/引号的字段加引号；换行转成字面 \n 保持单行。
 	// 记录顺序与 Query 一致：新到旧。
-	wantNewest := `2,2024-01-02T03:04:06Z,write_file,mcp,,,0,false,INVALID_ARGUMENT,"{""plain"":true}",,boom,,,,,,`
+	wantNewest := `2,2024-01-02T03:04:06Z,write_file,mcp,,,0,false,INVALID_ARGUMENT,"{""plain"":true}",,boom,,,,,,,`
 	if lines[1] != wantNewest {
 		t.Fatalf("csv row 1 = %q\nwant     %q", lines[1], wantNewest)
 	}
-	wantOldest := `1,2024-01-02T03:04:05Z,read_file,internal,ua/1,tr-1,12.5,true,,"a,""b""\nsecond line","x,y",,,,,,,`
+	wantOldest := `1,2024-01-02T03:04:05Z,read_file,internal,ua/1,tr-1,12.5,true,,"a,""b""\nsecond line","x,y",,,,,,,,`
 	if lines[2] != wantOldest {
 		t.Fatalf("csv row 2 = %q\nwant     %q", lines[2], wantOldest)
 	}

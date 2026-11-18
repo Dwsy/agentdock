@@ -2,6 +2,8 @@ package observability
 
 import (
 	"context"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -85,6 +87,68 @@ func TestTaskIDContextHandlesNilContext(t *testing.T) {
 	}
 	if got := TaskIDFromContext(WithTaskID(nil, "tsk_0123456789abcdef")); got != "tsk_0123456789abcdef" {
 		t.Fatalf("nil ctx WithTaskID = %q", got)
+	}
+}
+
+func TestUpstreamHeadersContextNormalizes(t *testing.T) {
+	input := map[string]string{
+		" User-Agent ":     " ChatGPT/1.0 (+macOS) ",
+		"traceparent":      "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"x-request\x00-id": "req\x00-1",
+		"x-empty":          "   ",
+		"bad key":          "dropped",
+	}
+	headers := NormalizeUpstreamHeaders(input)
+	want := UpstreamHeaders{
+		"user-agent":  "ChatGPT/1.0 (+macOS)",
+		"traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+	}
+	if !reflect.DeepEqual(headers, want) {
+		t.Fatalf("NormalizeUpstreamHeaders() = %#v, want %#v", headers, want)
+	}
+	// 入参之后被改动不能影响已归一化的副本。
+	input["traceparent"] = "changed"
+	if headers["traceparent"] == "changed" {
+		t.Fatal("normalized headers aliased the caller map")
+	}
+}
+
+func TestUpstreamHeadersContextCapsEntriesAndValues(t *testing.T) {
+	input := make(map[string]string, maxUpstreamHeaders+4)
+	for i := 0; i < maxUpstreamHeaders+4; i++ {
+		input[fmt.Sprintf("x-header-%02d", i)] = "v"
+	}
+	input["x-long"] = strings.Repeat("a", 600)
+	ctx := WithUpstreamHeaders(context.Background(), input)
+	got := UpstreamHeadersFromContext(ctx)
+	// 字典序最后保留到 x-header-15；x-long 排在后面被挤掉，条数上限生效。
+	if len(got) != maxUpstreamHeaders {
+		t.Fatalf("header count = %d, want %d", len(got), maxUpstreamHeaders)
+	}
+	if _, ok := got["x-header-00"]; !ok {
+		t.Fatalf("deterministic prefix missing: %#v", got)
+	}
+	if _, ok := got["x-long"]; ok {
+		t.Fatal("cap should drop later keys deterministically")
+	}
+	only := NormalizeUpstreamHeaders(map[string]string{"x-long": strings.Repeat("a", 600)})
+	if len(only["x-long"]) != maxUpstreamHeaderValueBytes {
+		t.Fatalf("value length = %d, want %d", len(only["x-long"]), maxUpstreamHeaderValueBytes)
+	}
+}
+
+func TestUpstreamHeadersContextAbsentWhenEmpty(t *testing.T) {
+	if got := UpstreamHeadersFromContext(context.Background()); got != nil {
+		t.Fatalf("missing headers = %#v", got)
+	}
+	if got := UpstreamHeadersFromContext(WithUpstreamHeaders(context.Background(), nil)); got != nil {
+		t.Fatalf("nil headers = %#v", got)
+	}
+	if got := UpstreamHeadersFromContext(WithUpstreamHeaders(context.Background(), map[string]string{"x-empty": ""})); got != nil {
+		t.Fatalf("empty-only headers = %#v", got)
+	}
+	if got := UpstreamHeadersFromContext(nil); got != nil {
+		t.Fatalf("nil context headers = %#v", got)
 	}
 }
 

@@ -26,6 +26,8 @@ var traceExportCSVHeader = []string{
 	"command", "stdout", "stderr", "exit_code",
 	// 图片字节不导出；只保留 sidecar 的类型与大小索引。
 	"image_preview_mime_type", "image_preview_size_bytes",
+	// 上游客户端头（Nexus 转发）追加在末尾：保留既有列位置，旧解析器可忽略。
+	"upstream_headers",
 }
 
 // RuntimeTracesExport 按与 RuntimeTraces 相同的过滤语义导出记录。
@@ -90,6 +92,13 @@ func traceCSVRow(record observability.TraceRecord) []string {
 		imagePreviewMimeType = record.ImagePreview.MimeType
 		imagePreviewSize = strconv.Itoa(record.ImagePreview.SizeBytes)
 	}
+	// 上游头导出成紧凑 JSON：列数固定，值里的逗号/引号交给 encoding/csv 转义。
+	upstreamHeaders := ""
+	if len(record.UpstreamHeaders) > 0 {
+		if encoded, marshalErr := json.Marshal(record.UpstreamHeaders); marshalErr == nil {
+			upstreamHeaders = traceCSVSingleLine(string(encoded))
+		}
+	}
 	return []string{
 		strconv.FormatUint(record.ID, 10),
 		record.StartedAt.UTC().Format(time.RFC3339Nano),
@@ -104,6 +113,7 @@ func traceCSVRow(record observability.TraceRecord) []string {
 		traceCSVSingleLine(record.Result),
 		record.Error,
 		command, stdout, stderr, exitCode, imagePreviewMimeType, imagePreviewSize,
+		upstreamHeaders,
 	}
 }
 

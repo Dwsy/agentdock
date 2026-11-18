@@ -36,6 +36,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 	}
 	source := observability.SourceFromContext(ctx)
 	userAgent := observability.UserAgentFromContext(ctx)
+	upstreamHeaders := observability.UpstreamHeadersFromContext(ctx)
 	taskID := observability.TaskIDFromContext(ctx)
 	duration := time.Since(startedAt)
 	stages := observability.CloseExecution(ctx)
@@ -105,6 +106,7 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			Tool:                 toolName,
 			Source:               string(source),
 			UserAgent:            userAgent,
+			UpstreamHeaders:      upstreamHeaders,
 			TaskID:               taskID,
 			StartedAt:            startedAt.UTC(),
 			DurationMS:           float64(duration) / float64(time.Millisecond),

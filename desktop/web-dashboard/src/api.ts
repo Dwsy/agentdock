@@ -93,6 +93,8 @@ export type Alerts = {
   rules: unknown[];
 };
 
+export type TaskStepRef = { id: string; title: string; status: string };
+
 export type Task = {
   id: string;
   title: string;
@@ -100,14 +102,18 @@ export type Task = {
   status: string;
   phase: string;
   review_status: string;
+  // 后端列表项按任务自身字段裁剪，以下字段可能缺省（omitempty）。
   project?: string;
+  device?: string;
+  blocker?: string;
+  current_step?: TaskStepRef;
   created_at: string;
   updated_at: string;
   completed_at?: string;
   step_count: number;
   completed_step_count: number;
   event_count: number;
-  summary: string;
+  summary?: string;
 };
 
 export type Tasks = { ok: boolean; source: string; action: string; count: number; tasks: Task[] };
@@ -159,11 +165,20 @@ export type TraceDetail = {
   full_available?: boolean;
 };
 
+/** 私有图片 sidecar：data 是标准 base64，前端拼 data URL 直接渲染。 */
+export type TraceImage = { ok: boolean; mime_type: string; data: string };
+
 export type TraceRecord = {
   id: number;
   tool: string;
   source: string;
   user_agent?: string;
+  // 上游客户端请求头（Nexus 转发而来，键全小写）；不是本机连接的头。
+  // 老版本 Core 不下发这个字段，此处必须按可选处理。
+  upstream_headers?: Record<string, string>;
+  // 图片 sidecar 索引：只有 view_image 一类返回内联图像的工具才有。
+  // 字节不在这里，要点开详情时通过 /traces/image 单独拉。
+  image_preview?: { mime_type: string; size_bytes: number };
   started_at: string;
   duration_ms: number;
   success: boolean;
@@ -315,6 +330,7 @@ export const api = {
   taskActivity: (id: string) => get<TaskActivity>(`/tasks/${encodeURIComponent(id)}/activity`),
   traces: (limit = 50) => get<Traces>(`/traces?limit=${limit}`),
   traceDetail: (id: number, full = false) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`),
+  traceImage: (id: number) => get<TraceImage>(`/traces/image?id=${id}`),
   fileChanges: (limit = 50) => get<FileChanges>(`/file-changes?limit=${limit}`),
   skills: () => get<Skills>('/skills'),
   plugins: () => get<Plugins>('/plugins'),

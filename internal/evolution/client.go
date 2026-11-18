@@ -1,6 +1,7 @@
 package evolution
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -67,20 +68,55 @@ func (c client) post(ctx context.Context, path string, payload any, out any) err
 		return fmt.Errorf("read Nexus lifecycle response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var failure struct {
-			Code  string `json:"code"`
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(data, &failure)
-		if resp.StatusCode == http.StatusConflict && failure.Code == "LIFECYCLE_REVISION_CONFLICT" {
+		code, errMsg := parseLifecycleError(data)
+		if resp.StatusCode == http.StatusConflict && code == "LIFECYCLE_REVISION_CONFLICT" {
 			return ErrRevisionConflict
 		}
-		return fmt.Errorf("Nexus lifecycle request failed: %s", firstNonEmpty(failure.Error, resp.Status))
+		return fmt.Errorf("Nexus lifecycle request failed: %s", firstNonEmpty(errMsg, resp.Status))
 	}
 	if err := json.Unmarshal(data, out); err != nil {
 		return fmt.Errorf("decode Nexus lifecycle response: %w", err)
 	}
 	return nil
+}
+
+// parseLifecycleError 同时兼容 Go 版 Nexus（{"code","error"}）和 Workers 版（{"ok":false,"error":{"code","message"}}）。
+func parseLifecycleError(data []byte) (string, string) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return "", ""
+	}
+	var payload struct {
+		Code         string          `json:"code"`
+		Error        json.RawMessage `json:"error"`
+		ErrorMessage string          `json:"message"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return "", ""
+	}
+	code := strings.TrimSpace(payload.Code)
+	message := strings.TrimSpace(payload.ErrorMessage)
+	if len(payload.Error) > 0 && string(payload.Error) != "null" {
+		var plain string
+		if err := json.Unmarshal(payload.Error, &plain); err == nil {
+			if trimmed := strings.TrimSpace(plain); trimmed != "" {
+				message = trimmed
+			}
+		} else {
+			var structured struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(payload.Error, &structured); err == nil {
+				if trimmed := strings.TrimSpace(structured.Code); trimmed != "" {
+					code = trimmed
+				}
+				if trimmed := strings.TrimSpace(structured.Message); trimmed != "" {
+					message = trimmed
+				}
+			}
+		}
+	}
+	return code, message
 }
 
 func firstNonEmpty(values ...string) string {

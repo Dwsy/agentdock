@@ -174,6 +174,10 @@ type Request struct {
 	Path   string          `json:"path"`
 	Query  url.Values      `json:"query,omitempty"`
 	Body   json.RawMessage `json:"body,omitempty"`
+	// Headers 是 Nexus 转发来的「上游客户端请求头」（全小写键），属于协议扩展：
+	// v0.9.0 只定义了 method/path/query/body。它描述的是最初发起请求的客户端，
+	// 不是本地 HTTP 连接的头；老 Nexus 不带该字段，缺席时行为与之前完全一致。
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 func (r Request) queryValue(key string) string {

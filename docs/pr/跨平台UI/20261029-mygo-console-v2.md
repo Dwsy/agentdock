@@ -10,6 +10,9 @@ tags: ["mygo", "console", "write-ops", "pr"]
 
 # PR: MyGo 控制台 v2（写操作闭环、任务关联、轮询与全局搜索）
 
+> [!NOTE]
+> 归档说明：MyGo GUI 客户端（`desktop/console/`）及其关联的 v1 文档与路线图已从仓库移除；本记录保留用于追溯仍在 `internal/` 中运行的服务端后端接口变更。
+
 ## 变更概述
 
 后端（主模块）补齐任务写操作、发布撤销/延期、trace 导出/清空、

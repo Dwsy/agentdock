@@ -322,6 +322,10 @@ func TestBridgeToolInvokeRecordsNetworkCapture(t *testing.T) {
 	cfg := config.Config{
 		AgentDockDefaultDir:   filepath.Join(root, "workspace"),
 		AgentDockHome:         filepath.Join(root, ".agentdock"),
+		TraceMode:             config.TraceModeMemory,
+		TraceMaxRecords:       100,
+		TraceBufferSize:       1,
+		TraceFlushMS:          100,
 		NetworkCaptureEnabled: true,
 		NetworkCaptureMax:     10,
 	}
@@ -571,5 +575,154 @@ func TestConnectAuthenticationFailureDoesNotAllowFallback(t *testing.T) {
 	outcome := client.connect(t.Context(), server.URL)
 	if outcome.err == nil || outcome.fallbackAllowed {
 		t.Fatalf("authentication failure outcome = %#v", outcome)
+	}
+}
+
+func TestBridgeRecognizesWorkersEditionProtocolAndForwardsToolCallHeaders(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Config{
+		AgentDockDefaultDir:   filepath.Join(root, "workspace"),
+		AgentDockHome:         filepath.Join(root, ".agentdock"),
+		TraceMode:             config.TraceModeMemory,
+		TraceMaxRecords:       100,
+		TraceBufferSize:       1,
+		TraceFlushMS:          100,
+		NetworkCaptureEnabled: true,
+		NetworkCaptureMax:     10,
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	node := mcp.NewServer(runtime, cfg)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	responseCh := make(chan protocol.Message, 1)
+	serverErr := make(chan error, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr := http.Header{
+			HeaderNexusEdition:         []string{EditionWorkers},
+			HeaderNexusVersion:         []string{"0.1.0-workers"},
+			HeaderNexusProtocolVersion: []string{protocol.ConnectionProtocolVersion},
+			HeaderNexusContractVersion: []string{"0.9.0"},
+		}
+		socket, err := upgrader.Upgrade(w, r, hdr)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer socket.Close()
+
+		var hello protocol.Message
+		if err := socket.ReadJSON(&hello); err != nil {
+			serverErr <- err
+			return
+		}
+		if err := socket.WriteJSON(map[string]any{
+			"type":             protocol.MessageNodeReady,
+			"protocol_version": protocol.ConnectionProtocolVersion,
+			"contract_version": "0.9.0",
+			"server_edition":   EditionWorkers,
+			"server_version":   "0.1.0-workers",
+			"heartbeat_ms":     60_000,
+		}); err != nil {
+			serverErr <- err
+			return
+		}
+
+		arguments, _ := json.Marshal(map[string]any{
+			"tool":      "agentdock_context",
+			"arguments": map[string]any{},
+			"headers": map[string]string{
+				"user-agent":   "Claude/1.0",
+				"x-request-id": "req-workers-1",
+			},
+		})
+		if err := socket.WriteJSON(protocol.Message{
+			Type: protocol.MessageToolInvoke, RequestID: "workers-call", Operation: protocol.OperationToolCall, Arguments: arguments,
+		}); err != nil {
+			serverErr <- err
+			return
+		}
+		var response protocol.Message
+		if err := socket.ReadJSON(&response); err != nil {
+			serverErr <- err
+			return
+		}
+		responseCh <- response
+		for {
+			if _, _, err := socket.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	state := &ConnectionState{}
+	ctx, cancel := context.WithCancel(context.Background())
+	client := NewClient(
+		Identity{Endpoint: server.URL, NodeID: "node-workers", DeviceID: "device-workers", DeviceToken: "workers-token"},
+		node, runtime, publicartifacts.Store{}, state,
+	)
+	done := make(chan struct{})
+	go func() {
+		client.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("bridge did not stop after cancellation")
+		}
+	}()
+
+	select {
+	case response := <-responseCh:
+		if response.Type != protocol.MessageToolResult || response.RequestID != "workers-call" {
+			t.Fatalf("response = %#v", response)
+		}
+	case err := <-serverErr:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for bridge response")
+	}
+
+	if !state.IsWorkers() || state.Server().ProtocolVersion != "2" || state.Server().ContractVersion != "0.9.0" {
+		t.Fatalf("connection state server info = %#v", state.Server())
+	}
+
+	wantBridgeUA := "nexus-bridge/workers (proto=2; contract=0.9.0; ver=0.1.0-workers)"
+	recent, ok := runtime.RuntimeAnalytics()["recent_calls"].([]observability.ExecutionRecord)
+	if !ok || len(recent) == 0 {
+		t.Fatalf("recent calls = %#v", runtime.RuntimeAnalytics()["recent_calls"])
+	}
+	if recent[0].UserAgent != wantBridgeUA {
+		t.Fatalf("analytics user_agent = %q, want %q", recent[0].UserAgent, wantBridgeUA)
+	}
+
+	traces, err := runtime.RuntimeTraces(observability.TraceQuery{Limit: 10, Summary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, ok := traces["records"].([]observability.TraceRecord)
+	if !ok || len(records) == 0 {
+		t.Fatalf("trace records = %#v", traces["records"])
+	}
+	if records[0].UserAgent != wantBridgeUA {
+		t.Fatalf("trace user_agent = %q, want %q", records[0].UserAgent, wantBridgeUA)
+	}
+	if records[0].UpstreamHeaders["user-agent"] != "Claude/1.0" || records[0].UpstreamHeaders["x-request-id"] != "req-workers-1" {
+		t.Fatalf("upstream headers = %#v", records[0].UpstreamHeaders)
+	}
+
+	captured := runtime.NetworkCapture().Query(observability.CaptureQuery{Channel: string(observability.CaptureChannelNexus)})
+	if len(captured) != 1 || captured[0].UserAgent != wantBridgeUA {
+		t.Fatalf("network capture = %#v", captured)
 	}
 }

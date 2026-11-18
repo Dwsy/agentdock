@@ -10,6 +10,9 @@ tags: ["sse", "alerts", "events", "console", "realtime", "pr"]
 
 # PR: 运行时事件流（SSE）与阈值告警
 
+> [!NOTE]
+> 归档说明：MyGo GUI 客户端（`desktop/console/`）及其关联的 v1 文档与路线图已从仓库移除；本记录保留用于追溯仍在 `internal/` 中运行的服务端事件总线、SSE 与阈值告警实现。
+
 ## 变更概述
 
 后端（主模块 internal/）新增事件总线与 SSE 订阅端点，把 call/task/artifact

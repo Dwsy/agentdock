@@ -630,3 +630,23 @@ func TestBlindedCreateTimeValidationCanPromoteActiveToVerified(t *testing.T) {
 		t.Fatalf("blinded validation task unexpectedly marked target as guided: %#v", blind.EvolutionGuidanceSeen)
 	}
 }
+
+func TestTransitionRecognizesWorkersStructuredConflictError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"ok":false,"error":{"code":"LIFECYCLE_REVISION_CONFLICT","message":"lifecycle revision conflict"}}`))
+	}))
+	defer server.Close()
+
+	c := client{config: func() config.Config {
+		return config.Config{NexusEndpoint: server.URL, NexusDeviceToken: "test-device-token"}
+	}}
+	_, err := c.transition(t.Context(), transitionRequest{
+		OperationID: "op_conflict",
+		Record:      Record{EvolutionID: "evo_1234567890abcdef"},
+	})
+	if !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("err = %v, want ErrRevisionConflict", err)
+	}
+}

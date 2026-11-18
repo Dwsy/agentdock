@@ -10,6 +10,9 @@ tags: ["mygo", "console", "write-ops", "task-link", "search"]
 
 # Issue: MyGo 控制台 v2（写操作闭环、任务关联与全局搜索）
 
+> [!NOTE]
+> 归档说明：MyGo GUI 客户端（`desktop/console/`）已从仓库移除；本文档仅保留用于记录仍在 `internal/` 中运行的服务端后端能力（`task_id` 贯穿 trace、`GET /tasks/{id}/activity`、`POST /tasks/{id}/actions`、artifact 撤销/延期、trace 导出/清空）。
+
 ## Goal
 
 把 MyGo 控制台从只读观测台推进到操作台：后端补齐任务写操作、

@@ -241,14 +241,30 @@ func (c *Client) connect(ctx context.Context, rawEndpoint string) connectionOutc
 	}); err != nil {
 		return connectionOutcome{err: err, fallbackAllowed: true}
 	}
-	var ready protocol.Message
+	var readyEnv struct {
+		protocol.Message
+		ServerEdition   string `json:"server_edition,omitempty"`
+		ServerVersion   string `json:"server_version,omitempty"`
+		ContractVersion string `json:"contract_version,omitempty"`
+	}
 	_ = socket.SetReadDeadline(time.Now().Add(c.handshakeTimeout))
-	if err := socket.ReadJSON(&ready); err != nil {
+	if err := socket.ReadJSON(&readyEnv); err != nil {
 		return connectionOutcome{err: fmt.Errorf("读取 NexusDock 握手响应: %w", err), fallbackAllowed: fallbackAllowedForSocketError(err)}
 	}
+	ready := readyEnv.Message
 	if ready.Type != protocol.MessageNodeReady || ready.ProtocolVersion != protocol.ConnectionProtocolVersion {
 		return connectionOutcome{err: errors.New("NexusDock 返回了不兼容的节点协议")}
 	}
+	serverInfo := mergeServerInfo(
+		ServerInfo{
+			Edition:         readyEnv.ServerEdition,
+			Version:         readyEnv.ServerVersion,
+			ProtocolVersion: ready.ProtocolVersion,
+			ContractVersion: readyEnv.ContractVersion,
+		},
+		serverInfoFromResponse(response),
+		c.identity.ServerInfo(),
+	)
 	if oauthRuntime, ok := c.runtime.(runtimeapi.NexusOAuthCallbackRuntime); ok {
 		if err := oauthRuntime.SetNexusOAuthCallback(ready.PublicURL, c.identity.NodeID); err != nil {
 			// Nexus 公网 URL 只影响“通过 Nexus 授权”这个可选路径，不能让 Recall、
@@ -267,10 +283,16 @@ func (c *Client) connect(ctx context.Context, rawEndpoint string) connectionOutc
 	socket.SetPongHandler(func(string) error {
 		return socket.SetReadDeadline(time.Now().Add(c.readTimeout))
 	})
-	c.state.SetConnected(true)
+	c.state.SetConnectedServer(serverInfo)
 	defer c.state.SetConnected(false)
 	connectedAt := time.Now()
-	slog.Info("NexusDock node connected", "node_id", c.identity.NodeID, "endpoint", rawEndpoint)
+	slog.Info("NexusDock node connected",
+		"node_id", c.identity.NodeID,
+		"endpoint", rawEndpoint,
+		"server_edition", serverInfo.Edition,
+		"protocol_version", serverInfo.ProtocolVersion,
+		"contract_version", serverInfo.ContractVersion,
+	)
 	heartbeat := time.Duration(ready.HeartbeatMS) * time.Millisecond
 	if heartbeat <= 0 {
 		heartbeat = 30 * time.Second
@@ -299,7 +321,7 @@ func (c *Client) connect(ctx context.Context, rawEndpoint string) connectionOutc
 			go func() {
 				defer c.invokeWG.Done()
 				defer invokeCancel()
-				c.invoke(invokeCtx, socket, incoming, cancels)
+				c.invoke(invokeCtx, socket, incoming, cancels, serverInfo)
 			}()
 		case protocol.MessageToolCancel:
 			cancels.cancel(incoming.RequestID)
@@ -329,9 +351,10 @@ func bridgeHello(identity Identity, tools []string, descriptors []protocol.ToolD
 	}
 }
 
-func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming protocol.Message, cancels *invocationCancels) {
+func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming protocol.Message, cancels *invocationCancels, serverInfo ServerInfo) {
 	ctx := extractBridgeTraceContext(parent, &incoming)
 	started := time.Now()
+	bridgeUA := formatBridgeUserAgent(serverInfo)
 	// 声明先于 defer：闭包要在 panic 与正常路径都拿到最终的 result/err。
 	var result map[string]any
 	var err error
@@ -351,7 +374,7 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 			})
 		}
 		// 抓包走 defer：正常返回与 panic 都要在网络面板留下证据。
-		c.captureNodeOperation(incoming, started, result, err)
+		c.captureNodeOperation(incoming, started, result, err, bridgeUA)
 	}()
 
 	switch incoming.Operation {
@@ -366,15 +389,17 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 		result, err = c.node.AgentDockLocalContext(ctx)
 	case protocol.OperationToolCall:
 		var request struct {
-			Tool      string         `json:"tool"`
-			Arguments map[string]any `json:"arguments"`
+			Tool      string            `json:"tool"`
+			Arguments map[string]any    `json:"arguments"`
+			Headers   map[string]string `json:"headers,omitempty"`
 		}
 		if decodeErr := json.Unmarshal(incoming.Arguments, &request); decodeErr != nil {
 			err = fmt.Errorf("解析工具请求: %w", decodeErr)
 		} else {
 			toolCtx := observability.WithSource(ctx, observability.SourceNexus)
-			// Nexus 调用没有 HTTP UA；用固定标识区分云中继来源。
-			toolCtx = observability.WithUserAgent(toolCtx, "nexus-bridge")
+			toolCtx = observability.WithUpstreamHeaders(toolCtx, request.Headers)
+			// Nexus 调用没有本地 HTTP UA；附带对端 edition/protocol 以便本地 trace 识别云中继版本。
+			toolCtx = observability.WithUserAgent(toolCtx, bridgeUA)
 			result, err = c.node.Invoke(toolCtx, request.Tool, request.Arguments)
 		}
 	case protocol.OperationResourceRead:
@@ -424,7 +449,7 @@ func (c *Client) invoke(parent context.Context, socket *websocket.Conn, incoming
 // captureNodeOperation 把 Nexus 桥接的节点操作写进网络抓包环。这条链路走
 // WebSocket 长连接，不经本地 HTTP 端口，HTTP 中间件看不到它，必须在桥接侧记。
 // 只存内存、不脱敏，与 HTTP 通道同一套取舍。
-func (c *Client) captureNodeOperation(incoming protocol.Message, started time.Time, result map[string]any, callErr error) {
+func (c *Client) captureNodeOperation(incoming protocol.Message, started time.Time, result map[string]any, callErr error, bridgeUA string) {
 	source, ok := c.runtime.(runtimeapi.CaptureSource)
 	if !ok {
 		return
@@ -465,13 +490,45 @@ func (c *Client) captureNodeOperation(incoming protocol.Message, started time.Ti
 		Path:       name,
 		RawURL:     "nexus://" + name,
 		Proto:      "WebSocket",
-		UserAgent:  "nexus-bridge",
+		UserAgent:  bridgeUA,
 		RequestID:  incoming.RequestID,
 		Outcome:    outcome,
 		ErrorCode:  errorCode,
 		Request:    observability.CaptureMessage{Bytes: int64(len(arguments)), Body: requestBody, Truncated: requestTruncated},
 		Response:   observability.CaptureMessage{Bytes: responseBytes, Body: responseBody, Truncated: responseTruncated},
 	})
+}
+
+func serverInfoFromResponse(resp *http.Response) ServerInfo {
+	if resp == nil {
+		return ServerInfo{}
+	}
+	return serverInfoFromHeaders(resp.Header)
+}
+
+func formatBridgeUserAgent(info ServerInfo) string {
+	info = info.normalize()
+	if info.Edition == "" && info.ContractVersion == "" && info.Version == "" {
+		return "nexus-bridge"
+	}
+	prefix := "nexus-bridge"
+	if info.Edition != "" {
+		prefix = "nexus-bridge/" + info.Edition
+	}
+	parts := make([]string, 0, 3)
+	if info.ProtocolVersion != "" {
+		parts = append(parts, "proto="+info.ProtocolVersion)
+	}
+	if info.ContractVersion != "" {
+		parts = append(parts, "contract="+info.ContractVersion)
+	}
+	if info.Version != "" {
+		parts = append(parts, "ver="+info.Version)
+	}
+	if len(parts) == 0 {
+		return prefix
+	}
+	return prefix + " (" + strings.Join(parts, "; ") + ")"
 }
 
 // nodeOperationName 给列表一个可读的名字：工具调用用工具名，其他操作用

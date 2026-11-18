@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Activity,
   Bot,
   Boxes,
   RefreshCw,
@@ -56,6 +55,9 @@ type Snapshot = {
   catalog: Catalog;
 };
 
+/** 任务列表接口上限 200；达到时页面只称“最近 200 条”。 */
+const TASK_LIMIT = 200;
+
 const NAV = [
   { id: 'overview', label: '概览', icon: LayoutDashboard, group: '监控' },
   { id: 'live', label: '实时事件', icon: Radio, group: '监控' },
@@ -81,12 +83,14 @@ export default function App() {
   const [paused, setPaused] = useState(false);
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
     // 上游忙时个别接口会超时；用 allSettled 让单个失败不拖垮整页。
     const keys = ['status', 'overview', 'analytics', 'alerts', 'tasks', 'traces', 'fileChanges', 'skills', 'plugins', 'mcp', 'catalog'] as const;
     const results = await Promise.allSettled([
-      api.status(), api.overview(), api.analytics(), api.alerts(), api.tasks(50),
+      api.status(), api.overview(), api.analytics(), api.alerts(), api.tasks(TASK_LIMIT),
       api.traces(80), api.fileChanges(80), api.skills(), api.plugins(), api.mcp(), api.catalog(),
     ]);
     const got: Partial<Snapshot> = {};
@@ -145,6 +149,26 @@ export default function App() {
     }
   }, [dark]);
 
+  // 移动端抽屉：Esc 关闭、移焦到关闭按钮、关闭后把焦点还给触发按钮。
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSidebarOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      menuButtonRef.current?.focus();
+    };
+  }, [sidebarOpen]);
+
   const navigate = (id: PageId) => {
     setPage(id);
     setSidebarOpen(false);
@@ -196,7 +220,7 @@ export default function App() {
       case 'traces':
         return <TracesPage data={traces} />;
       case 'files':
-        return <FileChangesPage data={fileChanges} />;
+        return <FileChangesPage data={fileChanges} tasks={tasks} />;
       case 'tasks':
         return <TasksPage data={tasks} alerts={alerts} />;
       case 'capabilities':
@@ -209,37 +233,59 @@ export default function App() {
   const groups = ['监控', '管理'];
 
   return (
-    <div className="min-h-screen lg:flex">
-      {/* sidebar */}
-      {sidebarOpen && <div className="fixed inset-0 z-20 bg-black/50 lg:hidden" onClick={() => setSidebarOpen(false)} />}
-      <aside className={`glass-panel fixed inset-y-0 left-0 z-30 flex w-60 flex-col border-r border-border/60 p-4 transition-transform lg:sticky lg:top-0 lg:h-screen lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-        <div className="mb-6 flex items-center gap-3 px-1">
-          <div className="glass-primary flex h-9 w-9 items-center justify-center rounded-lg text-primary-foreground"><Bot size={18} /></div>
-          <div className="min-w-0">
+    <div className="app-shell min-h-dvh">
+      {/* 移动端遮罩：抽屉浮在页面之上，点击空白处关闭 */}
+      {sidebarOpen && (
+        <div
+          className="app-overlay fixed inset-0 z-30 bg-black/35 backdrop-blur-[2px] lg:hidden"
+          onClick={() => setSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
+      {/* 悬浮侧栏：216–224px 宽、留外距、24px 圆角 */}
+      <aside
+        id="app-sidebar"
+        aria-label="主导航"
+        className={`app-sidebar glass-panel fixed z-40 flex flex-col overflow-hidden rounded-[24px] p-3 ${sidebarOpen ? 'is-open' : ''}`}
+      >
+        <div className="mb-4 flex items-center gap-2.5 px-1">
+          <div className="glass-primary flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-primary-foreground"><Bot size={16} /></div>
+          <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">AgentDock</div>
             <div className="text-[11px] text-muted-foreground">远程控制台</div>
           </div>
-          <button className="ml-auto text-muted-foreground lg:hidden" onClick={() => setSidebarOpen(false)}><X size={18} /></button>
+          <button
+            ref={closeButtonRef}
+            onClick={() => setSidebarOpen(false)}
+            aria-label="关闭导航"
+            className="u-press glass-control flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 lg:hidden"
+          >
+            <X size={15} />
+          </button>
         </div>
 
-        <nav className="flex-1 space-y-5">
-          {groups.map((g) => (
-            <div key={g}>
-              <div className="mb-1.5 px-2 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">{g}</div>
-              <div className="space-y-1">
-                {NAV.filter((n) => n.group === g).map((n) => {
-                  const Icon = n.icon;
-                  const active = page === n.id;
+        <nav className="flex-1 space-y-4 overflow-y-auto scrollbar-thin">
+          {groups.map((group) => (
+            <div key={group}>
+              <div className="mb-1.5 px-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground/70">{group}</div>
+              <div className="space-y-0.5">
+                {NAV.filter((item) => item.group === group).map((item) => {
+                  const Icon = item.icon;
+                  const active = page === item.id;
                   return (
                     <button
-                      key={n.id}
-                      onClick={() => navigate(n.id)}
-                      className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors ${active ? 'glass-chosen text-foreground' : 'text-muted-foreground hover:bg-card/50 hover:text-foreground'}`}
+                      key={item.id}
+                      onClick={() => navigate(item.id)}
+                      aria-current={active ? 'page' : undefined}
+                      className={`u-press flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 ${
+                        active ? 'glass-chosen text-foreground' : 'text-muted-foreground hover:bg-card/50 hover:text-foreground'
+                      }`}
                     >
-                      <Icon size={16} />
-                      <span>{n.label}</span>
-                      {n.id === 'live' && <span className={`ml-auto h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />}
-                      {n.id === 'tasks' && activeAlerts > 0 && <span className="ml-auto rounded bg-amber-500/15 px-1.5 text-[10px] text-amber-500">{activeAlerts}</span>}
+                      <Icon size={16} className="shrink-0" />
+                      <span className="whitespace-nowrap">{item.label}</span>
+                      {item.id === 'live' && <span className={`ml-auto h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />}
+                      {item.id === 'tasks' && activeAlerts > 0 && <span className="ml-auto rounded bg-amber-500/15 px-1.5 text-[11px] text-amber-500">{activeAlerts}</span>}
                     </button>
                   );
                 })}
@@ -248,45 +294,64 @@ export default function App() {
           ))}
         </nav>
 
-        <div className="mt-auto space-y-2 border-t border-border/60 pt-4 text-[11px] text-muted-foreground">
+        <div className="mt-auto space-y-1.5 border-t border-border/50 pt-3 text-[11px] text-muted-foreground">
           <div className="flex items-center justify-between"><span>服务</span><span className={status.ok ? 'text-emerald-500' : 'text-red-500'}>{status.ok ? '在线' : '离线'}</span></div>
-          <div className="flex items-center justify-between"><span>版本</span><span className="font-mono">v{status.version}</span></div>
+          <div className="flex min-w-0 items-center justify-between gap-2"><span className="shrink-0">版本</span><span className="truncate font-mono" title={`v${status.version}`}>v{status.version}</span></div>
           <div className="flex items-center justify-between"><span>工具</span><span className="tabular">{status.tool_count}</span></div>
         </div>
       </aside>
 
-      {/* main */}
-      <div className="min-w-0 flex-1">
-        <header className="sticky top-0 z-10 mb-5 flex items-center gap-4 border-b border-border/50 glass-panel px-4 py-3 sm:px-6">
-          <button className="text-muted-foreground lg:hidden" onClick={() => setSidebarOpen(true)}><Menu size={20} /></button>
-          <div className="min-w-0">
-            <h1 className="truncate text-base font-semibold">{NAV.find((n) => n.id === page)?.label}</h1>
-            <p className="truncate text-[11px] text-muted-foreground">{status.service} · {status.path_model} 模式 · {status.agentdock_home}</p>
-          </div>
-          <div className="ml-auto flex items-center gap-3">
-            <span className="hidden items-center gap-1.5 text-xs text-muted-foreground sm:flex">
-              {error ? <><WifiOff size={14} className="text-red-500" /> 连接中断</> : <><Radio size={14} className="text-emerald-500" /> 自动刷新 10s</>}
+      {/* 主内容：与悬浮侧栏留出同一外距 */}
+      <div className="app-main min-w-0">
+        <header className="app-topbar glass-panel flex items-center gap-2 px-3 sm:px-4">
+          <button
+            ref={menuButtonRef}
+            onClick={() => setSidebarOpen(true)}
+            aria-label="打开导航"
+            aria-expanded={sidebarOpen}
+            aria-controls="app-sidebar"
+            className="u-press glass-control flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 lg:hidden"
+          >
+            <Menu size={18} />
+          </button>
+          <div className="flex min-w-0 items-center gap-2">
+            <h1 className="truncate text-sm font-semibold">{NAV.find((n) => n.id === page)?.label}</h1>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.ok ? 'bg-emerald-500' : 'bg-red-500'}`} />
+            <span className="hidden whitespace-nowrap text-xs text-muted-foreground sm:inline">
+              {status.ok ? '在线' : '离线'}
             </span>
-            {lastUpdated && <span className="hidden text-xs text-muted-foreground md:inline">{lastUpdated.toLocaleTimeString('zh-CN')}</span>}
-            <button onClick={load} className="glass-control flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground" title="立即刷新">
+          </div>
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="hidden items-center gap-1.5 text-xs text-muted-foreground md:flex">
+              {error ? <><WifiOff size={13} className="text-red-500" /> 刷新失败</> : <><Radio size={13} className="text-emerald-500" /> 10s</>}
+            </span>
+            {lastUpdated && <span className="tabular hidden text-xs text-muted-foreground md:inline">{lastUpdated.toLocaleTimeString('zh-CN')}</span>}
+            <button
+              onClick={load}
+              aria-label="立即刷新"
+              title="立即刷新"
+              className="u-press glass-control flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
               <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
             </button>
-            <button onClick={() => setDark((v) => !v)} className="glass-control flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground" title={dark ? '浅色' : '深色'}>
+            <button
+              onClick={() => setDark((v) => !v)}
+              aria-label={dark ? '切换到浅色主题' : '切换到深色主题'}
+              title={dark ? '切换到浅色主题' : '切换到深色主题'}
+              className="u-press glass-control flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
+            >
               {dark ? <Sun size={16} /> : <Moon size={16} />}
             </button>
           </div>
         </header>
 
-        <main className="px-4 pb-10 sm:px-6">
+        <main className="pb-10 pt-4">
           {error && (
-            <div className="mb-5 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-500">
+            <div className="mb-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-2.5 text-sm text-red-500">
               <AlertTriangle size={15} /> 最近一次刷新失败：{error}（展示的是上次成功的数据）
             </div>
           )}
           {content}
-          <footer className="mt-8 pb-4 text-center text-xs text-muted-foreground">
-            Solid Glass 设计系统 · 数据来自本机 AgentDock Runtime API · 只读观测
-          </footer>
         </main>
       </div>
     </div>

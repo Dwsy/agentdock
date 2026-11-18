@@ -142,10 +142,14 @@ type TraceRecord struct {
 	ErrorCode     string    `json:"error_code,omitempty"`
 	ErrorCategory string    `json:"error_category,omitempty"`
 	TraceID       string    `json:"trace_id,omitempty"`
-	Arguments     string    `json:"arguments,omitempty"`
-	Result        string    `json:"result,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	Truncated     bool      `json:"truncated,omitempty"`
+	// UpstreamHeaders 是本次调用所属上游会话的客户端请求头（自 Nexus 转发而来，
+	// 键全小写）。它与 UserAgent 不重叠：UserAgent 是本机看到的传输标识，
+	// 这里是最初发起请求的客户端提供的来源信息。
+	UpstreamHeaders UpstreamHeaders `json:"upstream_headers,omitempty"`
+	Arguments       string          `json:"arguments,omitempty"`
+	Result          string          `json:"result,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	Truncated       bool            `json:"truncated,omitempty"`
 	// Command 只在命令类工具（exec_command 等）非空：它把命令、cwd 与输出
 	// 拆成有上限的独立字段，UI 才能分段渲染并标出到底哪一侧被截断。
 	Command *CommandTrace `json:"command,omitempty"`

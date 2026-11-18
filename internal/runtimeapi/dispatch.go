@@ -126,6 +126,9 @@ func IsArtifactExtendPath(path string) bool {
 
 // Dispatch 只负责 Runtime API 的路由、参数校验与应用能力调用，不感知 HTTP request/response。
 func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string]any, error) {
+	// 上游客户端头只用于观测：挂进上下文后，dispatch 期间产生的 trace 会带上它，
+	// header 本身不参与路由与方法判定。老 Nexus 不带 headers 时这里不写上下文。
+	ctx = observability.WithUpstreamHeaders(ctx, request.Headers)
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	path := strings.TrimSuffix(strings.TrimSpace(request.Path), "/")
 	if !MethodAllowed(method, path) {

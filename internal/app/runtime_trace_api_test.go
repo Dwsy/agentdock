@@ -211,6 +211,10 @@ func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
 	}
 	uaCtx := observability.WithUserAgent(context.Background(), "ChatGPT/1.0 (+macOS)")
 	uaCtx = observability.WithTaskID(uaCtx, "tsk_0123456789abcdef")
+	uaCtx = observability.WithUpstreamHeaders(uaCtx, map[string]string{
+		"user-agent":   "ChatGPT/1.0 (+macOS)",
+		"x-request-id": "req-shape",
+	})
 	if _, err := rt.Call(uaCtx, "agentdock_context", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +229,7 @@ func TestRuntimeTraceAPIsJSONShape(t *testing.T) {
 		},
 		"traces": {
 			result: mustTraces(t, rt),
-			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`, `"user_agent"`, `"task_id"`},
+			fields: []string{`"records"`, `"started_at"`, `"duration_ms"`, `"arguments"`, `"result"`, `"tools"`, `"status"`, `"max_records"`, `"user_agent"`, `"task_id"`, `"upstream_headers"`, `"x-request-id"`},
 		},
 		"file-changes": {
 			result: mustFileChanges(t, rt),

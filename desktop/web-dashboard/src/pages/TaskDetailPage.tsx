@@ -34,7 +34,7 @@ function fallbackDetail(task: Task): TaskDetail {
     task: {
       id: task.id, title: task.title, goal: task.goal, project: task.project,
       status: task.status, phase: task.phase, review_status: task.review_status,
-      conditions: [], steps: [], events: [], summary: task.summary,
+      conditions: [], steps: [], events: [], summary: task.summary ?? '',
       created_at: task.created_at, updated_at: task.updated_at, completed_at: task.completed_at,
     },
   };

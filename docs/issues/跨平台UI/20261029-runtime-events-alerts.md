@@ -10,6 +10,9 @@ tags: ["sse", "alerts", "events", "console", "realtime"]
 
 # Issue: 运行时事件流（SSE）与阈值告警
 
+> [!NOTE]
+> 归档说明：MyGo GUI 客户端（`desktop/console/`）已从仓库移除；本文档保留用于记录仍在 `internal/` 中运行的服务端 SSE 事件流（`GET /internal/runtime/events`）与阈值告警（`GET /internal/runtime/alerts`）接口及语义。
+
 ## Goal
 
 以 SSE 事件流替代纯轮询，并在错误率 / trace 磁盘占用 / 任务阻塞超阈值时

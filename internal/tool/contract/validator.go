@@ -3,6 +3,7 @@ package contract
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -64,6 +65,10 @@ func (v *InputValidator) Validate(arguments map[string]any) error {
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
+	if isNormalizedJSONMap(arguments) {
+		// Fast path: arguments decoded via encoding/json already match JSON data model types.
+		return v.resolved.Validate(arguments)
+	}
 
 	// Runtime、HTTP 和 MCP 最终都传输 JSON。先归一化一次，避免 Go 调用方的
 	// int/int64 或自定义 map 具体类型让校验行为偏离真实协议数据模型。
@@ -76,6 +81,35 @@ func (v *InputValidator) Validate(arguments map[string]any) error {
 		return fmt.Errorf("decode tool arguments: %w", err)
 	}
 	return v.resolved.Validate(normalized)
+}
+
+func isNormalizedJSONMap(m map[string]any) bool {
+	for _, value := range m {
+		if !isNormalizedJSONValue(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func isNormalizedJSONValue(value any) bool {
+	switch typed := value.(type) {
+	case nil, bool, string:
+		return true
+	case float64:
+		return !math.IsNaN(typed) && !math.IsInf(typed, 0)
+	case []any:
+		for _, item := range typed {
+			if !isNormalizedJSONValue(item) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		return isNormalizedJSONMap(typed)
+	default:
+		return false
+	}
 }
 
 // CompactValidationError 保持模型可见的校验原因简短、稳定。

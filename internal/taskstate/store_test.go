@@ -1,6 +1,7 @@
 package taskstate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -571,5 +572,90 @@ func TestBatchCheckpointUsesTaskStateLimits(t *testing.T) {
 	}
 	if loaded.Steps[0].Status != StepPending || len(loaded.Events) != len(task.Events) {
 		t.Fatalf("oversized batch changed task: %#v", loaded)
+	}
+}
+
+func TestListContextCancelsWhileWaitingForStoreLock(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := store.acquireStoreLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = store.ListContext(ctx, "", 50)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ListContext() error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("ListContext took %v waiting on canceled ctx", elapsed)
+	}
+}
+
+func TestListCacheReflectsCreateMutateDeleteAndCounts(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.Create("First", "goal 1", []string{"done"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.Create("Second", "goal 2", []string{"done"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := store.ListContext(context.Background(), "", 50)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("initial ListContext = (%d, %v)", len(listed), err)
+	}
+	// Verify returned slices are defensively isolated from internal cache.
+	listed[0].Conditions[0].Text = "mutated-by-caller"
+	listedAgain, err := store.ListContext(context.Background(), "", 50)
+	if err != nil || listedAgain[0].Conditions[0].Text == "mutated-by-caller" {
+		t.Fatalf("caller mutation leaked into store cache: %#v", listedAgain[0].Conditions)
+	}
+
+	if _, err := store.Block(first.ID, "waiting on upstream"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Delete(second.ID); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.OverviewCountsContext(context.Background(), 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["blocked"] != 1 || counts["active"] != 0 {
+		t.Fatalf("OverviewCountsContext = %#v, want blocked=1 active=0", counts)
+	}
+}
+
+func BenchmarkStoreList400TasksCached(b *testing.B) {
+	store, err := New(b.TempDir())
+	if err != nil {
+		b.Fatal(err)
+	}
+	for i := 0; i < 400; i++ {
+		if _, err := store.Create(fmt.Sprintf("Task %03d", i), "benchmark goal", []string{"c1"}, []TaskStepInput{{ID: "s1", Title: "Step 1", Phase: PhaseCheck}}, nil); err != nil {
+			b.Fatal(err)
+		}
+	}
+	if _, err := store.ListContext(context.Background(), "", 50); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tasks, err := store.ListContext(context.Background(), "", 50)
+		if err != nil || len(tasks) != 50 {
+			b.Fatalf("ListContext = (%d, %v)", len(tasks), err)
+		}
 	}
 }

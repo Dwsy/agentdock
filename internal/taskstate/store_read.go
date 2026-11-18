@@ -1,14 +1,17 @@
 package taskstate
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/uvwt/agentdock/internal/fs/atomicfile"
 )
@@ -36,11 +39,16 @@ func (s *Store) Delete(id string) (Task, error) {
 	if err := os.Remove(filepath.Join(s.root, id+".json")); err != nil {
 		return Task{}, fmt.Errorf("delete task %s: %w", id, err)
 	}
+	delete(s.listCache, id+".json")
 	return task, nil
 }
 
 func (s *Store) List(status Status, limit int) ([]Task, error) {
-	release, err := s.acquireStoreLock()
+	return s.ListContext(context.Background(), status, limit)
+}
+
+func (s *Store) ListContext(ctx context.Context, status Status, limit int) ([]Task, error) {
+	release, err := s.acquireStoreLockContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -48,34 +56,163 @@ func (s *Store) List(status Status, limit int) ([]Task, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	entries, err := os.ReadDir(s.root)
+	var matched []*Task
+	if err := s.scanTasksLocked(ctx, func(task *Task) error {
+		if status == "" || task.Status == status {
+			matched = append(matched, task)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].UpdatedAt.After(matched[j].UpdatedAt) })
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	tasks := make([]Task, len(matched))
+	for i, task := range matched {
+		tasks[i] = cloneTask(*task)
+	}
+	return tasks, nil
+}
+
+type taskOverviewMeta struct {
+	status    Status
+	updatedAt time.Time
+}
+
+// OverviewCountsContext computes task status counts without deep-cloning full task payloads.
+func (s *Store) OverviewCountsContext(ctx context.Context, limit int) (map[string]int, error) {
+	release, err := s.acquireStoreLockContext(ctx)
 	if err != nil {
 		return nil, err
 	}
-	tasks := make([]Task, 0, len(entries))
+	defer release()
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	var items []taskOverviewMeta
+	if err := s.scanTasksLocked(ctx, func(task *Task) error {
+		items = append(items, taskOverviewMeta{status: task.Status, updatedAt: task.UpdatedAt})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].updatedAt.After(items[j].updatedAt) })
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	counts := map[string]int{
+		"active":            0,
+		"completed":         0,
+		"blocked":           0,
+		"active_recent_24h": 0,
+	}
+	recentCutoff := time.Now().UTC().Add(-24 * time.Hour)
+	for _, item := range items {
+		counts[string(item.status)]++
+		if item.status == StatusActive && !item.updatedAt.Before(recentCutoff) {
+			counts["active_recent_24h"]++
+		}
+	}
+	return counts, nil
+}
+
+func (s *Store) scanTasksLocked(ctx context.Context, visit func(task *Task) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(s.root)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "tsk_") || filepath.Ext(entry.Name()) != ".json" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "tsk_") || filepath.Ext(name) != ".json" {
 			continue
 		}
-		data, err := readTaskStateFile(filepath.Join(s.root, entry.Name()))
+		seen[name] = struct{}{}
+		info, err := entry.Info()
 		if err != nil {
-			slog.Warn("skip unreadable task state", "file", entry.Name(), "error", err)
+			slog.Warn("skip unreadable task state", "file", name, "error", err)
 			continue
 		}
-		task, err := decodeTask(data, entry.Name())
+		if info.Size() > maxTaskStateFileBytes {
+			slog.Warn("skip oversized task state", "file", name, "size", info.Size())
+			continue
+		}
+		if s.listCache != nil {
+			// os.SameFile + size + ModTime safely invalidates across atomicfile.Write renames
+			// even if an external process updated the file outside this Store instance.
+			if cached, ok := s.listCache[name]; ok &&
+				os.SameFile(cached.info, info) &&
+				cached.info.Size() == info.Size() &&
+				cached.info.ModTime().Equal(info.ModTime()) {
+				if err := visit(&cached.task); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		data, err := readTaskStateFile(filepath.Join(s.root, name))
 		if err != nil {
-			slog.Warn("skip invalid task state", "file", entry.Name(), "error", err)
+			slog.Warn("skip unreadable task state", "file", name, "error", err)
 			continue
 		}
-		if status == "" || task.Status == status {
-			tasks = append(tasks, task)
+		task, err := decodeTask(data, name)
+		if err != nil {
+			slog.Warn("skip invalid task state", "file", name, "error", err)
+			continue
+		}
+		if s.listCache == nil {
+			s.listCache = make(map[string]*cachedTaskFile, len(entries))
+		}
+		entryCache := &cachedTaskFile{info: info, task: cloneTask(task)}
+		s.listCache[name] = entryCache
+		if err := visit(&entryCache.task); err != nil {
+			return err
 		}
 	}
-	sort.Slice(tasks, func(i, j int) bool { return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt) })
-	if len(tasks) > limit {
-		tasks = tasks[:limit]
+	if len(s.listCache) > len(seen) {
+		for name := range s.listCache {
+			if _, ok := seen[name]; !ok {
+				delete(s.listCache, name)
+			}
+		}
 	}
-	return tasks, nil
+	return nil
+}
+
+func cloneTask(task Task) Task {
+	task.Conditions = slices.Clone(task.Conditions)
+	if task.Template != nil {
+		tpl := *task.Template
+		tpl.Candidates = slices.Clone(tpl.Candidates)
+		task.Template = &tpl
+	}
+	task.SourceTemplates = slices.Clone(task.SourceTemplates)
+	task.Steps = slices.Clone(task.Steps)
+	task.Events = slices.Clone(task.Events)
+	task.GuidanceContext = cloneEvolutionItems(task.GuidanceContext)
+	task.EvolutionGuidanceSeen = slices.Clone(task.EvolutionGuidanceSeen)
+	task.EvolutionCandidates = cloneEvolutionItems(task.EvolutionCandidates)
+	task.EvolutionBindings = slices.Clone(task.EvolutionBindings)
+	if task.FinalReview != nil {
+		review := *task.FinalReview
+		review.VerifiedFacts = slices.Clone(review.VerifiedFacts)
+		review.OpenRisks = slices.Clone(review.OpenRisks)
+		review.MissingChecks = slices.Clone(review.MissingChecks)
+		task.FinalReview = &review
+	}
+	if task.CompletedAt != nil {
+		completedAt := *task.CompletedAt
+		task.CompletedAt = &completedAt
+	}
+	return task
 }
 
 func (s *Store) loadLocked(id string) (Task, error) {
@@ -112,6 +249,7 @@ func (s *Store) saveLocked(task Task) error {
 		return fmt.Errorf("task state exceeds %d bytes", maxTaskStateFileBytes)
 	}
 	target := filepath.Join(s.root, task.ID+".json")
+	delete(s.listCache, task.ID+".json")
 	return atomicfile.Write(target, data, 0o600)
 }
 

@@ -49,6 +49,7 @@ const FIELDS: { group: string; icon: any; fields: Field[] }[] = [
       { key: 'AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC', label: '会话缓存保留 (s)', kind: 'int', min: 60, max: 86400, hint: '已完成请求与会话上下文缓存有效期（默认 1800 秒）' },
       { key: 'AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS', label: 'SSE 心跳间隔 (ms)', kind: 'int', min: 1000, max: 60000, hint: '人工推理期间 /v1/responses 保活帧间隔（默认 15000）' },
       { key: 'AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB', label: '历史图片内存上限 (MB)', kind: 'int', min: 1, max: 512, hint: '已完结轮次在内存中保留的图片二进制字节预算（默认 32 MB）' },
+      { key: 'AGENTDOCK_USAGE_COUNT_MODE', label: 'Token 计算方式', kind: 'enum', options: [{ value: 'tiktoken', label: 'tiktoken (cl100k_base 默认)' }, { value: 'chars', label: 'chars (按字符数 / 4)' }], hint: '控制可观测统计与手动推理 SSE usage 的 token 估算方式，默认 tiktoken' },
     ],
   },
   {

@@ -228,6 +228,9 @@ export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) 
               <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">轮询 {data.tuning.wait_ms}/{data.tuning.max_wait_ms}ms</span>
               <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">缓存 {data.tuning.cache_max_responses}轮 · {data.tuning.cache_ttl_sec}s · 图{data.tuning.cache_max_image_mb}MB</span>
               <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">队列 {data.tuning.max_pending} · 心跳 {data.tuning.keepalive_ms}ms</span>
+              {data.tuning.token_count_mode && (
+                <span className="rounded bg-muted/40 px-2 py-0.5 font-mono">Token {data.tuning.token_count_mode}</span>
+              )}
             </div>
           )}
         </Panel>

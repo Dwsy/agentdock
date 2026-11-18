@@ -403,6 +403,93 @@ struct RuntimeTaskDetailPayload: Decodable {
     let task: RuntimeTaskDetail
 }
 
+/// exec_command 等命令类工具的结构化证据，与 Go 侧 observation.CommandTrace 对应。
+/// 列表接口只下发 summary 与退出状态，command/stdout/stderr 正文来自详情接口。
+struct RuntimeTraceCommand: Decodable {
+    let summary: String?
+    let command: String?
+    let workdir: String?
+    let runtime: String?
+    let wslDistribution: String?
+    let skillRef: String?
+    let executionMode: String?
+    let timeoutMS: Int?
+    let yieldTimeMS: Int?
+    let maxOutputBytes: Int?
+    let action: String?
+    let sessionID: String?
+    let status: String?
+    let elapsedMS: Int?
+    let stdout: String?
+    let stderr: String?
+    let stdoutBytes: Int?
+    let stderrBytes: Int?
+    let exitCode: Int?
+    let commandOK: Bool?
+    let timedOut: Bool?
+    let stdoutTruncated: Bool?
+    let stderrTruncated: Bool?
+    let commandPreviewTruncated: Bool?
+    let stdoutPreviewTruncated: Bool?
+    let stderrPreviewTruncated: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case summary, command, workdir, runtime, action, status, stdout, stderr
+        case skillRef = "skill_ref"
+        case wslDistribution = "wsl_distribution"
+        case executionMode = "execution_mode"
+        case timeoutMS = "timeout_ms"
+        case yieldTimeMS = "yield_time_ms"
+        case maxOutputBytes = "max_output_bytes"
+        case sessionID = "session_id"
+        case elapsedMS = "elapsed_ms"
+        case stdoutBytes = "stdout_bytes"
+        case stderrBytes = "stderr_bytes"
+        case exitCode = "exit_code"
+        case commandOK = "command_ok"
+        case timedOut = "timed_out"
+        case stdoutTruncated = "stdout_truncated"
+        case stderrTruncated = "stderr_truncated"
+        case commandPreviewTruncated = "command_preview_truncated"
+        case stdoutPreviewTruncated = "stdout_preview_truncated"
+        case stderrPreviewTruncated = "stderr_preview_truncated"
+    }
+}
+
+/// 全文旁路副本的命令正文（与预览分开传输，单侧上限 256 KiB）。
+struct RuntimeTraceFullCommand: Decodable {
+    let command: String?
+    let stdout: String?
+    let stderr: String?
+}
+
+/// 旁路全文副本：只在预览被截断时存在，正文已脱敏。
+struct RuntimeTraceFullRecord: Decodable {
+    let id: UInt64
+    let arguments: String?
+    let result: String?
+    let error: String?
+    let command: RuntimeTraceFullCommand?
+    let fullTruncated: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, arguments, result, error, command
+        case fullTruncated = "full_truncated"
+    }
+}
+
+struct RuntimeTraceDetailPayload: Decodable {
+    let record: RuntimeTraceRecord
+    /// full=1 请求时附带；旁路缺失（memory 模式/未截断/已清理）时为 nil。
+    let full: RuntimeTraceFullRecord?
+    let fullAvailable: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case record, full
+        case fullAvailable = "full_available"
+    }
+}
+
 struct RuntimeTraceRecord: Decodable, Identifiable {
     let id: UInt64
     let tool: String
@@ -1137,27 +1224,26 @@ final class ServiceController: @unchecked Sendable {
         let requiresApproval = registration == .requiresApproval
         let enabled = registration == .enabled
         let registered = enabled || requiresApproval
-        let loaded = enabled && isLoaded(label: Self.coreLabel)
-        let nexusConnected = loaded && nexusDevice.paired ? await fetchNexusConnected() : false
 
-        guard loaded, let healthURL = configuration?.healthURL else {
-            return ServiceStatus(
-                installed: true,
-                loaded: loaded,
-                healthy: false,
-                version: nil,
-                configuration: configuration,
-                autostartEnabled: registered,
-                requiresApproval: requiresApproval,
-                migrationRequired: migrationRequired,
-                nexusConnection: .resolve(device: nexusDevice, connected: nexusConnected)
-            )
+        var health: HealthPayload?
+        if enabled, let healthURL = configuration?.healthURL {
+            health = await fetchHealth(url: healthURL)
+        }
+        var loaded = false
+        if health?.ok == true {
+            // /healthz 已返回 200，Core 明确运行且响应中，省去每次轮询派生 /bin/launchctl print。
+            loaded = true
+        } else if enabled {
+            loaded = (try? await runInBackground { self.isLoaded(label: Self.coreLabel) }) ?? false
+        }
+        var nexusConnected = false
+        if loaded && health?.ok == true && nexusDevice.paired {
+            nexusConnected = await fetchNexusConnected()
         }
 
-        let health = await fetchHealth(url: healthURL)
         return ServiceStatus(
             installed: true,
-            loaded: true,
+            loaded: loaded,
             healthy: health?.ok == true,
             version: health?.version,
             configuration: configuration,
@@ -2380,15 +2466,22 @@ final class ServiceController: @unchecked Sendable {
     }
 
     func fetchHealth(url: URL) async -> HealthPayload? {
-        do {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 2.5
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-            return try JSONDecoder().decode(HealthPayload.self, from: data)
-        } catch {
-            return nil
+        for attempt in 0..<2 {
+            do {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = attempt == 0 ? 2.5 : 3.0
+                let (data, response) = try await URLSession.shared.data(for: request)
+                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                    return try JSONDecoder().decode(HealthPayload.self, from: data)
+                }
+            } catch {
+                // 单次失败可能是宿主机高负载/Swap 导致的瞬时抖动，短暂退避后复试一次。
+            }
+            if attempt == 0 {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
         }
+        return nil
     }
 
     private func fetchRuntimePayload<T: Decodable>(

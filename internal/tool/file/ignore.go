@@ -8,9 +8,10 @@ import (
 )
 
 type ignoreMatcher struct {
-	root    string
-	exclude []gitignoreRule
-	files   map[string][]gitignoreRule
+	root       string
+	exclude    []gitignoreRule
+	files      map[string][]gitignoreRule
+	dirIgnored map[string]bool
 }
 
 type gitignoreRule struct {
@@ -24,8 +25,9 @@ type gitignoreRule struct {
 
 func loadIgnoreMatcher(root string) *ignoreMatcher {
 	matcher := &ignoreMatcher{
-		root:  root,
-		files: make(map[string][]gitignoreRule),
+		root:       root,
+		files:      make(map[string][]gitignoreRule),
+		dirIgnored: make(map[string]bool),
 	}
 	matcher.exclude = loadIgnoreRules(resolveGitInfoExclude(root), nil)
 	return matcher
@@ -36,37 +38,57 @@ func (m *ignoreMatcher) Ignored(rel string, isDir bool) bool {
 	if rel == "." || rel == "" {
 		return false
 	}
-	parts := strings.Split(rel, "/")
-
+	if isDir {
+		if cached, ok := m.dirIgnored[rel]; ok {
+			return cached
+		}
+	}
 	// Git 不允许通过子路径的否定规则重新包含一个已被忽略目录里的文件。
-	// 逐级检查父目录，也保证只有真正能进入的目录才会读取其中的 .gitignore。
-	for depth := 1; depth < len(parts); depth++ {
-		if m.pathIgnored(parts[:depth], true) {
+	// Memoizing directory decisions turns deep tree walks from O(depth^2) into O(1) parent hits.
+	if slash := strings.LastIndexByte(rel, '/'); slash >= 0 {
+		if m.Ignored(rel[:slash], true) {
+			if isDir {
+				m.dirIgnored[rel] = true
+			}
 			return true
 		}
 	}
-	return m.pathIgnored(parts, isDir)
+	parts := strings.Split(rel, "/")
+	ignored := m.pathIgnored(rel, parts, isDir)
+	if isDir {
+		m.dirIgnored[rel] = ignored
+	}
+	return ignored
 }
 
-func (m *ignoreMatcher) pathIgnored(parts []string, isDir bool) bool {
+func (m *ignoreMatcher) pathIgnored(rel string, parts []string, isDir bool) bool {
 	ignored := false
 	for _, rule := range m.exclude {
 		if rule.matches(parts, isDir) {
 			ignored = !rule.negate
 		}
 	}
+	prefixLen := 0
 	for depth := 0; depth < len(parts); depth++ {
-		for _, rule := range m.ignoreFile(parts[:depth]) {
+		domainKey := ""
+		if depth > 0 {
+			domainKey = rel[:prefixLen]
+		}
+		for _, rule := range m.ignoreFile(domainKey, parts[:depth]) {
 			if rule.matches(parts, isDir) {
 				ignored = !rule.negate
 			}
+		}
+		if depth == 0 {
+			prefixLen = len(parts[0])
+		} else {
+			prefixLen += 1 + len(parts[depth])
 		}
 	}
 	return ignored
 }
 
-func (m *ignoreMatcher) ignoreFile(domain []string) []gitignoreRule {
-	key := strings.Join(domain, "/")
+func (m *ignoreMatcher) ignoreFile(key string, domain []string) []gitignoreRule {
 	if rules, ok := m.files[key]; ok {
 		return rules
 	}

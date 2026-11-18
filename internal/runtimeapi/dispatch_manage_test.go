@@ -2,8 +2,10 @@ package runtimeapi
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/uvwt/agentdock/internal/app"
@@ -16,6 +18,7 @@ type manageRuntimeStub struct {
 	revokedID    string
 	extendID     string
 	extendHours  int
+	publishInput app.ArtifactPublishInput
 	exportFormat string
 	exportQuery  string
 	exportTool   string
@@ -24,6 +27,14 @@ type manageRuntimeStub struct {
 	exportLimit  int
 	exportCalled bool
 	clearCalled  bool
+}
+
+func (r *manageRuntimeStub) RuntimeArtifactPublish(_ context.Context, input app.ArtifactPublishInput) (app.Result, error) {
+	r.publishInput = input
+	return app.Result{
+		"ok": true, "source": app.RuntimeAPISource, "action": "publish",
+		"artifact": map[string]any{"artifact_id": "0123456789abcdef0123456789abcdef", "filename": input.Filename},
+	}, nil
 }
 
 func (r *manageRuntimeStub) RuntimeArtifactRevoke(id string) (app.Result, error) {
@@ -63,7 +74,12 @@ func TestMethodContractForArtifactAndTraceMaintenance(t *testing.T) {
 		{"POST", "/internal/runtime/artifacts/0123456789abcdef0123456789abcdef/extend", "POST", true},
 		{"GET", "/internal/runtime/artifacts/0123456789abcdef0123456789abcdef/extend", "POST", false},
 		{"DELETE", "/internal/runtime/artifacts/0123456789abcdef0123456789abcdef/extend", "POST", false},
-		{"GET", "/internal/runtime/artifacts", "GET", true},
+		{"GET", "/internal/runtime/artifacts/0123456789abcdef0123456789abcdef/content", "GET, HEAD", true},
+		{"HEAD", "/internal/runtime/artifacts/0123456789abcdef0123456789abcdef/content", "GET, HEAD", true},
+		{"POST", "/internal/runtime/artifacts/0123456789abcdef0123456789abcdef/content", "GET, HEAD", false},
+		{"GET", "/internal/runtime/artifacts", "GET, POST", true},
+		{"POST", "/internal/runtime/artifacts", "GET, POST", true},
+		{"DELETE", "/internal/runtime/artifacts", "GET, POST", false},
 		{"DELETE", "/internal/runtime/traces", "GET, DELETE", true},
 		{"POST", "/internal/runtime/traces", "GET, DELETE", false},
 		{"GET", "/internal/runtime/traces/export", "GET", true},
@@ -155,6 +171,104 @@ func TestDispatchArtifactRevokeAndExtend(t *testing.T) {
 			t.Fatalf("error = %#v", err)
 		}
 	})
+}
+
+func TestDispatchArtifactPublishAndContent(t *testing.T) {
+	const artifactID = "0123456789abcdef0123456789abcdef"
+
+	t.Run("publish path routes to runtime", func(t *testing.T) {
+		stub := &manageRuntimeStub{}
+		result, err := Dispatch(context.Background(), stub, Request{
+			Method: "POST",
+			Path:   "/internal/runtime/artifacts",
+			Body:   []byte(`{"path":"/tmp/demo.txt","retention_seconds":3600}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stub.publishInput.Path != "/tmp/demo.txt" || stub.publishInput.RetentionSeconds != 3600 {
+			t.Fatalf("publishInput = %#v", stub.publishInput)
+		}
+		if result["action"] != "publish" || result["ok"] != true {
+			t.Fatalf("result = %#v", result)
+		}
+	})
+
+	t.Run("publish upload decodes base64", func(t *testing.T) {
+		stub := &manageRuntimeStub{}
+		encoded := base64.StdEncoding.EncodeToString([]byte("hello world"))
+		_, err := Dispatch(context.Background(), stub, Request{
+			Method: "POST",
+			Path:   "/internal/runtime/artifacts",
+			Body:   []byte(`{"filename":"hello.txt","mime_type":"text/plain","data_base64":"` + encoded + `","retention_seconds":7200}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stub.publishInput.Filename != "hello.txt" || stub.publishInput.MimeType != "text/plain" || string(stub.publishInput.Data) != "hello world" || stub.publishInput.RetentionSeconds != 7200 {
+			t.Fatalf("publishInput = %#v", stub.publishInput)
+		}
+	})
+
+	oversizeBase64 := base64.StdEncoding.EncodeToString(make([]byte, app.MaxDashboardPublishBytes+1))
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "invalid json", body: `not-json`},
+		{name: "unknown field", body: `{"path":"/tmp/a","extra":1}`},
+		{name: "trailing json", body: `{"path":"/tmp/a"}{"path":"/tmp/b"}`},
+		{name: "invalid base64", body: `{"filename":"a.txt","data_base64":"!!!"}`},
+		{name: "oversize base64", body: `{"filename":"big.bin","data_base64":"` + oversizeBase64 + `"}`},
+	} {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := Dispatch(context.Background(), &manageRuntimeStub{}, Request{
+				Method: "POST",
+				Path:   "/internal/runtime/artifacts",
+				Body:   []byte(tc.body),
+			})
+			var toolErr *app.ToolError
+			if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" || toolErr.Category != "validation" {
+				t.Fatalf("%s error = %#v", tc.name, err)
+			}
+		})
+	}
+
+	t.Run("publish fails closed without capability", func(t *testing.T) {
+		_, err := Dispatch(context.Background(), &runtimeStub{}, Request{
+			Method: "POST",
+			Path:   "/internal/runtime/artifacts",
+			Body:   []byte(`{"path":"/tmp/demo.txt"}`),
+		})
+		var toolErr *app.ToolError
+		if !errors.As(err, &toolErr) || toolErr.Code != "ARTIFACT_PUBLISH_UNSUPPORTED" || toolErr.Category != "not_found" {
+			t.Fatalf("error = %#v", err)
+		}
+	})
+
+	t.Run("content route requires http streaming transport", func(t *testing.T) {
+		_, err := Dispatch(context.Background(), &manageRuntimeStub{}, Request{
+			Method: "GET",
+			Path:   "/internal/runtime/artifacts/" + artifactID + "/content",
+		})
+		var toolErr *app.ToolError
+		if !errors.As(err, &toolErr) || toolErr.Code != "ARTIFACT_CONTENT_STREAM_REQUIRED" || toolErr.Category != "not_found" {
+			t.Fatalf("error = %#v", err)
+		}
+	})
+
+	if !IsArtifactPublishPath("post", "/internal/runtime/artifacts/") {
+		t.Fatal("IsArtifactPublishPath should match POST /internal/runtime/artifacts")
+	}
+	if !IsArtifactContentPath("/internal/runtime/artifacts/" + artifactID + "/content") {
+		t.Fatal("IsArtifactContentPath should match content subroute")
+	}
+	if gotID, ok := ArtifactContentID("/internal/runtime/artifacts/" + artifactID + "/content"); !ok || gotID != artifactID {
+		t.Fatalf("ArtifactContentID = %q %v", gotID, ok)
+	}
+	if strings.Contains(oversizeBase64[:4], " ") {
+		t.Fatal("unexpected space")
+	}
 }
 
 func TestDispatchTracesExportAndClear(t *testing.T) {

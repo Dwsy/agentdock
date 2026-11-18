@@ -77,7 +77,14 @@ func (r *Runtime) RuntimeDiagnostics() Result {
 // 这里直接统计本地索引，不能调用 RuntimeSkills 等明细接口，否则一个概览请求
 // 会重新触发 Skill 包校验、digest 和文件遍历，远程链路仍会被本地扫描拖慢。
 func (r *Runtime) RuntimeOverview() (Result, error) {
-	tasks, err := r.taskTools.RuntimeOverview()
+	return r.RuntimeOverviewContext(context.Background())
+}
+
+func (r *Runtime) RuntimeOverviewContext(ctx context.Context) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	tasks, err := r.taskTools.RuntimeOverviewContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +104,11 @@ func (r *Runtime) RuntimeOverview() (Result, error) {
 }
 
 func (r *Runtime) RuntimeSkills() (Result, error) {
-	return r.skills.RuntimeSkills()
+	return r.RuntimeSkillsContext(context.Background())
+}
+
+func (r *Runtime) RuntimeSkillsContext(ctx context.Context) (Result, error) {
+	return r.skills.RuntimeSkillsContext(ctx)
 }
 
 func (r *Runtime) RuntimeSkill(skill string) (Result, error) {
@@ -146,7 +157,11 @@ func (r *Runtime) runtimePluginManage(ctx context.Context, args map[string]any) 
 }
 
 func (r *Runtime) RuntimeTasks(status string, limit int) (Result, error) {
-	return r.taskTools.RuntimeTasks(status, limit)
+	return r.RuntimeTasksContext(context.Background(), status, limit)
+}
+
+func (r *Runtime) RuntimeTasksContext(ctx context.Context, status string, limit int) (Result, error) {
+	return r.taskTools.RuntimeTasksContext(ctx, status, limit)
 }
 
 func (r *Runtime) RuntimeTask(id string) (Result, error) {

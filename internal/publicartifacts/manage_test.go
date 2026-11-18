@@ -3,6 +3,7 @@ package publicartifacts
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -193,5 +194,53 @@ func TestExtendRejectsNonPositiveDuration(t *testing.T) {
 	}
 	if _, err := store.Extend(result.ArtifactID, -time.Hour, time.Now().UTC(), "https://agent.example"); err == nil {
 		t.Fatal("expected negative duration error")
+	}
+}
+
+func TestStoreOpenVerifiesPayloadAndRejectsInvalidOrExpired(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "home"), "https://agent.example", 8765)
+	fresh, err := store.PublishBytes(PublishBytesRequest{
+		Filename: "notes.md", Data: []byte("# hello\n"), MimeType: "text/markdown",
+		RetentionSeconds: 3600, Now: time.Now().UTC(), BaseURL: "https://agent.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, file, err := store.Open(fresh.ArtifactID)
+	if err != nil {
+		t.Fatalf("Open(fresh) error = %v", err)
+	}
+	data, readErr := io.ReadAll(file)
+	_ = file.Close()
+	if readErr != nil || meta.Filename != "notes.md" || string(data) != "# hello\n" {
+		t.Fatalf("Open(fresh) got meta=%#v data=%q err=%v", meta, data, readErr)
+	}
+
+	for _, id := range []string{"", "../escape", "not-hex", "0123456789abcdef0123456789abcdef"} {
+		if _, _, err := store.Open(id); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Open(%q) error = %v, want ErrNotFound", id, err)
+		}
+	}
+
+	// 已过期记录同样返回 ErrNotFound。
+	expired, err := store.PublishBytes(PublishBytesRequest{
+		Filename: "old.txt", Data: []byte("old"), MimeType: "text/plain",
+		RetentionSeconds: 60, Now: time.Now().UTC().Add(-2 * time.Hour), BaseURL: "https://agent.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Open(expired.ArtifactID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Open(expired) error = %v, want ErrNotFound", err)
+	}
+
+	// 载荷被篡改（等长替换）时必须校验失败。
+	payloadPath := filepath.Join(store.Root, fresh.ArtifactID, "payload")
+	if err := os.WriteFile(payloadPath, []byte("# TAMPR\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, f, err := store.Open(fresh.ArtifactID); err == nil {
+		_ = f.Close()
+		t.Fatal("expected Open to reject tampered payload")
 	}
 }

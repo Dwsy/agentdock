@@ -2,6 +2,7 @@ package taskstate
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -144,6 +145,9 @@ func cloneEvolutionItems(items []EvolutionContextItem) []EvolutionContextItem {
 		return nil
 	}
 	out := make([]EvolutionContextItem, len(items))
-	copy(out, items)
+	for i, item := range items {
+		item.EvidenceRefs = slices.Clone(item.EvidenceRefs)
+		out[i] = item
+	}
 	return out
 }

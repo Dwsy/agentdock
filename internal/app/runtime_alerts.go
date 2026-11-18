@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -147,6 +148,13 @@ func alertEntryLess(left, right alertEntry) bool {
 // RuntimeAlerts 惰性评估阈值告警：计算当前活跃告警并刷新进程内去重表。
 // 响应契约：{"ok","source","alerts","resolved_count","rules"}。
 func (r *Runtime) RuntimeAlerts() (Result, error) {
+	return r.RuntimeAlertsContext(context.Background())
+}
+
+func (r *Runtime) RuntimeAlertsContext(ctx context.Context) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if r == nil {
 		return Result{"ok": true, "source": runtimeAPISource, "alerts": []alertEntry{}, "resolved_count": 0, "rules": []alertRule{}}, nil
 	}
@@ -195,7 +203,7 @@ func (r *Runtime) RuntimeAlerts() (Result, error) {
 
 	// 规则三：blocked 任务停留时长。
 	if r != nil && r.taskTools != nil {
-		tasks, err := r.taskTools.BlockedTasks()
+		tasks, err := r.taskTools.BlockedTasksContext(ctx)
 		if err != nil {
 			return nil, err
 		}

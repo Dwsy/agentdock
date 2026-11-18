@@ -1,7 +1,6 @@
 package file
 
 import (
-	"slices"
 	"strings"
 
 	"github.com/uvwt/agentdock/internal/textutil"
@@ -22,18 +21,43 @@ func sliceText(content string, startLine, endLine, maxBytes int) (string, textMe
 	if startLine < 1 {
 		startLine = 1
 	}
-	lines := strings.Split(content, "\n")
-	total := len(lines)
+	lineNum := 1
+	startByte := 0
+	endByte := len(content)
+	hasEnd := false
+	for offset := 0; ; {
+		rel := strings.IndexByte(content[offset:], '\n')
+		if rel < 0 {
+			break
+		}
+		nl := offset + rel
+		if lineNum == endLine {
+			endByte = nl
+			hasEnd = true
+		}
+		lineNum++
+		if lineNum == startLine {
+			startByte = nl + 1
+		}
+		offset = nl + 1
+	}
+	total := lineNum
 	if endLine <= 0 || endLine > total {
 		endLine = total
+		endByte = len(content)
+		hasEnd = true
 	}
-	if startLine > total {
+	// Guard both start > total and inverted ranges (start > end) against slice panics.
+	if startLine > total || startLine > endLine {
 		return "", textMeta{Start: startLine, End: endLine, Total: total}
 	}
-	requested := strings.Join(lines[startLine-1:endLine], "\n")
+	if !hasEnd || endLine == total {
+		endByte = len(content)
+	}
+	requested := content[startByte:endByte]
 	selected := requested
 	meta := textMeta{Start: startLine, End: endLine, Total: total}
-	if maxBytes > 0 && len([]byte(requested)) > maxBytes {
+	if maxBytes > 0 && len(requested) > maxBytes {
 		truncated := textutil.SafeTruncateString(requested, maxBytes)
 		selected = truncated.Text
 		returnedLines := strings.Count(selected, "\n") + 1
@@ -91,7 +115,13 @@ var skippedDirNames = []string{
 }
 
 func shouldSkipDir(name string) bool {
-	return slices.Contains(skippedDirNames, name)
+	switch name {
+	case ".git", ".reference", "node_modules", "target", "dist", "build",
+		".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache", "__pycache__":
+		return true
+	default:
+		return false
+	}
 }
 
 func matchesAny(path string, patterns []string) bool {

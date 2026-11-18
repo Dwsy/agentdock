@@ -16,12 +16,14 @@ import {
   AlertTriangle,
   Settings2,
   Terminal,
+  Share2,
 } from 'lucide-react';
 import {
   api,
   subscribeEvents,
   type Alerts,
   type Analytics,
+  type Artifacts,
   type Catalog,
   type FileChanges,
   type ManualLLMQueue,
@@ -39,6 +41,7 @@ import LivePage from './pages/Live';
 import TracesPage from './pages/Traces';
 import FileChangesPage from './pages/FileChanges';
 import TasksPage from './pages/Tasks';
+import PublishedPage from './pages/Published';
 import CapabilitiesPage from './pages/Capabilities';
 import ConfigPage from './pages/Config';
 import ManualLLMPage from './pages/ManualLLM';
@@ -52,6 +55,7 @@ type Snapshot = {
   tasks: Tasks;
   traces: Traces;
   fileChanges: FileChanges;
+  artifacts: Artifacts;
   skills: Skills;
   plugins: Plugins;
   mcp: MCPs;
@@ -68,11 +72,42 @@ const NAV = [
   { id: 'traces', label: '调用追踪', icon: ScrollText, group: '监控' },
   { id: 'files', label: '文件变更', icon: Layers, group: '监控' },
   { id: 'tasks', label: '任务与告警', icon: ListChecks, group: '管理' },
+  { id: 'published', label: '文件发布', icon: Share2, group: '管理' },
   { id: 'manual_llm', label: '手动推理', icon: Terminal, group: '管理' },
   { id: 'capabilities', label: '能力目录', icon: Boxes, group: '管理' },
   { id: 'config', label: '配置', icon: Settings2, group: '管理' },
 ] as const;
 type PageId = (typeof NAV)[number]['id'];
+
+type SnapshotKey = keyof Snapshot;
+const SHELL_KEYS: readonly SnapshotKey[] = ['status', 'alerts', 'manualLLM'];
+const PAGE_KEYS: Record<PageId, readonly SnapshotKey[]> = {
+  overview: ['overview', 'analytics', 'tasks'],
+  live: [],
+  traces: ['traces'],
+  files: ['fileChanges', 'tasks'],
+  tasks: ['tasks'],
+  published: ['artifacts'],
+  manual_llm: [],
+  capabilities: ['catalog', 'skills', 'plugins', 'mcp'],
+  config: [],
+};
+
+const FETCHERS: { [K in SnapshotKey]: () => Promise<Snapshot[K]> } = {
+  status: () => api.status(),
+  overview: () => api.overview(),
+  analytics: () => api.analytics(),
+  alerts: () => api.alerts(),
+  tasks: () => api.tasks(TASK_LIMIT),
+  traces: () => api.traces(80),
+  fileChanges: () => api.fileChanges(80),
+  artifacts: () => api.artifacts(),
+  skills: () => api.skills(),
+  plugins: () => api.plugins(),
+  mcp: () => api.mcp(),
+  catalog: () => api.catalog(),
+  manualLLM: () => api.manualLLM(),
+};
 
 export default function App() {
   const [data, setData] = useState<Snapshot | null>(null);
@@ -82,6 +117,10 @@ export default function App() {
   // 初始值对齐 index.html 预执行脚本定好的 class（记忆 > 系统偏好）
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
   const [page, setPage] = useState<PageId>('overview');
+  const pageRef = useRef<PageId>(page);
+  pageRef.current = page;
+  const inFlightRef = useRef(false);
+  const pendingForceRef = useRef(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [connected, setConnected] = useState(false);
@@ -91,59 +130,85 @@ export default function App() {
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
-  const load = useCallback(async () => {
-    // 上游忙时个别接口会超时；用 allSettled 让单个失败不拖垮整页。
-    const keys = ['status', 'overview', 'analytics', 'alerts', 'tasks', 'traces', 'fileChanges', 'skills', 'plugins', 'mcp', 'catalog', 'manualLLM'] as const;
-    const results = await Promise.allSettled([
-      api.status(), api.overview(), api.analytics(), api.alerts(), api.tasks(TASK_LIMIT),
-      api.traces(80), api.fileChanges(80), api.skills(), api.plugins(), api.mcp(), api.catalog(), api.manualLLM(),
-    ]);
-    const got: Partial<Snapshot> = {};
-    const failed: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') (got as any)[keys[i]] = r.value;
-      else failed.push(keys[i]);
-    });
+  const load = useCallback(async (force = false) => {
+    if (!force && document.visibilityState === 'hidden') return;
+    if (inFlightRef.current) {
+      if (force) pendingForceRef.current = true;
+      return;
+    }
+    inFlightRef.current = true;
+    try {
+      // 上游忙时个别接口会超时；按可见页按需拉取并用 allSettled 隔离单项超时。
+      const keys = Array.from(new Set<SnapshotKey>([...SHELL_KEYS, ...PAGE_KEYS[pageRef.current]]));
+      const results = await Promise.allSettled(keys.map((key) => FETCHERS[key]()));
+      const got: Partial<Snapshot> = {};
+      const failed: string[] = [];
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') (got as Record<string, unknown>)[keys[i]] = r.value;
+        else failed.push(keys[i]);
+      });
 
-    setData((prev) => {
-      if (prev) return { ...prev, ...got } as Snapshot; // 保留上次成功的数据
-      // 首次加载：缺失的用空壳补上，保证页面能渲染（status 失败也用兜底）
-      return {
-        status: got.status ?? { ok: false, service: 'agentdock', version: '-', agentdock_home: '-', agentdock_default_dir: '-', path_model: '-', auth_enabled: false, browser_enabled: false, memory_enabled: false, nexus_enabled: false, tool_count: 0, tools: [] },
-        overview: got.overview ?? { ok: false, source: '', tasks: { active: 0, completed: 0, blocked: 0, active_recent_24h: 0 }, skills: { count: 0 }, plugins: { count: 0, available: false }, mcp: { count: 0 } },
-        analytics: got.analytics ?? { ok: false, source: '', started_at: '', total_calls: 0, total_errors: 0, window_calls: 0, active_calls: 0, total_input_tokens: 0, total_output_tokens: 0, process: { goroutines: 0, heap_alloc_bytes: 0, heap_inuse_bytes: 0, heap_sys_bytes: 0, gc_cycles: 0, uptime_ms: 0 }, tool_stats: [], recent_calls: [], daily_tokens: [] },
-        alerts: got.alerts ?? { ok: false, source: '', alerts: [], resolved_count: 0, rules: [] },
-        tasks: got.tasks ?? { ok: false, source: '', action: '', count: 0, tasks: [] },
-        traces: got.traces ?? { ok: false, source: '', count: 0, status: '', view: '', tools: [], records: [] },
-        fileChanges: got.fileChanges ?? { ok: false, source: '', count: 0, status: '', changes: [] },
-        skills: got.skills ?? { ok: false, source: '', action: '', count: 0, skills: [] },
-        plugins: got.plugins ?? { ok: false, source: '', count: 0, plugins: [] },
-        mcp: got.mcp ?? { ok: false, source: '', action: '', count: 0, servers: [] },
-        catalog: got.catalog ?? { ok: false, source: '', tool_count: 0, workdir: '', workspace_root: '', tools: [], rules: [], common_skills: { root: '', total: 0, truncated: false, items: [] } },
-        manualLLM: got.manualLLM ?? { ok: false, enabled: false, responses_path: '/v1/responses', mcp_endpoint: '/mcp/manual', idle_prompt: '', stats: { queued_count: 0, active_count: 0, completed_count: 0, sessions_count: 0 }, requests: [] },
-      } as Snapshot;
-    });
-    setError(failed.length ? `部分接口暂时无响应：${failed.join('、')}（显示的是可用数据）` : null);
-    if (got.status) setLastUpdated(new Date());
-    setLoading(false);
+      setData((prev) => {
+        if (prev) return { ...prev, ...got } as Snapshot; // 保留上次成功的数据
+        // 首次加载：缺失的用空壳补上，保证页面能渲染（status 失败也用兜底）
+        return {
+          status: got.status ?? { ok: false, service: 'agentdock', version: '-', agentdock_home: '-', agentdock_default_dir: '-', path_model: '-', auth_enabled: false, browser_enabled: false, memory_enabled: false, nexus_enabled: false, tool_count: 0, tools: [] },
+          overview: got.overview ?? { ok: false, source: '', tasks: { active: 0, completed: 0, blocked: 0, active_recent_24h: 0 }, skills: { count: 0 }, plugins: { count: 0, available: false }, mcp: { count: 0 } },
+          analytics: got.analytics ?? { ok: false, source: '', started_at: '', total_calls: 0, total_errors: 0, window_calls: 0, active_calls: 0, total_input_tokens: 0, total_output_tokens: 0, process: { goroutines: 0, heap_alloc_bytes: 0, heap_inuse_bytes: 0, heap_sys_bytes: 0, gc_cycles: 0, uptime_ms: 0 }, tool_stats: [], recent_calls: [], daily_tokens: [] },
+          alerts: got.alerts ?? { ok: false, source: '', alerts: [], resolved_count: 0, rules: [] },
+          tasks: got.tasks ?? { ok: false, source: '', action: '', count: 0, tasks: [] },
+          traces: got.traces ?? { ok: false, source: '', count: 0, status: '', view: '', tools: [], records: [] },
+          fileChanges: got.fileChanges ?? { ok: false, source: '', count: 0, status: '', changes: [] },
+          artifacts: got.artifacts ?? { ok: false, source: '', public_base_url: '', configured: false, artifacts: [], count: 0 },
+          skills: got.skills ?? { ok: false, source: '', action: '', count: 0, skills: [] },
+          plugins: got.plugins ?? { ok: false, source: '', count: 0, plugins: [] },
+          mcp: got.mcp ?? { ok: false, source: '', action: '', count: 0, servers: [] },
+          catalog: got.catalog ?? { ok: false, source: '', tool_count: 0, workdir: '', workspace_root: '', tools: [], rules: [], common_skills: { root: '', total: 0, truncated: false, items: [] } },
+          manualLLM: got.manualLLM ?? { ok: false, enabled: false, responses_path: '/v1/responses', mcp_endpoint: '/mcp/manual', idle_prompt: '', stats: { queued_count: 0, active_count: 0, completed_count: 0, sessions_count: 0 }, requests: [] },
+        } as Snapshot;
+      });
+      setError(failed.length ? `部分接口暂时无响应：${failed.join('、')}（显示的是可用数据）` : null);
+      if (got.status) setLastUpdated(new Date());
+      setLoading(false);
+    } finally {
+      inFlightRef.current = false;
+      if (pendingForceRef.current) {
+        pendingForceRef.current = false;
+        void load(true);
+      }
+    }
   }, []);
 
   useEffect(() => {
-    load();
-    const id = setInterval(load, 10_000);
-    return () => clearInterval(id);
+    void load(true);
+    const id = setInterval(() => {
+      void load(false);
+    }, 10_000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void load(false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [load]);
 
   useEffect(() => {
     const unsub = subscribeEvents(
       (e) => {
+        if (e.kind === 'artifact' && pageRef.current === 'published') {
+          void load(true);
+        }
         if (pausedRef.current) return;
         setEvents((prev) => [e, ...prev].slice(0, 200));
       },
       setConnected,
     );
     return unsub;
-  }, []);
+  }, [load]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
@@ -176,8 +241,10 @@ export default function App() {
   }, [sidebarOpen]);
 
   const navigate = (id: PageId) => {
+    pageRef.current = id;
     setPage(id);
     setSidebarOpen(false);
+    void load(true);
   };
 
   /* ---------- render states ---------- */
@@ -200,13 +267,13 @@ export default function App() {
           <WifiOff size={32} className="mx-auto text-red-500" />
           <h1 className="mt-4 text-lg font-semibold">连接失败</h1>
           <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-          <button onClick={load} className="glass-primary mt-6 rounded-lg px-4 py-2 text-sm font-medium text-primary-foreground">重试</button>
+          <button onClick={() => void load(true)} className="glass-primary mt-6 rounded-lg px-4 py-2 text-sm font-medium text-primary-foreground">重试</button>
         </Panel>
       </div>
     );
   }
 
-  const { status, overview, analytics, alerts, tasks, traces, fileChanges, skills, plugins, mcp, catalog, manualLLM } = data;
+  const { status, overview, analytics, alerts, tasks, traces, fileChanges, artifacts, skills, plugins, mcp, catalog, manualLLM } = data;
   const activeAlerts = alerts.alerts.filter((a) => a.active).length;
   const activeManualCount = (manualLLM.stats?.queued_count ?? 0) + (manualLLM.stats?.active_count ?? 0);
 
@@ -230,8 +297,10 @@ export default function App() {
         return <FileChangesPage data={fileChanges} tasks={tasks} />;
       case 'tasks':
         return <TasksPage data={tasks} alerts={alerts} />;
+      case 'published':
+        return <PublishedPage data={artifacts} onRefresh={() => load(true)} />;
       case 'manual_llm':
-        return <ManualLLMPage data={manualLLM} onRefresh={load} onOpenConfig={() => navigate('config')} />;
+        return <ManualLLMPage data={manualLLM} onRefresh={() => void load(true)} onOpenConfig={() => navigate('config')} />;
       case 'capabilities':
         return <CapabilitiesPage catalog={catalog} skills={skills} plugins={plugins} mcp={mcp} status={status} />;
       case 'config':
@@ -337,7 +406,7 @@ export default function App() {
             </span>
             {lastUpdated && <span className="tabular hidden text-xs text-muted-foreground md:inline">{lastUpdated.toLocaleTimeString('zh-CN')}</span>}
             <button
-              onClick={load}
+              onClick={() => void load(true)}
               aria-label="立即刷新"
               title="立即刷新"
               className="u-press glass-control flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"

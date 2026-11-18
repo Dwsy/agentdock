@@ -233,6 +233,45 @@ export type FileChange = {
 
 export type FileChanges = { ok: boolean; source: string; count: number; status: string; changes: FileChange[] };
 
+export type ArtifactItem = {
+  artifact_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  created_at: string;
+  expires_at: string;
+  archive: boolean;
+  width?: number;
+  height?: number;
+  url: string;
+};
+
+export type Artifacts = {
+  ok: boolean;
+  source: string;
+  public_base_url: string;
+  configured: boolean;
+  artifacts: ArtifactItem[];
+  count: number;
+};
+
+export type ArtifactPublishPayload = {
+  path?: string;
+  filename?: string;
+  mime_type?: string;
+  data_base64?: string;
+  retention_seconds?: number;
+};
+
+export type ArtifactMutationResult = {
+  ok: boolean;
+  source: string;
+  action: 'publish' | 'extend' | 'revoke' | string;
+  artifact_id?: string;
+  artifact?: ArtifactItem;
+};
+
 export type SkillItem = {
   name: string;
   skill?: string;
@@ -318,6 +357,25 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   return data as T;
 }
 
+async function del<T>(path: string): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 25_000);
+  let res: Response;
+  try {
+    res = await fetch(`/dashboard/api${path}`, {
+      method: 'DELETE',
+      cache: 'no-store',
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  let data: any;
+  try { data = await res.json(); } catch { throw new Error(`HTTP ${res.status} · 响应不是 JSON`); }
+  if (!res.ok || (data && data.ok === false)) throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
+  return data as T;
+}
+
 export type ManualLLMQueueEntry = {
   request_id: string;
   response_id: string;
@@ -347,6 +405,7 @@ export type ManualLLMTuning = {
   cache_ttl_sec: number;
   keepalive_ms: number;
   cache_max_image_mb: number;
+  token_count_mode?: 'tiktoken' | 'chars' | string;
 };
 
 export type ManualLLMQueue = {
@@ -393,6 +452,12 @@ export const api = {
   traceDetail: (id: number, full = false) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`),
   traceImage: (id: number) => get<TraceImage>(`/traces/image?id=${id}`),
   fileChanges: (limit = 50) => get<FileChanges>(`/file-changes?limit=${limit}`),
+  artifacts: () => get<Artifacts>('/artifacts'),
+  artifactPublish: (payload: ArtifactPublishPayload) => post<ArtifactMutationResult>('/artifacts', payload),
+  artifactExtend: (id: string, hours: number) => post<ArtifactMutationResult>(`/artifacts/${encodeURIComponent(id)}/extend`, { hours }),
+  artifactRevoke: (id: string) => del<ArtifactMutationResult>(`/artifacts/${encodeURIComponent(id)}`),
+  artifactContentUrl: (id: string, download = false) =>
+    `/dashboard/api/artifacts/${encodeURIComponent(id)}/content${download ? '?download=1' : ''}`,
   skills: () => get<Skills>('/skills'),
   plugins: () => get<Plugins>('/plugins'),
   mcp: () => get<MCPs>('/mcp'),

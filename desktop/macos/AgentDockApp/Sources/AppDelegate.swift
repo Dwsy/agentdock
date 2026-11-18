@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var updateActivity: DesktopUpdateActivity = .idle
     private var trayServiceActionInProgress = false
+    private var statusRefreshInFlight = false
+    private var pendingStatusRefresh = false
+    private var pendingShowWindow = false
+    private var consecutiveUnhealthyChecks = 0
     private lazy var updateProgressWindow = UpdateProgressWindowController()
     private lazy var setupWindow = NativeControlPanelWindowController(
         service: service,
@@ -557,21 +561,73 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refreshStatus(showWindow: Bool = false) {
-        Task {
-            let status = await service.status()
-            // 告警与状态一起拉：菜单栏徽标需要在面板没打开时也能更新。
-            // 告警请求依赖状态里的连接配置，所以串行发，不猜配置。
-            let alerts = await service.runtimeAlerts(configuration: status.configuration)
-            await MainActor.run {
-                self.currentStatus = status
-                self.currentAlerts = (alerts?.alerts ?? []).filter(\.active)
-                self.refreshTrayPresentation()
-                if showWindow {
-                    self.setupWindow.present(status: status)
-                } else if self.setupWindow.window?.isVisible == true {
-                    self.setupWindow.refreshServiceStatus(status)
+        // 15 秒定时器与面板唤醒会重叠触发刷新：合并在途请求，防止重复派生 launchctl/CLI 子进程。
+        if statusRefreshInFlight {
+            pendingStatusRefresh = true
+            pendingShowWindow = pendingShowWindow || showWindow
+            return
+        }
+        statusRefreshInFlight = true
+        let requestedShowWindow = showWindow
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.statusRefreshInFlight = false
+                if self.pendingStatusRefresh {
+                    let nextShow = self.pendingShowWindow
+                    self.pendingStatusRefresh = false
+                    self.pendingShowWindow = false
+                    self.refreshStatus(showWindow: nextShow)
                 }
             }
+
+            let rawStatus = await self.service.status()
+            // 单次宿主机调度抖动超时时先做一轮 3 秒复核去抖，避免菜单栏频繁闪烁“服务异常”。
+            let status: ServiceStatus
+            if rawStatus.installed && rawStatus.loaded && !rawStatus.healthy
+                && self.currentStatus.healthy && self.consecutiveUnhealthyChecks == 0 {
+                self.consecutiveUnhealthyChecks = 1
+                status = ServiceStatus(
+                    installed: rawStatus.installed,
+                    loaded: true,
+                    healthy: true,
+                    version: self.currentStatus.version,
+                    configuration: rawStatus.configuration,
+                    autostartEnabled: rawStatus.autostartEnabled,
+                    requiresApproval: rawStatus.requiresApproval,
+                    migrationRequired: rawStatus.migrationRequired,
+                    nexusConnection: rawStatus.nexusConnection
+                )
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                    self?.refreshStatus()
+                }
+            } else {
+                if rawStatus.healthy || !rawStatus.loaded {
+                    self.consecutiveUnhealthyChecks = 0
+                } else {
+                    self.consecutiveUnhealthyChecks += 1
+                }
+                status = rawStatus
+            }
+
+            // 状态立即落盘到 UI；/alerts 在其后异步刷新，避免告警拥堵拖慢状态呈现。
+            self.currentStatus = status
+            self.refreshTrayPresentation()
+            if requestedShowWindow {
+                self.setupWindow.present(status: status)
+            } else if self.setupWindow.window?.isVisible == true {
+                self.setupWindow.refreshServiceStatus(status)
+            }
+
+            if status.healthy {
+                let alerts = await self.service.runtimeAlerts(configuration: status.configuration)
+                if let alerts {
+                    self.currentAlerts = alerts.alerts.filter(\.active)
+                }
+            } else {
+                self.currentAlerts = []
+            }
+            self.refreshTrayPresentation()
         }
     }
 

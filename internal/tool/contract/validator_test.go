@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -73,6 +74,60 @@ func TestCompileInputSchemaMakesSupportedDraftBoundaryExplicit(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "supported drafts are draft-07 and 2020-12") {
 			t.Fatalf("CompileInputSchema(%q) error = %v", draft, err)
+		}
+	}
+}
+
+func TestInputValidatorNormalizedAndNativeTypesParity(t *testing.T) {
+	validator, err := CompileInputSchema(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"count": map[string]any{"type": "integer"},
+			"tags":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+		"required": []string{"count"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	validJSON := map[string]any{"count": float64(3), "tags": []any{"a", "b"}}
+	validNative := map[string]any{"count": 3, "tags": []string{"a", "b"}}
+	if err := validator.Validate(validJSON); err != nil {
+		t.Fatalf("validJSON unexpected error: %v", err)
+	}
+	if err := validator.Validate(validNative); err != nil {
+		t.Fatalf("validNative unexpected error: %v", err)
+	}
+
+	if err := validator.Validate(map[string]any{"count": float64(3.5)}); err == nil {
+		t.Fatal("fractional float64 accepted for integer property")
+	}
+	if err := validator.Validate(map[string]any{"count": math.NaN()}); err == nil {
+		t.Fatal("NaN unexpectedly accepted")
+	}
+}
+
+func BenchmarkInputValidatorNormalizedArgs(b *testing.B) {
+	validator, err := CompileInputSchema(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+		},
+		"required": []string{"path", "content"},
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	args := map[string]any{
+		"path":    "src/main.go",
+		"content": strings.Repeat("package main\nfunc main() {}\n", 2400),
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := validator.Validate(args); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

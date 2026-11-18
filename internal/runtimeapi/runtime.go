@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"os"
 
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/manualllm"
 	"github.com/uvwt/agentdock/internal/mcp/oauthclient"
 	"github.com/uvwt/agentdock/internal/observability"
+	"github.com/uvwt/agentdock/internal/publicartifacts"
 )
 
 // Runtime 定义 Runtime API 路由真正需要的应用能力。
@@ -108,6 +110,16 @@ type ArtifactManageRuntime interface {
 	RuntimeArtifactExtend(id string, hours int) (app.Result, error)
 }
 
+// ArtifactPublishRuntime 是从控制面主动发布文件的可选写能力。
+type ArtifactPublishRuntime interface {
+	RuntimeArtifactPublish(context.Context, app.ArtifactPublishInput) (app.Result, error)
+}
+
+// ArtifactContentRuntime 按只读文件流打开未过期的发布物，供本机控制台预览与下载。
+type ArtifactContentRuntime interface {
+	RuntimeArtifactOpen(id string) (publicartifacts.Metadata, *os.File, error)
+}
+
 // TraceExportRuntime 是 trace 导出能力：按与查询相同的过滤语义输出
 // JSON/CSV 文本，附带内容类型与建议文件名。
 type TraceExportRuntime interface {
@@ -138,6 +150,24 @@ type TaskActionRuntime interface {
 // AlertRuntime 是阈值告警能力：惰性评估当前活跃告警与进程内去重表。
 type AlertRuntime interface {
 	RuntimeAlerts() (app.Result, error)
+}
+
+// ContextAlertRuntime, ContextOverviewRuntime, ContextTasksRuntime, and ContextSkillsRuntime
+// allow handlers to propagate request cancellation without breaking existing stub implementations.
+type ContextAlertRuntime interface {
+	RuntimeAlertsContext(context.Context) (app.Result, error)
+}
+
+type ContextOverviewRuntime interface {
+	RuntimeOverviewContext(context.Context) (app.Result, error)
+}
+
+type ContextTasksRuntime interface {
+	RuntimeTasksContext(context.Context, string, int) (app.Result, error)
+}
+
+type ContextSkillsRuntime interface {
+	RuntimeSkillsContext(context.Context) (app.Result, error)
 }
 
 // EventStreamRuntime 是 SSE 事件流能力：返回进程内事件订阅通道。

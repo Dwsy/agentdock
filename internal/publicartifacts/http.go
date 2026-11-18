@@ -54,26 +54,12 @@ func (s Store) ServeHTTP(w http.ResponseWriter, r *http.Request, prefix string) 
 		http.NotFound(w, r)
 		return
 	}
-	file, err := os.OpenInRoot(s.Root, payload)
+	file, err := openVerifiedPayload(s.Root, payload, meta)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() != meta.Size {
-		http.NotFound(w, r)
-		return
-	}
-	payloadSHA, err := streamSHA256(file)
-	if err != nil || payloadSHA != meta.SHA256 {
-		http.NotFound(w, r)
-		return
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		http.NotFound(w, r)
-		return
-	}
 	w.Header().Set("Content-Type", firstNonEmpty(meta.MimeType, "application/octet-stream"))
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(contentDisposition(meta.MimeType), map[string]string{"filename": meta.Filename}))
 	w.Header().Set("Cache-Control", "private, no-store")
@@ -82,6 +68,48 @@ func (s Store) ServeHTTP(w http.ResponseWriter, r *http.Request, prefix string) 
 	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	http.ServeContent(w, r, meta.Filename, meta.CreatedAt, file)
+}
+
+// Open 校验发布物 ID、未过期状态与载荷完整性，并返回位于起始偏移的只读文件句柄。
+// 调用方负责关闭返回的文件。
+func (s Store) Open(artifactID string) (Metadata, *os.File, error) {
+	meta, payload, err := s.resolveArtifact(artifactID)
+	if err != nil {
+		return Metadata{}, nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+	}
+	if time.Now().UTC().After(meta.ExpiresAt) {
+		return Metadata{}, nil, fmt.Errorf("%w: artifact has expired", ErrNotFound)
+	}
+	file, err := openVerifiedPayload(s.Root, payload, meta)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Metadata{}, nil, fmt.Errorf("%w: %v", ErrNotFound, err)
+		}
+		return Metadata{}, nil, err
+	}
+	return meta, file, nil
+}
+
+func openVerifiedPayload(root, payload string, meta Metadata) (*os.File, error) {
+	file, err := os.OpenInRoot(root, payload)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() != meta.Size {
+		_ = file.Close()
+		return nil, errors.New("artifact payload size does not match metadata")
+	}
+	payloadSHA, err := streamSHA256(file)
+	if err != nil || payloadSHA != meta.SHA256 {
+		_ = file.Close()
+		return nil, errors.New("artifact payload checksum does not match metadata")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 func (s Store) Read(artifactID string, maxBytes int64) (Metadata, []byte, error) {

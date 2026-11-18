@@ -1,8 +1,8 @@
 package task
 
 import (
+	"context"
 	"strings"
-	"time"
 
 	"github.com/uvwt/agentdock/internal/taskstate"
 )
@@ -12,27 +12,22 @@ const runtimeOverviewTaskLimit = 200
 // RuntimeOverview 返回控制面板需要的 Task 轻量统计，避免为了几个数字把完整
 // Task 列表跨 Nexus Bridge 传输。统计上限与既有 Runtime 概览保持一致。
 func (s *Service) RuntimeOverview() (map[string]int, error) {
-	tasks, err := s.tasks.List("", runtimeOverviewTaskLimit)
+	return s.RuntimeOverviewContext(context.Background())
+}
+
+func (s *Service) RuntimeOverviewContext(ctx context.Context) (map[string]int, error) {
+	counts, err := s.tasks.OverviewCountsContext(ctx, runtimeOverviewTaskLimit)
 	if err != nil {
 		return nil, taskToolError(err)
-	}
-	counts := map[string]int{
-		"active":            0,
-		"completed":         0,
-		"blocked":           0,
-		"active_recent_24h": 0,
-	}
-	recentCutoff := time.Now().UTC().Add(-24 * time.Hour)
-	for _, task := range tasks {
-		counts[string(task.Status)]++
-		if task.Status == taskstate.StatusActive && !task.UpdatedAt.Before(recentCutoff) {
-			counts["active_recent_24h"]++
-		}
 	}
 	return counts, nil
 }
 
 func (s *Service) RuntimeTasks(status string, limit int) (Result, error) {
+	return s.RuntimeTasksContext(context.Background(), status, limit)
+}
+
+func (s *Service) RuntimeTasksContext(ctx context.Context, status string, limit int) (Result, error) {
 	statusFilter := taskstate.Status(strings.ToLower(strings.TrimSpace(status)))
 	if statusFilter != "" && statusFilter != taskstate.StatusActive && statusFilter != taskstate.StatusBlocked && statusFilter != taskstate.StatusCompleted {
 		return nil, toolErrorDetails("INVALID_STATUS", "unsupported task status filter", "validation", map[string]any{"status": statusFilter, "allowed": []string{"active", "blocked", "completed"}})
@@ -40,7 +35,7 @@ func (s *Service) RuntimeTasks(status string, limit int) (Result, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	tasks, err := s.tasks.List(statusFilter, limit)
+	tasks, err := s.tasks.ListContext(ctx, statusFilter, limit)
 	if err != nil {
 		return nil, taskToolError(err)
 	}
@@ -85,5 +80,9 @@ func (s *Service) RuntimeTaskDelete(id string) (Result, error) {
 
 // BlockedTasks 返回全部 blocked 状态任务，供阈值告警评估阻塞停留时长。
 func (s *Service) BlockedTasks() ([]taskstate.Task, error) {
-	return s.tasks.List(taskstate.StatusBlocked, 200)
+	return s.BlockedTasksContext(context.Background())
+}
+
+func (s *Service) BlockedTasksContext(ctx context.Context) ([]taskstate.Task, error) {
+	return s.tasks.ListContext(ctx, taskstate.StatusBlocked, 200)
 }

@@ -3,6 +3,7 @@ package runtimeapi
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,10 @@ import (
 	"github.com/uvwt/agentdock/internal/mcp/oauthclient"
 	"github.com/uvwt/agentdock/internal/observability"
 )
+
+// MaxArtifactPublishBodyBytes 限制控制面主动发布请求 JSON 正文上限（28 MiB），
+// 足以容纳 20 MiB 原始文件对应的 base64 编码及元信息字段。
+const MaxArtifactPublishBodyBytes = 28 << 20
 
 // MethodAllowed 返回指定 Runtime API 路径允许当前方法与否。
 // HTTP 入口用它生成 405，其他传输也复用同一份方法契约。
@@ -32,12 +37,16 @@ func MethodAllowed(method, path string) bool {
 		}
 	}
 	if _, sub, ok := runtimeArtifactPath(cleanPath); ok {
-		// 发布物子资源是写操作路由：撤销是 DELETE，延期是 POST，
-		// 不允许 GET 兑底放行。
-		if sub == "extend" {
+		// 发布物子资源各司其职：撤销是 DELETE，延期是 POST，内容读取是 GET/HEAD，
+		// 不允许 GET 兜底放行写操作。
+		switch sub {
+		case "extend":
 			return method == http.MethodPost
+		case "content":
+			return method == http.MethodGet || method == http.MethodHead
+		default:
+			return method == http.MethodDelete
 		}
-		return method == http.MethodDelete
 	}
 	if cleanPath == "/internal/runtime/traces/image" {
 		return method == http.MethodGet
@@ -70,7 +79,7 @@ func MethodAllowed(method, path string) bool {
 	if method == http.MethodGet {
 		return true
 	}
-	return method == http.MethodPost && (cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/evolve" || cleanPath == ResourceLibraryPath)
+	return method == http.MethodPost && (cleanPath == "/internal/runtime/capabilities" || cleanPath == "/internal/runtime/mcp" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/artifacts" || cleanPath == ResourceLibraryPath)
 }
 
 func AllowHeader(path string) string {
@@ -86,10 +95,17 @@ func AllowHeader(path string) string {
 		}
 	}
 	if _, sub, ok := runtimeArtifactPath(cleanPath); ok {
-		if sub == "extend" {
+		switch sub {
+		case "extend":
 			return "POST"
+		case "content":
+			return "GET, HEAD"
+		default:
+			return "DELETE"
 		}
-		return "DELETE"
+	}
+	if cleanPath == "/internal/runtime/artifacts" {
+		return "GET, POST"
 	}
 	if cleanPath == "/internal/runtime/traces/image" {
 		return "GET"
@@ -127,8 +143,28 @@ func IsArtifactExtendPath(path string) bool {
 	return ok && sub == "extend"
 }
 
+// IsArtifactPublishPath 判断路径是否为控制面主动发布文件的写操作路由。
+func IsArtifactPublishPath(method, path string) bool {
+	return strings.EqualFold(strings.TrimSpace(method), http.MethodPost) && strings.TrimSuffix(strings.TrimSpace(path), "/") == "/internal/runtime/artifacts"
+}
+
+// IsArtifactContentPath 判断路径是否为发布物内容流只读路由。
+func IsArtifactContentPath(path string) bool {
+	_, sub, ok := runtimeArtifactPath(strings.TrimSuffix(strings.TrimSpace(path), "/"))
+	return ok && sub == "content"
+}
+
+// ArtifactContentID 解析发布物内容流路由中的 artifact ID。
+func ArtifactContentID(path string) (string, bool) {
+	id, sub, ok := runtimeArtifactPath(strings.TrimSuffix(strings.TrimSpace(path), "/"))
+	return id, ok && sub == "content"
+}
+
 // Dispatch 只负责 Runtime API 的路由、参数校验与应用能力调用，不感知 HTTP request/response。
 func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// 上游客户端头只用于观测：挂进上下文后，dispatch 期间产生的 trace 会带上它，
 	// header 本身不参与路由与方法判定。老 Nexus 不带 headers 时这里不写上下文。
 	ctx = observability.WithUpstreamHeaders(ctx, request.Headers)
@@ -142,6 +178,10 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 	artifactID, artifactSub, isArtifactPath := runtimeArtifactPath(path)
 	switch {
 	case path == "/internal/runtime/alerts":
+		if ctxAlerts, ok := runtime.(ContextAlertRuntime); ok {
+			result, err := ctxAlerts.RuntimeAlertsContext(ctx)
+			return map[string]any(result), err
+		}
 		alerts, ok := runtime.(AlertRuntime)
 		if !ok {
 			return nil, &app.ToolError{
@@ -160,6 +200,10 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 	case path == "/internal/runtime/analytics":
 		return map[string]any(runtime.RuntimeAnalytics()), nil
 	case path == "/internal/runtime/overview":
+		if ctxOverview, ok := runtime.(ContextOverviewRuntime); ok {
+			result, err := ctxOverview.RuntimeOverviewContext(ctx)
+			return map[string]any(result), err
+		}
 		result, err := runtime.RuntimeOverview()
 		return map[string]any(result), err
 	case path == "/internal/runtime/diagnostics":
@@ -347,6 +391,19 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			Summary: summary,
 		})
 		return map[string]any(result), err
+	case path == "/internal/runtime/artifacts" && method == http.MethodPost:
+		publishRuntime, ok := runtime.(ArtifactPublishRuntime)
+		if !ok {
+			return nil, &app.ToolError{
+				Code: "ARTIFACT_PUBLISH_UNSUPPORTED", Message: "runtime does not support publishing artifacts", Category: "not_found",
+			}
+		}
+		input, err := decodeArtifactPublishRequest(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		result, err := publishRuntime.RuntimeArtifactPublish(ctx, input)
+		return map[string]any(result), err
 	case path == "/internal/runtime/artifacts":
 		artifacts, ok := runtime.(ArtifactRuntime)
 		if !ok {
@@ -356,6 +413,10 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		}
 		result, err := artifacts.RuntimeArtifacts(ctx)
 		return map[string]any(result), err
+	case isArtifactPath && artifactSub == "content":
+		return nil, &app.ToolError{
+			Code: "ARTIFACT_CONTENT_STREAM_REQUIRED", Message: "artifact content requires the HTTP streaming transport", Category: "not_found",
+		}
 	case isArtifactPath && artifactSub == "extend":
 		manage, ok := runtime.(ArtifactManageRuntime)
 		if !ok {
@@ -400,6 +461,10 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		result, err := runtime.RuntimeCapabilities(ctx, refresh)
 		return map[string]any(result), err
 	case path == "/internal/runtime/skills":
+		if ctxSkills, ok := runtime.(ContextSkillsRuntime); ok {
+			result, err := ctxSkills.RuntimeSkillsContext(ctx)
+			return map[string]any(result), err
+		}
 		result, err := runtime.RuntimeSkills()
 		return map[string]any(result), err
 	case strings.HasPrefix(path, "/internal/runtime/skills/"):
@@ -559,6 +624,10 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		limit, err := parseRuntimeTaskLimit(request.queryValue("limit"))
 		if err != nil {
 			return nil, err
+		}
+		if ctxTasks, ok := runtime.(ContextTasksRuntime); ok {
+			result, err := ctxTasks.RuntimeTasksContext(ctx, request.queryValue("status"), limit)
+			return map[string]any(result), err
 		}
 		result, err := runtime.RuntimeTasks(request.queryValue("status"), limit)
 		return map[string]any(result), err
@@ -805,7 +874,7 @@ func parseRuntimeTaskLimit(raw string) (int, error) {
 }
 
 // runtimeArtifactPath 解析发布物子资源路由。子资源只允许固定枚举（撤销为
-// 空、延期为 extend），ID 不能吞掉额外路径段，也不能携带穿越型标识。
+// 空、延期为 extend、内容流为 content），ID 不能吞掉额外路径段，也不能携带穿越型标识。
 func runtimeArtifactPath(path string) (id, sub string, ok bool) {
 	const prefix = "/internal/runtime/artifacts/"
 	if !strings.HasPrefix(path, prefix) {
@@ -821,9 +890,55 @@ func runtimeArtifactPath(path string) (id, sub string, ok bool) {
 		return id, "", true
 	case len(parts) == 2 && parts[1] == "extend":
 		return id, "extend", true
+	case len(parts) == 2 && parts[1] == "content":
+		return id, "content", true
 	default:
 		return "", "", false
 	}
+}
+
+// decodeArtifactPublishRequest 解析控制面主动发布请求，严格禁止未知字段并校验 base64 大小。
+func decodeArtifactPublishRequest(body []byte) (app.ArtifactPublishInput, error) {
+	if len(body) > MaxArtifactPublishBodyBytes {
+		return app.ArtifactPublishInput{}, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "artifact publish body is too large", Category: "validation"}
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var request struct {
+		Path             string `json:"path"`
+		Filename         string `json:"filename"`
+		MimeType         string `json:"mime_type"`
+		DataBase64       string `json:"data_base64"`
+		RetentionSeconds int    `json:"retention_seconds"`
+	}
+	if err := decoder.Decode(&request); err != nil {
+		return app.ArtifactPublishInput{}, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "invalid artifact publish body", Category: "validation"}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return app.ArtifactPublishInput{}, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "request body must contain exactly one JSON value", Category: "validation"}
+	}
+	var data []byte
+	if encoded := strings.TrimSpace(request.DataBase64); encoded != "" {
+		if int64(base64.StdEncoding.DecodedLen(len(encoded))) > app.MaxDashboardPublishBytes+2 {
+			return app.ArtifactPublishInput{}, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "uploaded file exceeds 20 MiB limit", Category: "validation"}
+		}
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return app.ArtifactPublishInput{}, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "invalid data_base64 payload", Category: "validation"}
+		}
+		if int64(len(decoded)) > app.MaxDashboardPublishBytes {
+			return app.ArtifactPublishInput{}, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "uploaded file exceeds 20 MiB limit", Category: "validation"}
+		}
+		data = decoded
+	}
+	return app.ArtifactPublishInput{
+		Path:             request.Path,
+		Filename:         request.Filename,
+		MimeType:         request.MimeType,
+		Data:             data,
+		RetentionSeconds: request.RetentionSeconds,
+	}, nil
 }
 
 // decodeArtifactExtendRequest 解析延期正文 {"hours":N}。hours 缺失或正文

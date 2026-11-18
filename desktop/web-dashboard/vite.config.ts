@@ -115,6 +115,9 @@ function attach(server: { middlewares: { use: (p: string, h: (...a: any[]) => vo
       if (token) headers.Authorization = `Bearer ${token}`;
       const contentType = req.headers['content-type'];
       if (typeof contentType === 'string' && contentType) headers['Content-Type'] = contentType;
+      const range = req.headers['range'];
+      if (typeof range === 'string' && range) headers.Range = range;
+      const isArtifactContent = /^\/artifacts\/[^/]+\/content\/?(?:$|\?)/.test(subPath);
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 30_000);
       const upstream = await fetch(url, {
@@ -145,6 +148,48 @@ function attach(server: { middlewares: { use: (p: string, h: (...a: any[]) => vo
           // 流中断（上游重启/超时）：头已发出，只能安静结束，不能再写错误头。
         } finally {
           clearTimeout(timer);
+          try { res.end(); } catch { /* ignore */ }
+        }
+        return;
+      }
+
+      // 发布物内容流：透传二进制、Range 状态码与安全响应头，不经 sanitizeJSON 改写。
+      if (isArtifactContent && !(upstream.status >= 400 && ct.includes('application/json'))) {
+        clearTimeout(timer);
+        res.statusCode = upstream.status;
+        for (const h of [
+          'content-type',
+          'content-disposition',
+          'content-length',
+          'content-range',
+          'accept-ranges',
+          'cache-control',
+          'x-content-type-options',
+          'content-security-policy',
+          'referrer-policy',
+          'etag',
+          'last-modified',
+        ]) {
+          const val = upstream.headers.get(h);
+          if (val) res.setHeader(h, val);
+        }
+        headersSent = true;
+        if (method === 'HEAD' || !upstream.body) {
+          return res.end();
+        }
+        const reader = upstream.body.getReader();
+        req.on('close', () => {
+          reader.cancel().catch(() => { /* ignore */ });
+        });
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(Buffer.from(value));
+          }
+        } catch {
+          // 流中断时头已发出，安静结束即可。
+        } finally {
           try { res.end(); } catch { /* ignore */ }
         }
         return;

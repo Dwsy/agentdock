@@ -58,6 +58,14 @@ type TraceStore struct {
 
 	flushEvery time.Duration
 	bufferSize int
+
+	diskBytesMu      sync.Mutex
+	diskBytesAt      time.Time
+	diskBytesRootMod int64
+	diskBytesRootCnt int
+	diskBytesFullMod int64
+	diskBytesFullCnt int
+	diskBytes        int64
 }
 
 type TraceMode string
@@ -249,27 +257,72 @@ func (s *TraceStore) DiskBytes() int64 {
 	if s == nil || s.mode != TraceModeDisk || s.root == "" {
 		return 0
 	}
-	entries, err := os.ReadDir(s.root)
+	const diskBytesTTL = 2 * time.Second
+	rootMod, rootCnt := dirJSONLFingerprint(s.root)
+	fullMod, fullCnt := dirJSONLFingerprint(s.fullDir())
+
+	s.diskBytesMu.Lock()
+	if !s.diskBytesAt.IsZero() &&
+		time.Since(s.diskBytesAt) < diskBytesTTL &&
+		s.diskBytesRootMod == rootMod &&
+		s.diskBytesRootCnt == rootCnt &&
+		s.diskBytesFullMod == fullMod &&
+		s.diskBytesFullCnt == fullCnt {
+		cached := s.diskBytes
+		s.diskBytesMu.Unlock()
+		return cached
+	}
+	s.diskBytesMu.Unlock()
+
+	total := sumJSONLBytes(s.root) + sumJSONLBytes(s.fullDir())
+
+	s.diskBytesMu.Lock()
+	s.diskBytes = total
+	s.diskBytesRootMod = rootMod
+	s.diskBytesRootCnt = rootCnt
+	s.diskBytesFullMod = fullMod
+	s.diskBytesFullCnt = fullCnt
+	s.diskBytesAt = time.Now()
+	s.diskBytesMu.Unlock()
+	return total
+}
+
+func (s *TraceStore) invalidateDiskBytes() {
+	s.diskBytesMu.Lock()
+	s.diskBytesAt = time.Time{}
+	s.diskBytesMu.Unlock()
+}
+
+func dirJSONLFingerprint(dir string) (int64, int) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return 0, 0
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return info.ModTime().UnixNano(), 0
+	}
+	names, err := f.Readdirnames(-1)
+	_ = f.Close()
+	if err != nil {
+		return info.ModTime().UnixNano(), 0
+	}
+	count := 0
+	for _, name := range names {
+		if strings.HasSuffix(name, ".jsonl") {
+			count++
+		}
+	}
+	return info.ModTime().UnixNano(), count
+}
+
+func sumJSONLBytes(dir string) int64 {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
 	var total int64
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			continue
-		}
-		total += info.Size()
-	}
-	// 全文旁路同样是磁盘占用，告警口径不能漏掉它。
-	fullEntries, err := os.ReadDir(s.fullDir())
-	if err != nil {
-		return total
-	}
-	for _, entry := range fullEntries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
@@ -577,6 +630,7 @@ func (s *TraceStore) Clear() (int, error) {
 	s.pendingFullBytes = 0
 	s.imagePreviews = make(map[uint64]traceImagePreviewData)
 	s.imagePreviewBytes = 0
+	s.invalidateDiskBytes()
 	if s.mode != TraceModeDisk {
 		return cleared, nil
 	}
@@ -868,6 +922,7 @@ func (s *TraceStore) flushLoop() {
 func (s *TraceStore) flushLocked() {
 	s.flushPreviewsLocked()
 	s.flushFullLocked()
+	s.invalidateDiskBytes()
 }
 
 func (s *TraceStore) flushPreviewsLocked() {
@@ -1064,6 +1119,7 @@ func (s *TraceStore) cleanupExpired() {
 	}
 	s.cleanFullFiles(cutoff)
 	s.cleanImagePreviews(cutoff)
+	s.invalidateDiskBytes()
 }
 
 func traceDay(t time.Time) string { return t.Format("2006-01-02") }

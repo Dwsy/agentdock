@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/uvwt/agentdock/internal/config"
+	"github.com/uvwt/agentdock/internal/runtimeapi"
 )
 
 // embed 文件无修改时间；ServeContent 用零值即可（禁用 304 缓存）。
@@ -32,7 +33,7 @@ const (
 
 var (
 	dashboardBearerRe = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{8,}`)
-	dashboardCSP      = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
+	dashboardCSP      = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'self' blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
 )
 
 // registerDashboard 注册静态页与 API 代理。
@@ -101,8 +102,8 @@ func dashboardAPIHandler(cfg config.Config, runtimeHandler http.Handler) http.Ha
 		r2.Header = r.Header.Clone()
 		r2.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
 
-		// SSE 事件流：直接透传，避免缓冲（事件 payload 是摘要投影，无凭据）。
-		if isRuntimeEventsPath(target) {
+		// SSE 事件流与发布物内容流：直接透传，避免缓冲与 JSON 脱敏改写二进制载荷或破坏 Range。
+		if isRuntimeEventsPath(target) || runtimeapi.IsArtifactContentPath(target) {
 			runtimeHandler.ServeHTTP(w, r2)
 			return
 		}

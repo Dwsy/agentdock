@@ -247,3 +247,18 @@ func writeIgnoreTestFile(t *testing.T, root, rel, content string) {
 		t.Fatal(err)
 	}
 }
+
+func BenchmarkIgnoreMatcherDeepTree(b *testing.B) {
+	root := b.TempDir()
+	for _, rel := range []string{".gitignore", "a/.gitignore", "a/b/.gitignore", "a/b/c/.gitignore"} {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		_ = os.MkdirAll(filepath.Dir(path), 0o700)
+		_ = os.WriteFile(path, []byte("*.tmp\ndist/\nbuild/\n"), 0o600)
+	}
+	matcher := loadIgnoreMatcher(root)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = matcher.Ignored("a/b/c/d/e", true)
+		_ = matcher.Ignored("a/b/c/d/e/file.go", false)
+	}
+}

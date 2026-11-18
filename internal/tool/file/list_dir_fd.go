@@ -10,9 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	processcontrol "github.com/uvwt/agentdock/internal/process"
@@ -35,8 +36,31 @@ type fdCandidate struct {
 //
 // 与 search_text 的 rg 内核一样，fd 自带的 ignore 机制（.ignore/.fdignore、全局
 // gitignore）比 Go 回退内核更宽，会额外剪掉少量条目；Go 侧过滤始终是最终裁决。
-func (svc *Service) listDirFD(ctx context.Context, root workspace.Path, opts listDirOptions) (Result, bool, error) {
+var fdLookupCache struct {
+	mu      sync.Mutex
+	pathEnv string
+	fdPath  string
+	err     error
+	cached  bool
+}
+
+func lookupFD() (string, error) {
+	pathEnv := os.Getenv("PATH")
+	fdLookupCache.mu.Lock()
+	defer fdLookupCache.mu.Unlock()
+	if fdLookupCache.cached && fdLookupCache.pathEnv == pathEnv {
+		return fdLookupCache.fdPath, fdLookupCache.err
+	}
 	fdPath, err := exec.LookPath("fd")
+	fdLookupCache.pathEnv = pathEnv
+	fdLookupCache.fdPath = fdPath
+	fdLookupCache.err = err
+	fdLookupCache.cached = true
+	return fdPath, err
+}
+
+func (svc *Service) listDirFD(ctx context.Context, root workspace.Path, opts listDirOptions) (Result, bool, error) {
+	fdPath, err := lookupFD()
 	if err != nil {
 		return nil, false, nil
 	}
@@ -78,6 +102,7 @@ func (svc *Service) listDirFD(ctx context.Context, root workspace.Path, opts lis
 		return nil, true, kernelExecutionError(runCtx, "fd", "directory search", collectErr)
 	}
 
+	slices.SortFunc(candidates, func(a, b fdCandidate) int { return strings.Compare(a.rel, b.rel) })
 	items := make([]map[string]any, 0, len(candidates))
 	for _, candidate := range candidates {
 		info, err := os.Lstat(candidate.abs)
@@ -101,8 +126,7 @@ func (svc *Service) listDirFD(ctx context.Context, root workspace.Path, opts lis
 			"is_hidden":  hiddenRelativePath(candidate.rel),
 		})
 	}
-	sort.Slice(items, func(i, j int) bool { return fmt.Sprint(items[i]["path"]) < fmt.Sprint(items[j]["path"]) })
-	sort.Strings(skippedPaths)
+	slices.Sort(skippedPaths)
 	return Result{
 		"path":          root.Display,
 		"engine":        "fd",
@@ -137,7 +161,10 @@ func fdListArgs(opts listDirOptions) []string {
 // collectDirMatchesFD 流式消费 fd 的 NUL 分隔输出，应用与 go_fallback 相同的过滤规则。
 // stoppedEarly 表示已拿到 max_entries+1 个匹配，调用方应终止 fd。
 func (svc *Service) collectDirMatchesFD(r io.Reader, root workspace.Path, opts listDirOptions) (candidates []fdCandidate, truncated, stoppedEarly bool, skippedPaths []string, err error) {
-	ignore := loadIgnoreMatcher(svc.ws.Root())
+	var ignore *ignoreMatcher
+	if !opts.IncludeIgnored {
+		ignore = loadIgnoreMatcher(svc.ws.Root())
+	}
 	candidates = make([]fdCandidate, 0, min(opts.MaxEntries, 200))
 	// skipped_paths 的契约是数组：没有跳过路径时也必须是 []，不能是 null。
 	skippedPaths = make([]string, 0)

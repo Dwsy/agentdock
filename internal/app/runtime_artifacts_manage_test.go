@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,5 +180,138 @@ func TestRuntimeArtifactExtendClampDoesNotExceedRetention(t *testing.T) {
 	}
 	if artifact.ExpiresAt.Before(time.Now().UTC()) {
 		t.Fatalf("extended expires already in the past: %v", artifact.ExpiresAt)
+	}
+}
+
+func TestRuntimeArtifactPublishPathDirectoryAndUpload(t *testing.T) {
+	rt := newArtifactTestRuntime(t, config.TraceModeMemory)
+
+	// 1. 本机单文件发布
+	filePath := filepath.Join(rt.cfg.AgentDockDefaultDir, "notes.md")
+	if err := os.WriteFile(filePath, []byte("# Title\nBody\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rt.RuntimeArtifactPublish(t.Context(), ArtifactPublishInput{Path: "notes.md", RetentionSeconds: 7200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["ok"] != true || res["action"] != "publish" {
+		t.Fatalf("publish file result = %#v", res)
+	}
+	publishedFile := res["artifact"].(publicartifacts.PublishResult)
+	if publishedFile.Filename != "notes.md" || publishedFile.Archive || !strings.HasPrefix(publishedFile.URL, "https://example.test/artifacts/public/") {
+		t.Fatalf("published file = %#v", publishedFile)
+	}
+
+	// 2. 本机目录发布（打包为 tar.gz）
+	bundleDir := filepath.Join(rt.cfg.AgentDockDefaultDir, "bundle")
+	if err := os.MkdirAll(bundleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundleDir, "a.txt"), []byte("alpha"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dirRes, err := rt.RuntimeArtifactPublish(t.Context(), ArtifactPublishInput{Path: bundleDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedDir := dirRes["artifact"].(publicartifacts.PublishResult)
+	if !publishedDir.Archive || publishedDir.Filename != "bundle.tar.gz" {
+		t.Fatalf("published dir = %#v", publishedDir)
+	}
+
+	// 3. 上传字节发布（不把内容写入 trace 参数）
+	uploadRes, err := rt.RuntimeArtifactPublish(t.Context(), ArtifactPublishInput{
+		Filename: "secret-check.json",
+		MimeType: "application/json",
+		Data:     []byte(`{"hello":"SECRET_BODY_MARKER"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedUpload := uploadRes["artifact"].(publicartifacts.PublishResult)
+	if publishedUpload.Filename != "secret-check.json" || publishedUpload.Size == 0 {
+		t.Fatalf("published upload = %#v", publishedUpload)
+	}
+
+	// 验证 RuntimeArtifactOpen 可读取上传内容。
+	meta, file, err := rt.RuntimeArtifactOpen(publishedUpload.ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBytes, readErr := io.ReadAll(file)
+	_ = file.Close()
+	if readErr != nil || meta.ArtifactID != publishedUpload.ArtifactID || string(gotBytes) != `{"hello":"SECRET_BODY_MARKER"}` {
+		t.Fatalf("RuntimeArtifactOpen = meta=%#v data=%q err=%v", meta, gotBytes, readErr)
+	}
+
+	// 验证 trace 记录了 artifact_publish 且不泄露上传正文。
+	records := rt.traces.Query(observability.TraceQuery{Tool: "artifact_publish"})
+	if len(records) != 3 {
+		t.Fatalf("artifact_publish trace count = %d, want 3", len(records))
+	}
+	for _, rec := range records {
+		if rec.Source != "internal" || !rec.Success {
+			t.Fatalf("unexpected publish trace: %#v", rec)
+		}
+		if strings.Contains(rec.Arguments, "SECRET_BODY_MARKER") {
+			t.Fatalf("upload bytes leaked into trace arguments: %s", rec.Arguments)
+		}
+	}
+}
+
+func TestRuntimeArtifactPublishValidationAndSecurityBoundaries(t *testing.T) {
+	rt := newArtifactTestRuntime(t, config.TraceModeMemory)
+
+	existing := filepath.Join(rt.cfg.AgentDockDefaultDir, "ok.txt")
+	if err := os.WriteFile(existing, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envFile := filepath.Join(rt.cfg.AgentDockDefaultDir, "agentdock.env")
+	if err := os.WriteFile(envFile, []byte("AGENTDOCK_AUTH_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(rt.cfg.AgentDockHome, "secrets", "public-url-secret")
+	oauthDir := filepath.Join(rt.cfg.AgentDockHome, "oauth")
+	if err := os.MkdirAll(oauthDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oauthFile := filepath.Join(oauthDir, "state-v1.json")
+	if err := os.WriteFile(oauthFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		input    ArtifactPublishInput
+		wantCode string
+	}{
+		{name: "empty input", input: ArtifactPublishInput{}, wantCode: "INVALID_ARGUMENT"},
+		{name: "both path and upload", input: ArtifactPublishInput{Path: existing, Filename: "a.txt", Data: []byte("a")}, wantCode: "INVALID_ARGUMENT"},
+		{name: "empty upload bytes", input: ArtifactPublishInput{Filename: "empty.txt"}, wantCode: "INVALID_ARGUMENT"},
+		{name: "oversize upload", input: ArtifactPublishInput{Filename: "big.bin", Data: make([]byte, MaxDashboardPublishBytes+1)}, wantCode: "INVALID_ARGUMENT"},
+		{name: "negative retention", input: ArtifactPublishInput{Path: existing, RetentionSeconds: -1}, wantCode: "INVALID_ARGUMENT"},
+		{name: "over max retention", input: ArtifactPublishInput{Path: existing, RetentionSeconds: int(publicartifacts.MaxRetention/time.Second) + 1}, wantCode: "INVALID_ARGUMENT"},
+		{name: "missing path", input: ArtifactPublishInput{Path: filepath.Join(rt.cfg.AgentDockDefaultDir, "missing.txt")}, wantCode: "NOT_FOUND"},
+		{name: "reject agentdock.env", input: ArtifactPublishInput{Path: envFile}, wantCode: "INVALID_ARGUMENT"},
+		{name: "reject secrets file", input: ArtifactPublishInput{Path: secretFile}, wantCode: "INVALID_ARGUMENT"},
+		{name: "reject oauth file", input: ArtifactPublishInput{Path: oauthFile}, wantCode: "INVALID_ARGUMENT"},
+		{name: "reject agentdock home dir", input: ArtifactPublishInput{Path: rt.cfg.AgentDockHome}, wantCode: "INVALID_ARGUMENT"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := rt.RuntimeArtifactPublish(t.Context(), tc.input)
+			var toolErr *toolcore.ToolError
+			if !errors.As(err, &toolErr) || toolErr.Code != tc.wantCode {
+				t.Fatalf("%s error = %#v, want code %s", tc.name, err, tc.wantCode)
+			}
+		})
+	}
+
+	_, _, err := rt.RuntimeArtifactOpen("../bad")
+	var toolErr *toolcore.ToolError
+	if !errors.As(err, &toolErr) || toolErr.Code != "NOT_FOUND" {
+		t.Fatalf("RuntimeArtifactOpen(bad) error = %#v", err)
 	}
 }

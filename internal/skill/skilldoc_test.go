@@ -115,3 +115,16 @@ description: Common Agent Skill without package version.
 		t.Fatalf("unexpected metadata: %#v", metadata)
 	}
 }
+
+func BenchmarkParseSkillMetadataLargeBody(b *testing.B) {
+	doc := []byte("---\nname: large-skill\ndescription: Fast metadata extraction.\n---\n\n" +
+		strings.Repeat("Detailed markdown instruction paragraph for benchmark.\n\n", 1000))
+	b.SetBytes(int64(len(doc)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		meta, err := ParseSkillMetadata(doc)
+		if err != nil || meta.Name != "large-skill" {
+			b.Fatalf("ParseSkillMetadata = (%#v, %v)", meta, err)
+		}
+	}
+}

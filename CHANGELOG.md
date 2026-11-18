@@ -7,28 +7,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates u
 
 ## [Unreleased]
 
-## [2026-11-18] - Runtime Stability, Performance & Manual LLM / 运行态稳定性、性能治理与手动推理桥接
+## [2026-11-18] - Runtime Stability, Performance, Artifact Management & Manual LLM / 运行态稳定性、性能治理、文件发布管理与手动推理桥接
 
 ### Added / 新增
 
-- **可开关的渐进式手动 LLM 桥接模式**（`93bbae0`, `f62c1e5`）：新增 `/v1/responses` 与 `/mcp/manual` 手动推理桥接队列、Nexus 远程控制同步、会话上下文缓存纠偏、图片内存预算控制及 Web 控制台「手动推理」页与持久化配置项。
+- **Web 仪表盘「文件发布」管理与多格式在线预览**（`33ac829`）：新增文件发布页（`Published.tsx` / `ArtifactPreview.tsx`），支持查看有效发布物、复制/打开公网签名链接、延期与撤销，支持从控制面按本机路径（文件或目录 `.tar.gz`）或单文件上传（≤ 20 MiB）主动发布（`POST /internal/runtime/artifacts`），并通过内容流接口（`GET/HEAD /internal/runtime/artifacts/{id}/content`，支持 Range、CSP 与代理直通）提供图片、SVG、Markdown、JSON/JSONL、CSV/TSV 表格、代码/文本、PDF 与音视频在线预览及下载。
+- **可开关的渐进式手动 LLM 桥接模式与 Token 估算切换**（`93bbae0`, `f62c1e5`, `3bf00a0`）：新增 `/v1/responses` 与 `/mcp/manual` 手动推理桥接队列、Nexus 远程控制同步、会话上下文缓存纠偏、图片内存预算控制、Codex `additional_tools` 兼容，以及 `AGENTDOCK_USAGE_COUNT_MODE`（`tiktoken` 默认 `cl100k_base` 与 `chars` 按字符数 `/ 4` 切换）与 Web 控制台「手动推理」页和持久化配置项。
 - **NexusDock Workers 发行版与协议版本识别**（`b8fda92`）：`nexusbridge`、`agentdock nexus pair|status`、`evolution` 生命周期客户端与 Web 控制台支持解析并持久化 NexusDock Workers 版本标识（`edition=workers`、`protocol_version=2`、`contract_version=0.9.0`），透传 `tool.call` 上游请求头并兼容结构化 `409 LIFECYCLE_REVISION_CONFLICT` 错误。
 - **调用追踪按项目分组**（`b8fda92`）：Web 仪表盘调用追踪页左侧新增「按时间 / 按项目」视图切换。按项目视图取每条调用自身的路径信号分组——优先命令工作目录 `command.workdir`，其次文件变更探测到的 `project_root`，因此没有关联任务的自由调用也能进组；组头聚合次数、失败数与平均耗时，同名不同父路径用最短可区分后缀命名，无路径信号的落「未分类」并固定排最后。分组只是展示投影，工具 chips、请求头分组、成功/失败与搜索的筛选语义不变。新增 `src/lib/traceProjects.ts` 与 6 个 `node:test` 用例。
 
 ### Changed / 调整
 
-- **全链路请求取消透传与状态码细分**：`runtimeapi.Dispatch` 向 `/alerts`、`/overview`、`/tasks`、`/skills` 透传请求 `ctx`；`taskstate.Store` 改用可取消信号量锁并在文件遍历循环内响应取消退出，消除客户端超时重试导致的锁护航堆积；HTTP 层将 `context.Canceled` 映射为 `499 REQUEST_CANCELED`、`context.DeadlineExceeded` 映射为 `504 RUNTIME_API_TIMEOUT`，并抑制对端断连触发的 `broken pipe` 告警刷屏。
-- **Web 仪表盘按需轮询**：`desktop/web-dashboard/src/App.tsx` 由固定每 10s 全量并发拉取 12 个接口改为页面可见性感知（后台标签页暂停）+ 在途防重入锁 + 仅拉取顶栏摘要与当前激活页所需接口，切换页面或恢复可见时立即补刷。
-- **macOS 菜单栏健康检查解耦与去抖**：`AppDelegate.refreshStatus()` 增加在途单飞合并并先行发布 `ServiceStatus`（不再串行等待 `/internal/runtime/alerts`）；`ServiceController` 优先探测 `/healthz`（失败时 `300ms` 重试 1 次）以省去健康态 `launchctl print` 子进程，并加入 1 周期瞬时超时去抖防止高负载抖动误报「服务异常」；`RuntimeTrace*` 纯解码线模型收敛至 `ServiceController.swift`。
+- **全链路请求取消透传与状态码细分**（`33ac829`）：`runtimeapi.Dispatch` 向 `/alerts`、`/overview`、`/tasks`、`/skills` 透传请求 `ctx`；`taskstate.Store` 改用可取消信号量锁并在文件遍历循环内响应取消退出，消除客户端超时重试导致的锁护航堆积；HTTP 层将 `context.Canceled` 映射为 `499 REQUEST_CANCELED`、`context.DeadlineExceeded` 映射为 `504 RUNTIME_API_TIMEOUT`，并抑制对端断连触发的 `broken pipe` 告警刷屏。
+- **Web 仪表盘按需轮询**（`33ac829`）：`desktop/web-dashboard/src/App.tsx` 由固定每 10s 全量并发拉取全部接口改为页面可见性感知（后台标签页暂停）+ 在途防重入锁 + 仅拉取顶栏摘要与当前激活页所需接口，切换页面、恢复可见或收到发布物事件时立即补刷。
+- **macOS 菜单栏健康检查解耦与去抖**（`33ac829`）：`AppDelegate.refreshStatus()` 增加在途单飞合并并先行发布 `ServiceStatus`（不再串行等待 `/internal/runtime/alerts`）；`ServiceController` 优先探测 `/healthz`（失败时 `300ms` 重试 1 次）以省去健康态 `launchctl print` 子进程，并加入 1 周期瞬时超时去抖防止高负载抖动误报「服务异常」；`RuntimeTrace*` 纯解码线模型收敛至 `ServiceController.swift`。
 
 ### Performance / 性能
 
 - **追踪脱敏、Token 采样与仪表盘代理热路径（第一轮）**（`55a90bf`）：`RedactSecrets` / `redactTracePayload` 零分配快路径、大结果 JSON Token 采样外推、Trace 环形缓冲双缓冲滑动复用、`/dashboard/api/*` 代理流式快速脱敏、MCP `tools/call` 单次序列化及 `rg --json` 流式解析。
-- **任务索引、Skill 扫描与工具内核热路径（第二轮）**：`taskstate.Store` 新增基于 `os.SameFile + Size + ModTime` 的增量快照缓存与零深拷贝 `OverviewCountsContext`；`TraceStore.DiskBytes` 增加目录 `.jsonl` 指纹短缓存；`RuntimeSkills` 合并重复 `Acquire`/`WalkDir` 并按包目录树指纹缓存摘要，`ParseSkillMetadata` 免除 Markdown 正文分配，`~/.agents/skills` 增加逐文件元数据缓存；`SafeTruncateString`、`DiffSections`、`sliceText`、`.gitignore` 目录级匹配缓存、`fd` 可执行路径缓存及 `InputValidator` 归一化参数快路径全面降低分配。
+- **任务索引、Skill 扫描与工具内核热路径（第二轮）**（`33ac829`）：`taskstate.Store` 新增基于 `os.SameFile + Size + ModTime` 的增量快照缓存与零深拷贝 `OverviewCountsContext`；`TraceStore.DiskBytes` 增加目录 `.jsonl` 指纹短缓存；`RuntimeSkills` 合并重复 `Acquire`/`WalkDir` 并按包目录树指纹缓存摘要，`ParseSkillMetadata` 免除 Markdown 正文分配，`~/.agents/skills` 增加逐文件元数据缓存；`SafeTruncateString`、`DiffSections`、`sliceText`、`.gitignore` 目录级匹配缓存、`fd` 可执行路径缓存及 `InputValidator` 归一化参数快路径全面降低分配。
 
 ### Fixed / 修复
 
-- 修复 `read_file` 工具 `sliceText` 在 `start_line > end_line` 时触发 `slice bounds out of range` Panic 的问题。
+- 修复 `read_file` 工具 `sliceText` 在 `start_line > end_line` 时触发 `slice bounds out of range` Panic 的问题（`33ac829`）。
 
 ### Removed / 移除
 

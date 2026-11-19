@@ -15,6 +15,7 @@ internal readonly record struct TrayIconBounds(int Left, int Top, int Right, int
 internal enum TrayCommand
 {
     Open,
+    OpenWebDashboard,
     CopyLocalMcp,
     CopyPublicMcp,
     RegenerateQuickTunnel,
@@ -74,6 +75,7 @@ internal sealed class TrayIconHost : IDisposable
     private const uint OpenRuntimeCommand = 10;
     private const uint OpenDocumentationCommand = 11;
     private const uint ExitCommand = 12;
+    private const uint OpenWebDashboardCommand = 13;
 
     private readonly string _windowClassName = $"AgentDock.Tray.{Guid.NewGuid():N}";
     private readonly WindowProc _windowProc;
@@ -224,6 +226,8 @@ internal sealed class TrayIconHost : IDisposable
 
             // 2. Open AgentDock
             _ = AppendMenuW(menu, MfString, OpenCommand, UiText.Get("TrayShowMainWindow"));
+            // 只读 Web 仪表盘由 Core 提供；Core 未运行时打开只会得到连接失败页。
+            AppendCommand(menu, OpenWebDashboardCommand, UiText.Get("TrayOpenWebDashboard"), state.Available && state.CoreRunning);
 
             // 3-4. Core actions
             _ = AppendMenuW(menu, MfSeparator, 0, null);
@@ -251,6 +255,7 @@ internal sealed class TrayIconHost : IDisposable
             var action = command switch
             {
                 OpenCommand => TrayCommand.Open,
+                OpenWebDashboardCommand => TrayCommand.OpenWebDashboard,
                 StartCommand => TrayCommand.Start,
                 RestartCommand => TrayCommand.Restart,
                 CheckUpdatesCommand => TrayCommand.CheckUpdates,

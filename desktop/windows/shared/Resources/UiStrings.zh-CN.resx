@@ -951,6 +951,12 @@
   <data name="TrayShowMainWindow" xml:space="preserve">
     <value>显示主窗口</value>
   </data>
+  <data name="TrayOpenWebDashboard" xml:space="preserve">
+    <value>打开 Web 仪表盘</value>
+  </data>
+  <data name="WebDashboardUrlUnavailable" xml:space="preserve">
+    <value>本机 Web 仪表盘地址不可用。</value>
+  </data>
   <data name="TrayCheckForUpdates" xml:space="preserve">
     <value>检查更新</value>
   </data>

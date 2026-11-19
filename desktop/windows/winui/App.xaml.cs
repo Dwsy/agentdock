@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.UI.Xaml;
@@ -235,6 +236,9 @@ public partial class NativeApp : Application
             case TrayCommand.Open:
                 ShowControlPanel();
                 break;
+            case TrayCommand.OpenWebDashboard:
+                await OpenWebDashboardFromTrayAsync();
+                break;
             case TrayCommand.Start:
                 await RunTrayActionAsync("start");
                 await RefreshTrayMenuStateAsync();
@@ -252,6 +256,23 @@ public partial class NativeApp : Application
             case TrayCommand.Exit:
                 await StopCoreAndExitAsync();
                 break;
+        }
+    }
+
+    private async Task OpenWebDashboardFromTrayAsync()
+    {
+        if (_runtime is null) return;
+        try
+        {
+            // 只读仪表盘随 Core 分发，地址取自 Core 实际监听的 LocalMcpUrl（严格回环、固定 /dashboard/）。
+            // UseShellExecute 交给系统默认浏览器，不经过托盘自有窗口。
+            var dashboardUri = await _runtime.GetWebDashboardUriAsync();
+            Process.Start(new ProcessStartInfo(dashboardUri.AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            _runtime.RecordControlPanelFailure("tray", "open-dashboard", ex);
+            _trayIcon?.ShowNotification("AgentDock", ex.Message, TrayNotificationKind.Error);
         }
     }
 

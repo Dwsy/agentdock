@@ -29,6 +29,7 @@ type trayText struct {
 	RestartAgentDock     string
 	InstallUpdate        string
 	OpenRuntimeFolder    string
+	OpenWebDashboard     string
 	OpenDocumentation    string
 	ExitTray             string
 	CopyLocalFailed      string
@@ -42,6 +43,7 @@ type trayText struct {
 	RestartFailed        string
 	RestartStarted       string
 	UpdateFailed         string
+	OpenDashboardFailed  string
 	ClipboardNoAddress   string
 	ClipboardAllocFailed string
 	ClipboardLockFailed  string
@@ -70,6 +72,7 @@ var trayTextEnglish = trayText{
 	RestartAgentDock:     "Restart AgentDock",
 	InstallUpdate:        "Check for and install updates",
 	OpenRuntimeFolder:    "Open runtime folder",
+	OpenWebDashboard:     "Open Web Dashboard",
 	OpenDocumentation:    "Open documentation",
 	ExitTray:             "Exit tray",
 	CopyLocalFailed:      "Failed to copy local MCP address: %v",
@@ -83,6 +86,7 @@ var trayTextEnglish = trayText{
 	RestartFailed:        "Failed to restart AgentDock: %v",
 	RestartStarted:       "Restarting AgentDock.",
 	UpdateFailed:         "Failed to launch updater: %v",
+	OpenDashboardFailed:  "failed to open the web dashboard; ShellExecute error code %d",
 	ClipboardNoAddress:   "No address is available to copy",
 	ClipboardAllocFailed: "failed to allocate clipboard memory: %v",
 	ClipboardLockFailed:  "failed to lock clipboard memory: %v",
@@ -111,6 +115,7 @@ var trayTextChinese = trayText{
 	RestartAgentDock:     "重启 AgentDock",
 	InstallUpdate:        "检查并安装更新",
 	OpenRuntimeFolder:    "打开运行目录",
+	OpenWebDashboard:     "打开 Web 仪表盘",
 	OpenDocumentation:    "打开使用文档",
 	ExitTray:             "退出托盘",
 	CopyLocalFailed:      "复制本地 MCP 地址失败：%v",
@@ -124,6 +129,7 @@ var trayTextChinese = trayText{
 	RestartFailed:        "重启 AgentDock 失败：%v",
 	RestartStarted:       "正在重启 AgentDock。",
 	UpdateFailed:         "启动更新失败：%v",
+	OpenDashboardFailed:  "打开 Web 仪表盘失败，ShellExecute 错误码 %d",
 	ClipboardNoAddress:   "没有可复制的地址",
 	ClipboardAllocFailed: "分配剪贴板内存失败: %v",
 	ClipboardLockFailed:  "锁定剪贴板内存失败: %v",

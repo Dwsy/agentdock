@@ -19,6 +19,7 @@ public sealed class RuntimeService : IDisposable
     private const string TunnelTokenEntropy = "agentdock.cloudflare.tunnel.v1";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string UpdateUiHandoffEnvironment = "AGENTDOCK_UPDATE_UI_HANDOFF";
+    private const string WebDashboardPath = "/dashboard/";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -126,6 +127,22 @@ public sealed class RuntimeService : IDisposable
     {
         var manifest = await ReadRuntimeManifestAsync(cancellationToken) ?? new RuntimeManifest();
         return await ReadControlPanelSettingsAsync(manifest, cancellationToken);
+    }
+
+    /// <summary>
+    /// 返回本机只读 Web 仪表盘地址。来源是 <see cref="RuntimeSnapshot.LocalMcpUrl"/>
+    /// （Core 实际监听地址），沿用 <see cref="TryCreateLoopbackRuntimeUri"/> 的严格回环构造：
+    /// 只保留校验过的 http scheme 与回环 host/port，userinfo、query、fragment 一律丢弃，
+    /// 路径固定 <see cref="WebDashboardPath"/>。
+    /// </summary>
+    public async Task<Uri> GetWebDashboardUriAsync(CancellationToken cancellationToken = default)
+    {
+        var snapshot = await GetSnapshotAsync(cancellationToken);
+        if (!TryCreateLoopbackRuntimeUri(snapshot.LocalMcpUrl, WebDashboardPath, out var dashboardUri))
+        {
+            throw new InvalidOperationException(UiText.Get("WebDashboardUrlUnavailable"));
+        }
+        return dashboardUri;
     }
 
     public async Task<NexusConnectionSnapshot> GetNexusConnectionSnapshotAsync(
@@ -920,12 +937,9 @@ public sealed class RuntimeService : IDisposable
             return false;
         }
 
-        uri = new UriBuilder(localUri)
-        {
-            Path = path,
-            Query = "",
-            Fragment = ""
-        }.Uri;
+        // 从裸 scheme/host/port 重建，不复活源地址里的 userinfo（UriBuilder(Uri) 会复制它），
+        // 查询串与片段同样不进入运行时接口和浏览器地址栏。
+        uri = new UriBuilder(Uri.UriSchemeHttp, localUri.Host, localUri.Port, path).Uri;
         return true;
     }
 

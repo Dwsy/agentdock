@@ -951,6 +951,12 @@ Update now?</value>
   <data name="TrayShowMainWindow" xml:space="preserve">
     <value>Show main window</value>
   </data>
+  <data name="TrayOpenWebDashboard" xml:space="preserve">
+    <value>Open Web Dashboard</value>
+  </data>
+  <data name="WebDashboardUrlUnavailable" xml:space="preserve">
+    <value>The local web dashboard address is unavailable.</value>
+  </data>
   <data name="TrayCheckForUpdates" xml:space="preserve">
     <value>Check for updates</value>
   </data>

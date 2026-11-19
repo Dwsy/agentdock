@@ -39,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onOpenAgentDock: { [weak self] in
             self?.showSetup()
         },
+        onOpenWebDashboard: { [weak self] in
+            self?.openWebDashboard()
+        },
         onOpenSettings: { [weak self] in
             self?.showSettings()
         },

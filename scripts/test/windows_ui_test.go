@@ -568,6 +568,63 @@ func TestWindowsRuntimeSnapshotUsesSingleNativeServiceStatus(t *testing.T) {
 	}
 }
 
+func TestWindowsTrayDashboardOpensSnapshotLoopbackAddress(t *testing.T) {
+	service := readWindowsNativeFile(t, "shared", "Services", "RuntimeService.cs")
+	app := readWindowsNativeFile(t, "winui", "App.xaml.cs")
+	tray := readWindowsNativeFile(t, "winui", "TrayIconHost.cs")
+	en := readWindowsNativeFile(t, "shared", "Resources", "UiStrings.resx")
+	zh := readWindowsNativeFile(t, "shared", "Resources", "UiStrings.zh-CN.resx")
+
+	dashboardStart := strings.Index(service, "public async Task<Uri> GetWebDashboardUriAsync(")
+	nexusStart := strings.Index(service, "public async Task<NexusConnectionSnapshot> GetNexusConnectionSnapshotAsync(")
+	if dashboardStart < 0 || nexusStart <= dashboardStart {
+		t.Fatal("Windows dashboard URI method boundaries are missing")
+	}
+	dashboardBody := service[dashboardStart:nexusStart]
+	for _, want := range []string{
+		"var snapshot = await GetSnapshotAsync(",
+		"TryCreateLoopbackRuntimeUri(snapshot.LocalMcpUrl, WebDashboardPath, out var dashboardUri)",
+	} {
+		if !strings.Contains(dashboardBody, want) {
+			t.Fatalf("Windows dashboard URI must derive from the runtime snapshot %q", want)
+		}
+	}
+	// 端口设置已经由 GetSnapshotAsync 归一到 LocalMcpUrl，方法内不得再另造地址。
+	for _, forbidden := range []string{"settings.Port", "http://127.0.0.1:"} {
+		if strings.Contains(dashboardBody, forbidden) {
+			t.Fatalf("Windows dashboard URI must not build its own origin via %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		`private const string WebDashboardPath = "/dashboard/";`,
+		// 从裸 scheme/host/port 重建，源地址的 userinfo 不会被复制进浏览器地址。
+		"new UriBuilder(Uri.UriSchemeHttp, localUri.Host, localUri.Port, path).Uri",
+	} {
+		if !strings.Contains(service, want) {
+			t.Fatalf("Windows loopback URI construction missing %q", want)
+		}
+	}
+	if !strings.Contains(app, "case TrayCommand.OpenWebDashboard:") ||
+		!strings.Contains(app, "Process.Start(new ProcessStartInfo(dashboardUri.AbsoluteUri) { UseShellExecute = true })") {
+		t.Fatal("WinUI tray must open the dashboard with Process.Start and UseShellExecute")
+	}
+	for _, want := range []string{
+		`AppendCommand(menu, OpenWebDashboardCommand, UiText.Get("TrayOpenWebDashboard"), state.Available && state.CoreRunning)`,
+		"OpenWebDashboardCommand => TrayCommand.OpenWebDashboard,",
+	} {
+		if !strings.Contains(tray, want) {
+			t.Fatalf("Windows tray dashboard entry missing %q", want)
+		}
+	}
+	for _, resource := range []string{en, zh} {
+		for _, want := range []string{`name="TrayOpenWebDashboard"`, `name="WebDashboardUrlUnavailable"`} {
+			if !strings.Contains(resource, want) {
+				t.Fatalf("Windows tray dashboard localization missing %q", want)
+			}
+		}
+	}
+}
+
 func TestWindowsSharedRuntimeKeepsDiagnosticsAndDynamicLocalization(t *testing.T) {
 	runtime := readWindowsNativeFile(t, "shared", "Services", "RuntimeService.cs")
 	diagnostics := readWindowsNativeFile(t, "shared", "Services", "ControlPanelDiagnostics.cs")

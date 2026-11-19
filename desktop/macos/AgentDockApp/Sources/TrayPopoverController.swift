@@ -19,6 +19,7 @@ final class TrayPopoverController: NSObject, NSPopoverDelegate {
         service: ServiceController,
         onRequestStatusRefresh: @escaping () -> Void,
         onOpenAgentDock: @escaping () -> Void,
+        onOpenWebDashboard: @escaping () -> Void,
         onOpenSettings: @escaping () -> Void,
         onRunServiceAction: @escaping (TrayServiceAction) -> Void,
         onShowUpdateProgress: @escaping () -> Void,
@@ -34,6 +35,7 @@ final class TrayPopoverController: NSObject, NSPopoverDelegate {
             rootView: TrayPopoverView(
                 model: model,
                 onOpenAgentDock: onOpenAgentDock,
+                onOpenWebDashboard: onOpenWebDashboard,
                 onOpenSettings: onOpenSettings,
                 onRunServiceAction: onRunServiceAction,
                 onShowUpdateProgress: onShowUpdateProgress,
@@ -341,6 +343,7 @@ private enum StatusTone {
 private struct TrayPopoverView: View {
     @ObservedObject var model: TrayPopoverModel
     let onOpenAgentDock: () -> Void
+    let onOpenWebDashboard: () -> Void
     let onOpenSettings: () -> Void
     let onRunServiceAction: (TrayServiceAction) -> Void
     let onShowUpdateProgress: () -> Void
@@ -851,6 +854,14 @@ private struct TrayPopoverView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+
+            // 与右键菜单同一条目、同一开关条件：Core 未加载时仪表盘无内容可看，禁用即可。
+            Button(L10n.text("Open Web Dashboard")) {
+                onOpenWebDashboard()
+            }
+            .frame(maxWidth: .infinity)
+            .controlSize(.regular)
+            .disabled(!model.status.loaded)
 
             HStack(spacing: 8) {
                 Button(serviceActionTitle) {

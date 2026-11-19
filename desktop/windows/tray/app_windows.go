@@ -72,6 +72,7 @@ const (
 	menuOpenDocs        = 1008
 	menuExit            = 1009
 	menuRefreshQuickURL = 1010
+	menuOpenDashboard   = 1011
 )
 
 var (
@@ -418,9 +419,12 @@ func (app *trayApp) showMenu() {
 	appendMenu(menu, mfSeparator, 0, "")
 	appendMenu(menu, menuFlags(!state.Healthy && state.Manifest.AgentDockBinary != ""), menuStart, labels.StartAgentDock)
 	appendMenu(menu, menuFlags(state.Manifest.AgentDockBinary != ""), menuRestart, labels.RestartAgentDock)
-	appendMenu(menu, menuFlags(state.Manifest.AgentDockBinary != ""), menuUpdate, labels.InstallUpdate)
+	if state.Manifest.InstallChannel != "portable" {
+		appendMenu(menu, menuFlags(state.Manifest.AgentDockBinary != ""), menuUpdate, labels.InstallUpdate)
+	}
 	appendMenu(menu, mfSeparator, 0, "")
 	appendMenu(menu, mfString, menuOpenFolder, labels.OpenRuntimeFolder)
+	appendMenu(menu, menuFlags(state.Manifest.Port > 0), menuOpenDashboard, labels.OpenWebDashboard)
 	appendMenu(menu, mfString, menuOpenDocs, labels.OpenDocumentation)
 	appendMenu(menu, mfSeparator, 0, "")
 	appendMenu(menu, mfString, menuExit, labels.ExitTray)
@@ -486,6 +490,10 @@ func (app *trayApp) handleMenu(command uint16) {
 		}
 	case menuOpenFolder:
 		_ = exec.Command("explorer.exe", filepath.Dir(app.manifestPath)).Start()
+	case menuOpenDashboard:
+		if err := launchDashboard(state.Manifest); err != nil {
+			app.notify("AgentDock", err.Error(), true)
+		}
 	case menuOpenDocs:
 		app.openDocumentation()
 	case menuExit:
@@ -652,6 +660,17 @@ func restartAgentDock(manifest desktopruntime.Manifest) error {
 	return runNativeAgentDock(manifest, "service", "restart")
 }
 
+func launchDashboard(manifest desktopruntime.Manifest) error {
+	if manifest.Port < 1 || manifest.Port > 65535 {
+		return errors.New(currentTrayText().RuntimeIncomplete)
+	}
+	dashboardURL := fmt.Sprintf("http://127.0.0.1:%d/dashboard/", manifest.Port)
+	if result := shellExecute("open", dashboardURL, ""); result <= 32 {
+		return fmt.Errorf(currentTrayText().OpenDashboardFailed, result)
+	}
+	return nil
+}
+
 func launchUpdate(manifest desktopruntime.Manifest) error {
 	binary := strings.TrimSpace(manifest.AgentDockBinary)
 	if binary == "" {
@@ -664,19 +683,28 @@ func launchUpdate(manifest desktopruntime.Manifest) error {
 	if manifest.UsesScheduledTask() {
 		verb = "runas"
 	}
+	if result := shellExecute(verb, binary, "update"); result <= 32 {
+		return fmt.Errorf(currentTrayText().UpdateProgramFailed, result)
+	}
+	return nil
+}
+
+// shellExecute hands a target to the Windows shell. It returns the raw
+// ShellExecute result (<= 32 is an error) so callers keep their own wording.
+func shellExecute(verb, target, parameters string) uintptr {
 	verbPointer, _ := windows.UTF16PtrFromString(verb)
-	binaryPointer, _ := windows.UTF16PtrFromString(binary)
-	parametersPointer, _ := windows.UTF16PtrFromString("update")
+	targetPointer, _ := windows.UTF16PtrFromString(target)
+	var parametersPointer *uint16
+	if parameters != "" {
+		parametersPointer, _ = windows.UTF16PtrFromString(parameters)
+	}
 	result, _, _ := procShellExecuteW.Call(
 		0,
 		uintptr(unsafe.Pointer(verbPointer)),
-		uintptr(unsafe.Pointer(binaryPointer)),
+		uintptr(unsafe.Pointer(targetPointer)),
 		uintptr(unsafe.Pointer(parametersPointer)),
 		0,
 		swShow,
 	)
-	if result <= 32 {
-		return fmt.Errorf(currentTrayText().UpdateProgramFailed, result)
-	}
-	return nil
+	return result
 }

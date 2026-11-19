@@ -58,6 +58,15 @@ func TestResolveTrayLocaleHonorsExplicitPreference(t *testing.T) {
 	}
 }
 
+func TestTrayTextProvidesWebDashboardEntry(t *testing.T) {
+	if got := trayTextEnglish.OpenWebDashboard; got != "Open Web Dashboard" {
+		t.Fatalf("English web dashboard menu=%q", got)
+	}
+	if got := trayTextChinese.OpenWebDashboard; got != "打开 Web 仪表盘" {
+		t.Fatalf("Chinese web dashboard menu=%q", got)
+	}
+}
+
 func TestReadTrayLanguagePreference(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("LOCALAPPDATA", root)

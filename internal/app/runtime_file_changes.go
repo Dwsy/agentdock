@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/uvwt/agentdock/internal/observability"
+	toolcore "github.com/uvwt/agentdock/internal/tool/core"
+	toolfile "github.com/uvwt/agentdock/internal/tool/file"
 	"github.com/uvwt/agentdock/internal/textutil"
 )
 
@@ -42,6 +44,11 @@ func traceFileChanges(tool string, args map[string]any, result *Result, success 
 		return nil
 	}
 
+	// file_edit 把完整编辑结果放在进程内键里，模型侧只收到精简摘要。
+	// 历史层优先读取完整副本；没有该键时仍兼容直接调用工具的旧路径。
+	if history, ok := payload[toolfile.FileEditHistoryKey].(toolcore.Result); ok {
+		payload = map[string]any(history)
+	}
 	diff, _ := payload["diff_preview"].(string)
 	truncated, _ := payload["truncated"].(bool)
 	preview := textutil.SafeTruncateString(diff, traceFileDiffBytes)
@@ -117,6 +124,9 @@ func traceCodeChangeCounts(tool string, result *Result, success bool) (int, int)
 		return 0, 0
 	}
 	payload := *result
+	if history, ok := payload[toolfile.FileEditHistoryKey].(toolcore.Result); ok {
+		payload = map[string]any(history)
+	}
 	if dryRun, _ := payload["dry_run"].(bool); dryRun {
 		return 0, 0
 	}

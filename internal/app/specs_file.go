@@ -17,7 +17,7 @@ func fileToolSpecs() []ToolSpec {
 		{Name: "search_text", Contract: fileToolContract, Title: "Search text", Description: toolfile.ToolDescription("Search UTF-8 files for text or regex matches. Relative paths search ~/AgentDock by default; absolute paths are allowed."), Annotations: readOnlyToolAnnotations(false), Handler: typedToolHandler("search_text", func(ctx context.Context, r *Runtime, request toolfile.SearchRequest) (Result, error) {
 			return r.files.SearchText(ctx, request)
 		})},
-		{Name: "file_edit", Contract: fileToolContract, Title: "Edit file", Description: toolfile.EditDescription("Edit files through one action-based entrypoint: replace, patch, add, delete, or move. Relative paths resolve from ~/AgentDock; absolute and ~/ paths use Host rules."), Annotations: mutatingToolAnnotations(true, false), Handler: typedToolHandler("file_edit", func(ctx context.Context, r *Runtime, request toolfile.EditRequest) (Result, error) {
+		{Name: "file_edit", Contract: fileToolContract, Title: "Edit file", Description: toolfile.EditDescription("Edit files through one action-based entrypoint: replace, patch, add, delete, or move. Relative paths resolve from ~/AgentDock; absolute and ~/ paths use Host rules. Returns success plus counts only; use read_file to inspect changes."), Annotations: mutatingToolAnnotations(true, false), Handler: typedToolHandler("file_edit", func(ctx context.Context, r *Runtime, request toolfile.EditRequest) (Result, error) {
 			return r.files.Edit(ctx, request)
 		})},
 	}

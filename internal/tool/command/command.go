@@ -117,7 +117,7 @@ func (svc *Service) Exec(ctx context.Context, request ExecRequest) (Result, erro
 	storeSession := func(reason string) Result {
 		svc.storeReservedSession(s)
 		reservationActive = false
-		result := snapshotResult(s.Snapshot("running", maxBytes))
+		result := svc.snapshotResult(s.Snapshot("running", maxBytes))
 		result["sandbox"] = preparationStatusResult(sandboxStatus)
 		result["session_reason"] = reason
 		result["observe_after_ms"] = 1000
@@ -157,7 +157,7 @@ func (svc *Service) Exec(ctx context.Context, request ExecRequest) (Result, erro
 	}
 	err = s.WaitError()
 	s.Cancel()
-	result := snapshotResult(s.Snapshot("exited", maxBytes))
+	result := svc.snapshotResult(s.Snapshot("exited", maxBytes))
 	result["sandbox"] = preparationStatusResult(sandboxStatus)
 	if s.TimedOut {
 		result["status"] = "timeout"
@@ -204,11 +204,11 @@ func commandTimeout(requested *int) (time.Duration, error) {
 }
 
 func commandOutputLimit(requested *int) int {
-	return boundedInt(intValue(requested, 65536), 65536, 1, maxCommandOutputBytes)
+	return boundedInt(intValue(requested, session.DefaultOutputBytes), session.DefaultOutputBytes, 1, maxCommandOutputBytes)
 }
 
 // snapshotResult 是 Command capability 向外部 Tool Result 的输出边界；Session 核心只暴露强类型快照。
-func snapshotResult(snapshot session.Snapshot) Result {
+func (svc *Service) snapshotResult(snapshot session.Snapshot) Result {
 	result := Result{
 		"session_id": snapshot.SessionID, "status": snapshot.Status,
 		"stdout": snapshot.Stdout, "stderr": snapshot.Stderr,
@@ -233,7 +233,45 @@ func snapshotResult(snapshot session.Snapshot) Result {
 	if snapshot.Workdir != "" {
 		result["workdir"] = snapshot.Workdir
 	}
+	svc.attachSpilledOutput(result, snapshot)
 	return result
+}
+
+// attachSpilledOutput 把被裁剪掉的完整输出写到 <AgentDockHome>/tmp/，
+// 并在结果里给出路径与提示，让模型用命令自行读取外挂文件。
+func (svc *Service) attachSpilledOutput(result Result, snapshot session.Snapshot) {
+	if !snapshot.StdoutSpilled && !snapshot.StderrSpilled {
+		return
+	}
+	dir := filepath.Join(svc.config().AgentDockHome, "tmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		result["output_spill_error"] = err.Error()
+		return
+	}
+	file, err := os.CreateTemp(dir, "command-output-*.txt")
+	if err != nil {
+		result["output_spill_error"] = err.Error()
+		return
+	}
+	path := file.Name()
+	write := func(label, content string) {
+		if content == "" {
+			return
+		}
+		_, _ = fmt.Fprintf(file, "----- %s -----\n%s\n", label, content)
+	}
+	if snapshot.StdoutSpilled {
+		write("stdout", snapshot.StdoutFull)
+	}
+	if snapshot.StderrSpilled {
+		write("stderr", snapshot.StderrFull)
+	}
+	if err := file.Close(); err != nil {
+		result["output_spill_error"] = err.Error()
+		return
+	}
+	result["full_output_path"] = path
+	result["output_notice"] = "Full output: " + path + ". Output is truncated to the last 2000 lines or 50KB (whichever is hit first); read the file with a command when needed."
 }
 
 func preparationStatusResult(status session.PreparationStatus) map[string]any {
@@ -278,7 +316,7 @@ func (svc *Service) writeStdin(request SessionActRequest) (Result, error) {
 	case <-s.Done:
 		return svc.consumeCompletedSession(s, maxBytes), nil
 	default:
-		return snapshotResult(s.Peek("running", maxBytes)), nil
+		return svc.snapshotResult(s.Peek("running", maxBytes)), nil
 	}
 }
 
@@ -286,7 +324,7 @@ func (svc *Service) consumeCompletedSession(s *session.Session, maxBytes int) Re
 	err := s.WaitError()
 	s.Cancel()
 	svc.sessions.Delete(s.ID)
-	result := snapshotResult(s.Snapshot("exited", maxBytes))
+	result := svc.snapshotResult(s.Snapshot("exited", maxBytes))
 	if s.TimedOut {
 		result["status"] = "timeout"
 	}
@@ -325,7 +363,7 @@ func (svc *Service) killSession(request SessionActRequest) (Result, error) {
 		)
 	}
 	svc.sessions.Delete(s.ID)
-	result := snapshotResult(s.Snapshot("killed", commandOutputLimit(request.MaxOutputBytes)))
+	result := svc.snapshotResult(s.Snapshot("killed", commandOutputLimit(request.MaxOutputBytes)))
 	if err := s.WaitError(); err != nil {
 		result["command_error"] = err.Error()
 	}
@@ -424,7 +462,7 @@ func (svc *Service) sessionStatus(request SessionObserveRequest) (Result, error)
 	case <-s.Done:
 		return svc.consumeCompletedSession(s, maxBytes), nil
 	default:
-		return snapshotResult(s.Snapshot("running", maxBytes)), nil
+		return svc.snapshotResult(s.Snapshot("running", maxBytes)), nil
 	}
 }
 

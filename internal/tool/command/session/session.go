@@ -73,6 +73,10 @@ type Snapshot struct {
 	Status             string
 	Stdout             string
 	Stderr             string
+	StdoutSpilled      bool
+	StderrSpilled      bool
+	StdoutFull         string
+	StderrFull         string
 	ElapsedMS          int64
 	TimedOut           bool
 	Terminal           string
@@ -381,8 +385,14 @@ func Start(ctx context.Context, command, workdir string, env []string, timeout t
 }
 
 func StartWithTTY(ctx context.Context, command, workdir string, env []string, timeout time.Duration, tty bool, prepare PrepareFunc) (*Session, PreparationStatus, error) {
+	return StartWithTTYShell(ctx, command, workdir, env, timeout, tty, ShellSpec{}, prepare)
+}
+
+// StartWithTTYShell is StartWithTTY with an explicit interpreter. An empty spec
+// uses the platform default; callers that pass a shell config honour it here.
+func StartWithTTYShell(ctx context.Context, command, workdir string, env []string, timeout time.Duration, tty bool, spec ShellSpec, prepare PrepareFunc) (*Session, PreparationStatus, error) {
 	return StartCommandWithTTY(ctx, func(cmdCtx context.Context) *exec.Cmd {
-		cmd := shellCommand(cmdCtx, command)
+		cmd := shellCommandSpec(cmdCtx, command, spec)
 		cmd.Dir = workdir
 		cmd.Env = env
 		return cmd
@@ -557,6 +567,12 @@ func (s *Session) Snapshot(status string, maxBytes int) Snapshot {
 	return s.snapshot(status, maxBytes, true)
 }
 
+// DefaultOutputLines is the default tail-line limit for command output snapshots.
+const DefaultOutputLines = 2000
+
+// DefaultOutputBytes is the default tail-byte limit for command output snapshots.
+const DefaultOutputBytes = 50 * 1024
+
 // Peek returns the current unread output without advancing the observation cursors.
 // Mutation tools use it so a following status call still receives the output.
 func (s *Session) Peek(status string, maxBytes int) Snapshot {
@@ -580,18 +596,21 @@ func (s *Session) snapshot(status string, maxBytes int, advance bool) Snapshot {
 		s.stdoutCursor = len(stdoutFull)
 		s.stderrCursor = len(stderrFull)
 	}
-	stdout := trim(stdoutSegment, maxBytes)
-	stderr := trim(stderrSegment, maxBytes)
+	stdoutTrim := trimTail(stdoutSegment, maxBytes, DefaultOutputLines)
+	stderrTrim := trimTail(stderrSegment, maxBytes, DefaultOutputLines)
+	stdout, stderr := stdoutTrim.Text, stderrTrim.Text
 	return Snapshot{
 		SessionID: s.ID, Status: status, Stdout: stdout, Stderr: stderr,
+		StdoutSpilled: stdoutTrim.Spilled, StderrSpilled: stderrTrim.Spilled,
+		StdoutFull: stdoutSegment, StderrFull: stderrSegment,
 		ElapsedMS: time.Since(s.StartedAt).Milliseconds(), TimedOut: s.TimedOut, Terminal: s.Terminal,
 		StdoutOutputBytes: len([]byte(stdout)), StderrOutputBytes: len([]byte(stderr)),
 		StdoutTotalBytes: s.stdoutTotalBytes, StderrTotalBytes: s.stderrTotalBytes,
 		StdoutDroppedBytes: s.stdoutDroppedBytes, StderrDroppedBytes: s.stderrDroppedBytes,
-		StdoutOmittedBytes: omittedBytes(stdoutSegment, maxBytes), StderrOmittedBytes: omittedBytes(stderrSegment, maxBytes),
+		StdoutOmittedBytes: len([]byte(stdoutSegment)) - len([]byte(stdout)),
+		StderrOmittedBytes: len([]byte(stderrSegment)) - len([]byte(stderr)),
 		StdoutOutputLines: countLines(stdout), StderrOutputLines: countLines(stderr),
-		StdoutTruncated: maxBytes > 0 && len([]byte(stdoutSegment)) > maxBytes,
-		StderrTruncated: maxBytes > 0 && len([]byte(stderrSegment)) > maxBytes,
+		StdoutTruncated: stdoutTrim.Spilled, StderrTruncated: stderrTrim.Spilled,
 		Completed:       s.completed, ExitCode: s.exitCode, CommandOK: s.exitCode == 0 && !s.TimedOut && s.inputErr == nil,
 		Runtime: s.execution.Runtime, WSLDistribution: s.execution.Distribution, Workdir: s.execution.Workdir,
 	}
@@ -626,15 +645,44 @@ func (w sessionOutputWriter) Write(data []byte) (int, error) {
 	return n, err
 }
 
-func trim(value string, maxBytes int) string {
-	return textutil.SafeTruncateString(value, maxBytes).Text
+// tailTruncation 是保留尾部的裁剪结果。Spilled 表示有内容被丢弃，
+// 调用方据此把完整输出写到临时文件并提示模型自行读取。
+type tailTruncation struct {
+	Text    string
+	Spilled bool
 }
 
-func omittedBytes(value string, maxBytes int) int {
-	if maxBytes <= 0 || len([]byte(value)) <= maxBytes {
-		return 0
+// trimTail 同时约束行数与字节数，哪个限制先命中就按哪个裁剪，保留末尾完整行。
+// 单行自身超过 maxBytes 时保留该行结尾（UTF-8 边界安全），而不是开头。
+func trimTail(value string, maxBytes, maxLines int) tailTruncation {
+	if value == "" {
+		return tailTruncation{Text: value}
 	}
-	return len([]byte(value)) - len([]byte(trim(value, maxBytes)))
+	lines := strings.Split(value, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	// 行数上限只在默认字节预算（模型侧调用）时生效：pi 的“2000 行或 50KB
+	// 先到为准”是给默认调用省 context 的。调用方显式放大 max_output_bytes
+	// （底层测试、需要完整输出的场景）时，那两个默认约束都不再适用，只按
+	// 字节上限裁剪，否则 1MB 预算仍被 2000 行悄悄削掉。
+	effectiveMaxLines := maxLines
+	if maxBytes > DefaultOutputBytes {
+		effectiveMaxLines = 0
+	}
+	if effectiveMaxLines > 0 && len(lines) > effectiveMaxLines {
+		lines = lines[len(lines)-effectiveMaxLines:]
+	}
+	kept := strings.Join(lines, "\n")
+	if len(lines) > 0 && strings.HasSuffix(value, "\n") {
+		kept += "\n"
+	}
+	spilled := kept != value
+	if maxBytes > 0 && len([]byte(kept)) > maxBytes {
+		kept = textutil.SafeTruncateTailString(kept, maxBytes).Text
+		spilled = true
+	}
+	return tailTruncation{Text: kept, Spilled: spilled}
 }
 
 func countLines(value string) int {

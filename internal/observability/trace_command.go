@@ -149,11 +149,13 @@ func (c *CommandTrace) trim() bool {
 	stderr, stderrTruncated := traceCommandPreview(c.Stderr, TraceCommandTextBytes)
 	c.Command, c.Stdout, c.Stderr = command, stdout, stderr
 	c.CommandPreviewTruncated = commandTruncated
-	c.StdoutPreviewTruncated = stdoutTruncated
-	c.StderrPreviewTruncated = stderrTruncated
+	// 工具层已裁剪过（tail+spill）时，预览标记同样为真：正文确实不完整了，
+	// 只是裁在 session 层而非这里的 8 KiB 预览，不能让 UI 看到两个矛盾的标志。
+	c.StdoutPreviewTruncated = stdoutTruncated || c.StdoutTruncated
+	c.StderrPreviewTruncated = stderrTruncated || c.StderrTruncated
 	// 摘要取自脱敏后的命令，否则列表页会把命令首行的 token 原样带出来。
 	c.Summary = traceCommandSummary(c.Command, c.Action)
-	return commandTruncated || stdoutTruncated || stderrTruncated
+	return commandTruncated || c.StdoutPreviewTruncated || c.StderrPreviewTruncated
 }
 
 // searchFields 让结构化命令内容参与自由文本搜索：正文一旦从 Arguments/Result

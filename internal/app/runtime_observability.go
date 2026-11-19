@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/uvwt/agentdock/internal/observability"
+	toolcore "github.com/uvwt/agentdock/internal/tool/core"
+	toolfile "github.com/uvwt/agentdock/internal/tool/file"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -113,6 +115,16 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 		var resultMap map[string]any
 		if result != nil {
 			resultMap = *result
+			if history, ok := resultMap[toolfile.FileEditHistoryKey].(toolcore.Result); ok {
+				merged := make(Result, len(resultMap)+len(history))
+				for key, value := range resultMap {
+					merged[key] = value
+				}
+				for key, value := range history {
+					merged[key] = value
+				}
+				resultMap = merged
+			}
 		}
 		command := observability.CommandTraceFrom(toolName, args, resultMap)
 		imagePreviewData, imagePreviewMimeType := traceImagePreviewPayload(result)

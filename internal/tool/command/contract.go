@@ -25,19 +25,19 @@ func InputSchema(name string) (map[string]any, bool) {
 		props["timeout_ms"] = boundedIntProp("Timeout in milliseconds. Must be positive and is capped at 86400000.", 1, 86400000)
 		props["execution_mode"] = map[string]any{"type": "string", "description": "Execution mode. Defaults to auto: wait up to yield_time_ms, then return a running session. sync waits for exit; async returns a session immediately.", "enum": []string{"auto", "sync", "async"}}
 		props["yield_time_ms"] = boundedIntProp("Foreground wait threshold for execution_mode=auto. Defaults to 5000 and is capped at 30000 milliseconds.", 0, 30000)
-		props["max_output_bytes"] = boundedIntProp("Maximum output bytes. Defaults to 65536 and is capped at 4194304.", 1, MaxOutputBytes)
+		props["max_output_bytes"] = boundedIntProp("Maximum output bytes. Defaults to 51200 (50KB) and is capped at 4194304.", 1, MaxOutputBytes)
 		props["stdin"] = stringProp("Initial stdin.")
 		props["tty"] = boolProp("Keep stdin open.")
 		required = []string{"cmd"}
 	case ToolSessionObserve:
 		props["action"] = map[string]any{"type": "string", "description": "Read-only session action.", "enum": []string{"list", "status"}}
 		props["session_id"] = stringProp("Session id returned by exec_command, required for status.")
-		props["max_output_bytes"] = boundedIntProp("Maximum output bytes. Defaults to 65536 and is capped at 4194304.", 1, MaxOutputBytes)
+		props["max_output_bytes"] = boundedIntProp("Maximum output bytes. Defaults to 51200 (50KB) and is capped at 4194304.", 1, MaxOutputBytes)
 	case ToolSessionAct:
 		props["action"] = map[string]any{"type": "string", "description": "Mutating session action.", "enum": []string{"write", "kill", "kill_all"}}
 		props["session_id"] = stringProp("Session id returned by exec_command, required for write/kill.")
 		props["chars"] = stringProp("Characters to write when action=write.")
-		props["max_output_bytes"] = boundedIntProp("Maximum output bytes. Defaults to 65536 and is capped at 4194304.", 1, MaxOutputBytes)
+		props["max_output_bytes"] = boundedIntProp("Maximum output bytes. Defaults to 51200 (50KB) and is capped at 4194304.", 1, MaxOutputBytes)
 	default:
 		return nil, false
 	}

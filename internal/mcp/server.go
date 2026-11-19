@@ -387,7 +387,7 @@ func dynamicMCPToolEnvelope(structured any) map[string]any {
 func cloneWithoutInternalImage(value map[string]any) map[string]any {
 	clean := make(map[string]any, len(value))
 	for key, item := range value {
-		if key == "_mcp_image_base64" || key == "_mcp_image_mime_type" {
+		if key == "_mcp_image_base64" || key == "_mcp_image_mime_type" || key == "_file_edit_history" {
 			continue
 		}
 		clean[key] = item

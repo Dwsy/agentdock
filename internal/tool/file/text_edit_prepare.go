@@ -42,7 +42,7 @@ func prepareTextReplacement(path, content string, request EditRequest) (Result, 
 	result := Result{
 		"path": path, "dry_run": request.DryRun,
 		"matches": len(indexes), "changed": updated != content,
-		"diff_preview": diffPreview, "truncated": diffTruncated,
+		"diff_preview": diffPreview, "truncated": diffTruncated, "success": true,
 		"files_changed": stats.FilesChanged, "insertions": stats.Insertions, "deletions": stats.Deletions,
 		"summary": editSummary(path, updated != content),
 	}
@@ -61,7 +61,7 @@ func prepareTextAddition(path, oldContent, content string, existed bool, request
 	}
 	return Result{
 		"action": "add", "path": path, "dry_run": request.DryRun,
-		"changed": changed, "diff_preview": diffPreview, "truncated": diffTruncated,
+		"changed": changed, "diff_preview": diffPreview, "truncated": diffTruncated, "success": true,
 		"files_changed": stats.FilesChanged, "insertions": stats.Insertions, "deletions": stats.Deletions,
 		"summary": editSummary(path, changed),
 	}, changed, nil

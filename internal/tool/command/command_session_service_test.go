@@ -19,8 +19,8 @@ func TestCommandOutputLimit(t *testing.T) {
 		args map[string]any
 		want int
 	}{
-		{name: "default", args: nil, want: 65536},
-		{name: "negative", args: map[string]any{"max_output_bytes": -1}, want: 65536},
+		{name: "default", args: nil, want: session.DefaultOutputBytes},
+		{name: "negative", args: map[string]any{"max_output_bytes": -1}, want: session.DefaultOutputBytes},
 		{name: "custom", args: map[string]any{"max_output_bytes": 1024}, want: 1024},
 		{name: "capped", args: map[string]any{"max_output_bytes": MaxOutputBytes + 1}, want: MaxOutputBytes},
 	} {

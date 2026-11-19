@@ -17,7 +17,11 @@ func (svc *Service) Edit(ctx context.Context, request EditRequest) (Result, erro
 		return nil, err
 	}
 	if selection.isWSL() {
-		return svc.fileEditWSL(ctx, request, selection)
+		result, err := svc.fileEditWSL(ctx, request, selection)
+		if result != nil {
+			result[FileEditHistoryKey] = fileEditHistory(result)
+		}
+		return result, err
 	}
 
 	action := strings.ToLower(strings.TrimSpace(request.Action))
@@ -41,8 +45,76 @@ func (svc *Service) Edit(ctx context.Context, request EditRequest) (Result, erro
 	}
 	if result != nil {
 		result["action"] = action
+		result[FileEditHistoryKey] = fileEditHistory(result)
 	}
 	return addFileRuntimeResult(result, selection), err
+}
+
+// FileEditHistoryKey holds the unabridged edit result inside the process for the
+// UI file-history layer. It is not part of the tool output schema and is removed
+// before the result reaches the model.
+const FileEditHistoryKey = "_file_edit_history"
+
+// fileEditHistory copies the metadata that file-change history needs. The copy
+// keeps the diff out of the LLM-facing result without mutating the map returned
+// by the individual edit actions.
+func fileEditHistory(result Result) Result {
+	keys := []string{
+		"action", "path", "new_path", "workdir", "dry_run", "changed",
+		"diff_preview", "truncated", "affected_files", "files_changed",
+		"insertions", "deletions",
+	}
+	history := make(Result, len(keys))
+	for _, key := range keys {
+		if value, ok := result[key]; ok {
+			history[key] = value
+		}
+	}
+	return history
+}
+
+// CompactEditResult is the LLM-facing shape of a successful file_edit call:
+// status, edited path and counts only. Diff text stays in FileEditHistoryKey
+// for observability and never enters the model context.
+func CompactEditResult(full Result) Result {
+	if full == nil {
+		return nil
+	}
+	changed, ok := full["changed"].(bool)
+	if !ok {
+		changed = full["action"] != "replace"
+	}
+	compact := Result{
+		"action":  full["action"],
+		"changed": changed,
+		"success": true,
+	}
+	if path, ok := full["path"]; ok {
+		compact["path"] = path
+	}
+	if matches, ok := full["matches"]; ok {
+		compact["matches"] = matches
+	}
+	if newPath, ok := full["new_path"]; ok {
+		compact["new_path"] = newPath
+	}
+	if summary, ok := full["summary"]; ok {
+		compact["summary"] = summary
+	}
+	if dryRun, ok := full["dry_run"]; ok {
+		compact["dry_run"] = dryRun
+	}
+	if truncated, ok := full["truncated"]; ok {
+		compact["truncated"] = truncated
+	}
+	if action, _ := full["action"].(string); action == "patch" {
+		for _, key := range []string{"affected_files", "files_changed", "insertions", "deletions"} {
+			if value, ok := full[key]; ok {
+				compact[key] = value
+			}
+		}
+	}
+	return compact
 }
 
 func (svc *Service) fileEditAdd(request EditRequest) (Result, error) {
@@ -134,7 +206,7 @@ func (svc *Service) fileEditDelete(request EditRequest) (Result, error) {
 	if snapshot.Info.IsDir() && !recursive {
 		return nil, toolErrorDetails("IS_DIRECTORY", "directory deletion requires recursive=true", "validation", map[string]any{"path": p.Display})
 	}
-	result := Result{"action": "delete", "path": p.Display, "dry_run": dryRun, "changed": true, "recursive": recursive, "summary": "deleted " + p.Display}
+	result := Result{"action": "delete", "path": p.Display, "dry_run": dryRun, "changed": true, "success": true, "recursive": recursive, "summary": "deleted " + p.Display}
 	if dryRun {
 		return result, nil
 	}
@@ -225,7 +297,7 @@ func (svc *Service) fileEditMove(request EditRequest) (Result, error) {
 		}
 	}
 	changed := src.Abs != dest.Abs
-	result := Result{"action": "move", "path": src.Display, "new_path": dest.Display, "dry_run": dryRun, "changed": changed, "summary": "moved " + src.Display + " to " + dest.Display}
+	result := Result{"action": "move", "path": src.Display, "new_path": dest.Display, "dry_run": dryRun, "changed": changed, "success": true, "summary": "moved " + src.Display + " to " + dest.Display}
 	if dryRun || !changed {
 		return result, nil
 	}

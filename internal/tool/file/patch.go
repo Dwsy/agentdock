@@ -146,7 +146,7 @@ func (svc *Service) applyEnvelopePatch(patch string, dryRun bool, basePath strin
 			return nil, err
 		}
 	}
-	return Result{"dry_run": dryRun, "workdir": basePath, "affected_files": affected, "summary": strings.Join(summaries, "\n"), "diff_preview": diffPreview, "truncated": diffTruncated, "files_changed": stats.FilesChanged, "insertions": stats.Insertions, "deletions": stats.Deletions}, nil
+	return Result{"dry_run": dryRun, "workdir": basePath, "affected_files": affected, "summary": strings.Join(summaries, "\n"), "diff_preview": diffPreview, "truncated": diffTruncated, "success": true, "files_changed": stats.FilesChanged, "insertions": stats.Insertions, "deletions": stats.Deletions}, nil
 }
 
 func ensurePatchPathUnused(staged map[string]stagedPatchFile, absPath, displayPath string) error {

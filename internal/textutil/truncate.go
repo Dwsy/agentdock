@@ -16,6 +16,19 @@ func SafeTruncateString(value string, maxBytes int) Truncation {
 	return Truncation{Text: value[:cut], Truncated: true, Omitted: len(value) - cut}
 }
 
+// SafeTruncateTailString 从结尾保留最多 maxBytes 字节，并在 UTF-8 边界处对齐。
+func SafeTruncateTailString(value string, maxBytes int) Truncation {
+	if maxBytes <= 0 || len(value) <= maxBytes {
+		return Truncation{Text: value}
+	}
+	start := len(value) - maxBytes
+	for start > 0 && start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	omitted := start
+	return Truncation{Text: value[start:], Truncated: true, Omitted: omitted}
+}
+
 func SafeTruncateBytes(data []byte, maxBytes int) Truncation {
 	if maxBytes <= 0 || len(data) <= maxBytes {
 		return Truncation{Text: string(data)}

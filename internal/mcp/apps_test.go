@@ -599,9 +599,10 @@ func TestMCPAppsBindResourcesDirectlyToBusinessTools(t *testing.T) {
 	if !ok || fileEditStructured["action"] != "replace" || fileEditStructured["dry_run"] != true || fileEditStructured["view"] != nil {
 		t.Fatalf("file_edit structuredContent = %#v", fileEditResult.StructuredContent)
 	}
-	diffPreview, _ := fileEditStructured["diff_preview"].(string)
-	if !strings.Contains(diffPreview, "beta") {
-		t.Fatalf("file_edit diff_preview = %q", diffPreview)
+	// file_edit now returns a compact status to the model; the diff body stays
+	// in the observability layer and is no longer part of structuredContent.
+	if fileEditStructured["success"] != true || fileEditStructured["changed"] != true {
+		t.Fatalf("file_edit compact result = %#v", fileEditStructured)
 	}
 	fileBytes, err := os.ReadFile(filePath)
 	if err != nil || string(fileBytes) != "alpha\n" {

@@ -38,6 +38,7 @@ func Serve(ctx context.Context, server *mcp.Server, runtime runtimeapi.Runtime, 
 	if err := publicArtifactStore.Cleanup(time.Now().UTC()); err != nil {
 		return fmt.Errorf("clean public artifacts: %w", err)
 	}
+	warnIfUnauthenticatedPublicExposure(cfg)
 	slog.Info("http server configured", "host", cfg.Host, "port", cfg.Port, "auth_required", authRequired, "endpoint", "/mcp")
 	mux.HandleFunc("/", statusPageHandler(server, runtime, cfg))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

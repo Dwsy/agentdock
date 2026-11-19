@@ -65,14 +65,36 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 		}
 		staticOK := cfg.AuthToken != "" && authorizer.Authorized(r)
 		oauthOK := authorizedOAuth(r, cfg, oauthStore)
-		if !authRequired && !isDirectLoopbackRequest(r) {
-			writeRuntimeAPIError(w, http.StatusForbidden, "LOCAL_ACCESS_REQUIRED", "runtime API requires local access or authentication")
-			return
+		if !authRequired {
+			// 配置了公网地址却没有任何认证：所有无凭证请求一律拒绝，即便
+			// 看起来来自本机回环（隧道终止 TLS 后正是这种形态）。
+			if strings.TrimSpace(cfg.OAuthServerURL) != "" {
+				writeRuntimeAPIError(w, http.StatusForbidden, "AUTH_REQUIRED_FOR_PUBLIC_EXPOSURE", "authentication is required when a public server URL is configured")
+				return
+			}
+			if !isDirectLoopbackRequest(r) {
+				writeRuntimeAPIError(w, http.StatusForbidden, "LOCAL_ACCESS_REQUIRED", "runtime API requires local access or authentication")
+				return
+			}
 		}
 		if authRequired && !staticOK && !oauthOK {
 			setBearerChallenge(w, cfg, r, strings.TrimSpace(r.Header.Get("Authorization")) != "")
 			writeRuntimeAPIError(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
 			return
+		}
+		// 带凭证的请求同样要校验 Host/Origin，防御 DNS rebinding 与跨站写入。
+		if authRequired && !validateRuntimeRequestOriginAndHost(r, cfg) {
+			writeRuntimeAPIError(w, http.StatusForbidden, "LOCAL_ACCESS_REQUIRED", "runtime API request failed host/origin validation")
+			return
+		}
+		// 带 JSON 请求体的管理端点强制 application/json，阻断 text/plain 等
+		// 浏览器 CORS 简单请求跨域写入。放在业务逻辑之前，被拒请求不产生副作用。
+		if requiresJSONContentType(r.Method, r.URL.Path) {
+			mediaType, _, parseErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if parseErr != nil || !strings.EqualFold(mediaType, "application/json") {
+				writeRuntimeAPIError(w, http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE", "content-type must be application/json")
+				return
+			}
 		}
 
 		body, err := runtimeRequestBody(r)
@@ -120,6 +142,24 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 		}
 		writeJSON(w, result)
 	}
+}
+
+// jsonBodyPostEndpoints are the management POST endpoints that accept a JSON
+// body. They require Content-Type: application/json so browsers cannot trigger
+// them as CORS "simple requests" (text/plain, form-urlencoded, multipart).
+var jsonBodyPostEndpoints = map[string]struct{}{
+	"/internal/runtime/mcp":               {},
+	"/internal/runtime/mcp/oauth/callback": {},
+	"/internal/runtime/evolve":            {},
+	runtimeapi.ResourceLibraryPath:        {},
+}
+
+func requiresJSONContentType(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	_, ok := jsonBodyPostEndpoints[strings.TrimSuffix(path, "/")]
+	return ok
 }
 
 func runtimeRequestBody(r *http.Request) ([]byte, error) {

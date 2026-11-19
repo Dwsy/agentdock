@@ -62,7 +62,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 
 ### 只读 Web 仪表盘契约
 
-- 前端源码在 `desktop/web-dashboard`（pnpm + React 19 + Tailwind 4 + Solid Glass），只读，不做任何写操作。`make dashboard` 产出 dist 并同步到 `internal/httpx/dashboard/dist`，由 `go:embed` 打进 Core；该 dist 随仓库提交，所以 `go build ./cmd/agentdock` 无需 Node 也自带完整控制台。
+- 前端源码在 `desktop/web-dashboard`（pnpm + React 19 + Tailwind 4 + Solid Glass）。数据页面只读；唯一具备写入能力的页面是「配置」与「远程访问」，其余页面一律不做写操作。`make dashboard` 产出 dist 并同步到 `internal/httpx/dashboard/dist`，由 `go:embed` 打进 Core；该 dist 随仓库提交，所以 `go build ./cmd/agentdock` 无需 Node 也自带完整控制台。
 - 浏览器访问 `http://127.0.0.1:<port>/dashboard/`（托盘右键菜单「打开 Web 仪表盘」，端口读 `agentdock.env` 的 `AGENTDOCK_PORT`，缺省 8765）。所有数据请求走同形前缀 `/dashboard/api/*`，**不要**让前端直连 `/internal/runtime/*`：
   - 生产由 `internal/httpx/dashboard.go` 的 loopback-only 代理把 `/dashboard/api/*` 重写成 `/internal/runtime/*`，服务端注入 `AGENTDOCK_AUTH_TOKEN`；开发由 `vite.config.ts` 的同形中间件代理。token 绝不进前端代码或 dist。
   - 代理对所有非 SSE 响应 JSON 递归脱敏（Authorization/Cookie/token/password 等）；SSE 事件流是摘要投影，流式透传不清头。直连 `/internal/runtime/*` 的 Bearer/OAuth 鉴权边界不变。
@@ -70,6 +70,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 - Vite `base` 由 `command` 决定：build 用 `/dashboard/`，dev 用 `/`。改前端路由或静态资源路径时，务必同时验证 dev（`:5173`）和 embedded（`:8765/dashboard/`）两种模式。
 - 数据接口约定：`/dashboard/api` 映射到 `/internal/runtime`，因此前端 `api.ts` 的 path 与 runtime 路由一一对应。新增 runtime 接口后，仪表盘要接入就在 `api.ts` 加类型与方法，不要另开后端通道。
 - 配置页：`GET/POST /internal/runtime/config`、`POST /internal/runtime/config/restart`（`ConfigRuntime` 可选能力，`internal/app/runtime_config.go`）。只暴露 `editableConfigKeys` 白名单（host/port/log_level/mcp_apps_mode/browser*/acp*/trace*/network_capture*），token/OAuth/设备身份**绝不回显或可改**；`init()` 会断言白名单不含敏感 key。写入用 `envstore.ParseFile` + `atomicfile.Write(0600)` 保留未知 key；校验失败返回 400 `CONFIG_INVALID`。重启走 `agentdock service restart --runtime-root`，只有 launchd/SMAppService 管理的实例可重启，手动启动的实例返回明确错误而不是杀掉后拉不回来。
+- 远程访问页：`GET /internal/runtime/remote` + `POST /internal/runtime/remote/{token,nexus/pair,tunnel}`（`RemoteAccessRuntime` 可选能力，`internal/app/runtime_remote_access.go`）。凭据类写入不进 `editableConfigKeys`，走独立端点各自校验：token 轮换原子写 env；Nexus 配对与 Tunnel 配置经独立 CLI 子进程（`agentdock nexus pair/status`、`agentdock tunnel configure`）执行，与桌面端同一条路径。信任边界不变：代理仅接受本机直连（隧道流量 403），密钥值任何情况下不回显（token 只报 configured）。
 - 前端改动后必跑 `make dashboard` 重生成并提交 embed dist，否则发布出去的 Core 仍是旧页面。
 
 ## Coding Style & Naming Conventions

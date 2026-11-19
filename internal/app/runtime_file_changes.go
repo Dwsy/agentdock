@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	"github.com/uvwt/agentdock/internal/observability"
+	"github.com/uvwt/agentdock/internal/textutil"
 	toolcore "github.com/uvwt/agentdock/internal/tool/core"
 	toolfile "github.com/uvwt/agentdock/internal/tool/file"
-	"github.com/uvwt/agentdock/internal/textutil"
 )
 
 // traceFileDiffBytes 限制单个文件变更保留的 diff 预览；工具本身最多返回 64 KiB，

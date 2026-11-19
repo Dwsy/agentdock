@@ -172,6 +172,3 @@ func TestSaveOverwritesExistingIdentityWithExpectedPermissions(t *testing.T) {
 		}
 	}
 }
-
-
-

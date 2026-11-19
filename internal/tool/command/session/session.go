@@ -609,9 +609,9 @@ func (s *Session) snapshot(status string, maxBytes int, advance bool) Snapshot {
 		StdoutDroppedBytes: s.stdoutDroppedBytes, StderrDroppedBytes: s.stderrDroppedBytes,
 		StdoutOmittedBytes: len([]byte(stdoutSegment)) - len([]byte(stdout)),
 		StderrOmittedBytes: len([]byte(stderrSegment)) - len([]byte(stderr)),
-		StdoutOutputLines: countLines(stdout), StderrOutputLines: countLines(stderr),
+		StdoutOutputLines:  countLines(stdout), StderrOutputLines: countLines(stderr),
 		StdoutTruncated: stdoutTrim.Spilled, StderrTruncated: stderrTrim.Spilled,
-		Completed:       s.completed, ExitCode: s.exitCode, CommandOK: s.exitCode == 0 && !s.TimedOut && s.inputErr == nil,
+		Completed: s.completed, ExitCode: s.exitCode, CommandOK: s.exitCode == 0 && !s.TimedOut && s.inputErr == nil,
 		Runtime: s.execution.Runtime, WSLDistribution: s.execution.Distribution, Workdir: s.execution.Workdir,
 	}
 }

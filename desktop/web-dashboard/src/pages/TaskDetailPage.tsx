@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Target, ListOrdered, GitBranch, Radio, AlertTriangle, FileText,
-  CheckCircle2, Circle, XCircle, Clock3, Activity, FolderTree, RefreshCw, Hash,
+  CheckCircle2, Circle, XCircle, Clock3, Activity, FolderTree, RefreshCw, Hash, Copy, Check,
 } from 'lucide-react';
 import { api, type Task, type TaskDetail, type TaskActivity } from '../api';
 import { Panel, Badge, ms, relTime, shortPath } from '../ui';
@@ -15,6 +15,51 @@ const statusMeta: Record<string, { label: string; cls: string }> = {
   pending: { label: '待处理', cls: 'bg-muted/20 text-muted-foreground' },
 };
 function statusOf(s: string) { return statusMeta[s] || { label: s, cls: 'bg-muted/20 text-muted-foreground' }; }
+
+function fullTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso || '-';
+  return date.toLocaleString('zh-CN');
+}
+
+/** 自包含 Markdown 交接简报：粘贴给任意 Agent 即可领取并继续任务，格式与 macOS 原生端一致。 */
+function buildHandoffText(t: TaskDetail['task']): string {
+  const lines: string[] = [];
+  lines.push(`# 任务交接: ${t.title}`);
+  lines.push('');
+  lines.push(`- 任务 ID: ${t.id}`);
+  if (t.project) lines.push(`- 项目: ${t.project}`);
+  lines.push(`- 状态: ${t.status} / ${t.phase}`);
+  lines.push(`- 更新于: ${fullTime(t.updated_at)}`);
+
+  if (t.goal) {
+    lines.push('', '## 目标', t.goal);
+  }
+  if (t.conditions.length > 0) {
+    lines.push('', '## 完成条件');
+    for (const c of t.conditions) lines.push(`- ${c.text}`);
+  }
+  if (t.steps.length > 0) {
+    lines.push('', '## 步骤');
+    for (const s of t.steps) {
+      const mark = s.status === 'completed' ? '[x]' : s.status === 'in_progress' || s.status === 'active' ? '[>]' : '[ ]';
+      lines.push(`- ${mark} ${s.title} (${s.status})`);
+    }
+  }
+  if (t.blocker) {
+    lines.push('', '## 阻塞', t.blocker);
+  }
+  if (t.summary) {
+    lines.push('', '## 摘要', t.summary);
+  }
+  if (t.events.length > 0) {
+    lines.push('', '## 最近事件');
+    for (const e of t.events.slice(-10)) lines.push(`- ${fullTime(e.created_at)} ${e.summary}`);
+  }
+  lines.push('', '## 如何继续');
+  lines.push('领取本任务后用 task_manage 继续推进：调用 get 加载完整状态，checkpoint 更新步骤进度，block 记录阻塞，resume 在阻塞解除后继续，final_review 记录验收评审，complete 关闭任务。');
+  return lines.join('\n');
+}
 
 function Section({ icon: Icon, title, hint, children }: { icon: any; title: string; hint?: string; children: React.ReactNode }) {
   return (
@@ -46,6 +91,15 @@ export default function TaskDetailPage({ id, fallback, onClose }: { id: string; 
   const [loading, setLoading] = useState(true);
   const [partialError, setPartialError] = useState<string | null>(null);
   const [expandedDiff, setExpandedDiff] = useState<number | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const copyHandoff = async () => {
+    try {
+      await navigator.clipboard.writeText(buildHandoffText(detail!.task));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* 剪贴板被拒绝时静默 */ }
+  };
 
   const load = () => {
     setLoading(true);
@@ -95,6 +149,14 @@ export default function TaskDetailPage({ id, fallback, onClose }: { id: string; 
           <Badge className={sm.cls}>{sm.label}</Badge>
           {t.phase && <Badge className="bg-sky-500/10 text-sky-500">{t.phase}</Badge>}
           {t.review_status && <Badge className="bg-muted/20 text-muted-foreground">评审 {t.review_status}</Badge>}
+          <button
+            onClick={copyHandoff}
+            title="复制任务交接简报，粘贴给 Agent 即可领取并继续任务"
+            className="u-press glass-control ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+            {copied ? '已复制交接简报' : '复制任务交接'}
+          </button>
         </div>
         <h2 className="mt-1.5 text-base font-semibold leading-snug">{t.title}</h2>
         <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">

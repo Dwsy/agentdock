@@ -336,9 +336,9 @@ export type AppConfig = {
 export type ConfigUpdateResult = { ok: boolean; source: string; updated: number; hint: string };
 export type ConfigRestartResult = { ok: boolean; source: string; message: string };
 
-async function post<T>(path: string, body: unknown): Promise<T> {
+async function post<T>(path: string, body: unknown, timeoutMs = 40_000): Promise<T> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 40_000);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
   try {
     res = await fetch(`/dashboard/api${path}`, {
@@ -437,6 +437,55 @@ export type ManualLLMToggleResult = {
   persist_note?: string;
 };
 
+export type RemoteNexusStatus = {
+  paired: boolean;
+  error?: string;
+  endpoint?: string;
+  node_id?: string;
+  device_id?: string;
+  device_token_stored?: boolean;
+  server_edition?: string;
+  server_version?: string;
+  protocol_version?: string;
+  contract_version?: string;
+  is_workers?: boolean;
+};
+
+export type RemoteTunnelStatus = {
+  mode: string;
+  running?: boolean;
+  ready?: boolean;
+  startup_enabled?: boolean;
+  public_url?: string;
+  dependency_state?: string;
+  component_version?: string;
+  connection_state?: string;
+  recovery_count?: number;
+};
+
+export type RemoteAccess = {
+  ok: boolean;
+  source: string;
+  auth_token_configured: boolean;
+  configurable: boolean;
+  nexus: RemoteNexusStatus;
+  nexus_endpoint_env: string;
+  nexus_device_identity: string;
+  agentdock_home: string;
+  tunnel?: RemoteTunnelStatus | null;
+  tunnel_error?: string;
+};
+
+export type RemoteMutationResult = {
+  ok: boolean;
+  source: string;
+  restart_hint?: string;
+  mode?: string;
+  paired?: boolean;
+  endpoint?: string;
+  node_id?: string;
+};
+
 export const api = {
   status: () => get<Status>('/status'),
   config: () => get<AppConfig>('/config'),
@@ -445,7 +494,7 @@ export const api = {
   overview: () => get<Overview>('/overview'),
   analytics: () => get<Analytics>('/analytics'),
   alerts: () => get<Alerts>('/alerts'),
-  tasks: (limit = 24) => get<Tasks>(`/tasks?limit=${limit}`),
+  tasks: (limit = 10000) => get<Tasks>(`/tasks?limit=${limit}`),
   taskDetail: (id: string) => get<TaskDetail>(`/tasks/${encodeURIComponent(id)}`),
   taskActivity: (id: string) => get<TaskActivity>(`/tasks/${encodeURIComponent(id)}/activity`),
   traces: (limit = 50) => get<Traces>(`/traces?limit=${limit}`),
@@ -467,6 +516,13 @@ export const api = {
     post<ManualLLMCancelResult>('/manual-llm/cancel', { request_id, reason }),
   manualLLMToggle: (enabled: boolean, persist = true) =>
     post<ManualLLMToggleResult>('/manual-llm/toggle', { enabled, persist }),
+  remoteAccess: () => get<RemoteAccess>('/remote'),
+  remoteTokenUpdate: (token: string) => post<RemoteMutationResult>('/remote/token', { token }),
+  nexusPair: (endpoint: string, code: string, name?: string) =>
+    post<RemoteMutationResult>('/remote/nexus/pair', { endpoint, code, name }),
+  // quick/named 首次配置可能下载 cloudflared 组件，预算放宽到 150 秒。
+  tunnelConfigure: (mode: string, serverURL?: string, tunnelToken?: string) =>
+    post<RemoteMutationResult>('/remote/tunnel', { mode, server_url: serverURL, tunnel_token: tunnelToken }, 150_000),
 };
 
 export type EventKind = 'call' | 'task' | 'artifact' | 'ping';

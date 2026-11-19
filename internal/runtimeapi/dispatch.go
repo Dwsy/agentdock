@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/mcp/oauthclient"
 	"github.com/uvwt/agentdock/internal/observability"
+	"github.com/uvwt/agentdock/internal/taskstate"
 )
 
 // MaxArtifactPublishBodyBytes 限制控制面主动发布请求 JSON 正文上限（28 MiB），
@@ -73,6 +75,12 @@ func MethodAllowed(method, path string) bool {
 	if cleanPath == "/internal/runtime/manual-llm/cancel" || cleanPath == "/internal/runtime/manual-llm/toggle" {
 		return method == http.MethodPost
 	}
+	if cleanPath == "/internal/runtime/remote" {
+		return method == http.MethodGet
+	}
+	if cleanPath == "/internal/runtime/remote/token" || cleanPath == "/internal/runtime/remote/nexus/pair" || cleanPath == "/internal/runtime/remote/tunnel" {
+		return method == http.MethodPost
+	}
 	if cleanPath == "/internal/runtime/config" {
 		return method == http.MethodGet || method == http.MethodPost
 	}
@@ -120,6 +128,12 @@ func AllowHeader(path string) string {
 		return "GET, POST"
 	}
 	if cleanPath == "/internal/runtime/evolve" || cleanPath == "/internal/runtime/mcp/oauth/callback" || cleanPath == "/internal/runtime/config/restart" || cleanPath == "/internal/runtime/manual-llm/cancel" || cleanPath == "/internal/runtime/manual-llm/toggle" {
+		return "POST"
+	}
+	if cleanPath == "/internal/runtime/remote" {
+		return "GET"
+	}
+	if cleanPath == "/internal/runtime/remote/token" || cleanPath == "/internal/runtime/remote/nexus/pair" || cleanPath == "/internal/runtime/remote/tunnel" {
 		return "POST"
 	}
 	if cleanPath == "/internal/runtime/config" {
@@ -583,6 +597,64 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			return nil, &app.ToolError{Code: "CONFIG_UNSUPPORTED", Message: "runtime does not support configuration", Category: "not_found"}
 		}
 		return map[string]any(configRuntime.RuntimeConfig()), nil
+	case path == "/internal/runtime/remote" && method == http.MethodGet:
+		remoteRuntime, ok := runtime.(RemoteAccessRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "REMOTE_UNSUPPORTED", Message: "runtime does not support remote access management", Category: "not_found"}
+		}
+		return map[string]any(remoteRuntime.RuntimeRemoteAccess(ctx)), nil
+	case path == "/internal/runtime/remote/token" && method == http.MethodPost:
+		remoteRuntime, ok := runtime.(RemoteAccessRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "REMOTE_UNSUPPORTED", Message: "runtime does not support remote access management", Category: "not_found"}
+		}
+		var payload struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(request.Body, &payload); err != nil {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "remote token body must be valid JSON", Category: "validation"}
+		}
+		result, err := remoteRuntime.RuntimeRemoteTokenUpdate(payload.Token)
+		if err != nil {
+			return nil, &app.ToolError{Code: "TOKEN_INVALID", Message: err.Error(), Category: "validation"}
+		}
+		return map[string]any(result), err
+	case path == "/internal/runtime/remote/nexus/pair" && method == http.MethodPost:
+		remoteRuntime, ok := runtime.(RemoteAccessRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "REMOTE_UNSUPPORTED", Message: "runtime does not support remote access management", Category: "not_found"}
+		}
+		var payload struct {
+			Endpoint string `json:"endpoint"`
+			Code     string `json:"code"`
+			Name     string `json:"name,omitempty"`
+		}
+		if err := json.Unmarshal(request.Body, &payload); err != nil {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "nexus pair body must be valid JSON", Category: "validation"}
+		}
+		result, err := remoteRuntime.RuntimeNexusPair(ctx, payload.Endpoint, payload.Code, payload.Name)
+		if err != nil {
+			return nil, &app.ToolError{Code: "NEXUS_PAIR_FAILED", Message: err.Error(), Category: "validation"}
+		}
+		return map[string]any(result), err
+	case path == "/internal/runtime/remote/tunnel" && method == http.MethodPost:
+		remoteRuntime, ok := runtime.(RemoteAccessRuntime)
+		if !ok {
+			return nil, &app.ToolError{Code: "REMOTE_UNSUPPORTED", Message: "runtime does not support remote access management", Category: "not_found"}
+		}
+		var payload struct {
+			Mode        string `json:"mode"`
+			ServerURL   string `json:"server_url,omitempty"`
+			TunnelToken string `json:"tunnel_token,omitempty"`
+		}
+		if err := json.Unmarshal(request.Body, &payload); err != nil {
+			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "remote tunnel body must be valid JSON", Category: "validation"}
+		}
+		result, err := remoteRuntime.RuntimeTunnelConfigure(ctx, payload.Mode, payload.ServerURL, payload.TunnelToken)
+		if err != nil {
+			return nil, &app.ToolError{Code: "TUNNEL_CONFIGURE_FAILED", Message: err.Error(), Category: "validation"}
+		}
+		return map[string]any(result), err
 	case path == "/internal/runtime/evolve" && method == http.MethodPost:
 		args, err := decodeRuntimeEvolutionRequest(request.Body)
 		if err != nil {
@@ -864,10 +936,10 @@ func parseRuntimeTaskLimit(raw string) (int, error) {
 		return 0, nil
 	}
 	limit, err := strconv.Atoi(raw)
-	if err != nil || limit < 0 || limit > 200 {
+	if err != nil || limit < 0 || limit > taskstate.MaxListLimit {
 		return 0, &app.ToolError{
-			Code: "INVALID_LIMIT", Message: "limit must be an integer between 0 and 200", Category: "validation",
-			Details: map[string]any{"limit": raw, "minimum": 0, "maximum": 200},
+			Code: "INVALID_LIMIT", Message: fmt.Sprintf("limit must be an integer between 0 and %d", taskstate.MaxListLimit), Category: "validation",
+			Details: map[string]any{"limit": raw, "minimum": 0, "maximum": taskstate.MaxListLimit},
 		}
 	}
 	return limit, nil

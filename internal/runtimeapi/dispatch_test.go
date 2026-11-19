@@ -347,7 +347,7 @@ func TestDispatchKeepsRouteSpecificValidationErrors(t *testing.T) {
 	}{
 		{
 			name: "task limit",
-			req:  Request{Method: "GET", Path: "/internal/runtime/tasks", Query: url.Values{"limit": {"201"}}},
+			req:  Request{Method: "GET", Path: "/internal/runtime/tasks", Query: url.Values{"limit": {"10001"}}},
 			code: "INVALID_LIMIT",
 		},
 		{

@@ -50,6 +50,8 @@ func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg conf
 	mux.HandleFunc("/internal/runtime/mcp/", h)
 	mux.HandleFunc("/internal/runtime/manual-llm", h)
 	mux.HandleFunc("/internal/runtime/manual-llm/", h)
+	mux.HandleFunc("/internal/runtime/remote", h)
+	mux.HandleFunc("/internal/runtime/remote/", h)
 }
 
 func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
@@ -97,6 +99,10 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 		// 超时、断网和摘要失败都直接返回，不转入后台补装。
 		if strings.TrimSuffix(r.URL.Path, "/") == runtimeapi.ResourceLibraryPath {
 			timeout = 2 * time.Minute
+		} else if strings.TrimSuffix(r.URL.Path, "/") == "/internal/runtime/remote/tunnel" {
+			// tunnel configure 由独立 CLI 进程执行，quick/named 首次配置可能
+			// 需要下载 cloudflared 组件，沿用资源库的两分钟预算。
+			timeout = 2 * time.Minute
 		} else if runtimeapi.IsArtifactPublishPath(r.Method, r.URL.Path) {
 			timeout = 30 * time.Second
 		}
@@ -121,7 +127,7 @@ func runtimeRequestBody(r *http.Request) ([]byte, error) {
 	if runtimeapi.IsArtifactPublishPath(r.Method, cleanPath) {
 		return io.ReadAll(io.LimitReader(r.Body, runtimeapi.MaxArtifactPublishBodyBytes+1))
 	}
-	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != "/internal/runtime/config" && cleanPath != "/internal/runtime/manual-llm/cancel" && cleanPath != "/internal/runtime/manual-llm/toggle" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
+	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != "/internal/runtime/config" && cleanPath != "/internal/runtime/manual-llm/cancel" && cleanPath != "/internal/runtime/manual-llm/toggle" && cleanPath != "/internal/runtime/remote/token" && cleanPath != "/internal/runtime/remote/nexus/pair" && cleanPath != "/internal/runtime/remote/tunnel" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
 		return nil, nil
 	}
 	return io.ReadAll(io.LimitReader(r.Body, 64*1024+1))

@@ -199,6 +199,16 @@ type ConfigRuntime interface {
 	RuntimeConfigRestart(context.Context) (app.Result, error)
 }
 
+// RemoteAccessRuntime 是可选的远程访问管理能力（token 轮换、Nexus 配对、
+// Cloudflare Tunnel 配置）。与 ConfigRuntime 同样独立成接口：密钥类写入是
+// 显式契约，不进 editableConfigKeys 白名单；状态读取永不回显密钥值。
+type RemoteAccessRuntime interface {
+	RuntimeRemoteAccess(context.Context) app.Result
+	RuntimeRemoteTokenUpdate(token string) (app.Result, error)
+	RuntimeNexusPair(ctx context.Context, endpoint, code, name string) (app.Result, error)
+	RuntimeTunnelConfigure(ctx context.Context, mode, serverURL, tunnelToken string) (app.Result, error)
+}
+
 // ManualLLMRuntime is an optional Runtime capability exposing the manual LLM queue,
 // live enable/disable toggle, and cancellation actions to the runtime API and dashboard.
 type ManualLLMRuntime interface {

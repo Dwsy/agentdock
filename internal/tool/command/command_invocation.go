@@ -20,6 +20,7 @@ type commandInvocation struct {
 	env          []string
 	build        session.CommandFactory
 	execution    session.ExecutionContext
+	shell        session.ShellSpec
 	skillRelease func()
 }
 
@@ -27,7 +28,7 @@ func (invocation commandInvocation) start(ctx context.Context, timeout time.Dura
 	if invocation.build != nil {
 		return session.StartCommandWithTTY(ctx, invocation.build, timeout, tty, prepare)
 	}
-	return session.StartWithTTY(ctx, invocation.command, invocation.workdir, invocation.env, timeout, tty, prepare)
+	return session.StartWithTTYShell(ctx, invocation.command, invocation.workdir, invocation.env, timeout, tty, invocation.shell, prepare)
 }
 
 func (svc *Service) acquireSkill(ctx context.Context, skillRef string) (SkillLease, error) {
@@ -93,9 +94,29 @@ func (svc *Service) newHostCommandInvocation(ctx context.Context, request ExecRe
 		}
 	}
 	releaseOnError = false
+	cfg := svc.config()
+	command := request.Cmd
+	if rewritten, changed := rewriteCommandForRTK(cfg, command); changed {
+		command = rewritten
+		// RTK records token savings into its own DB so `rtk gain` can report them.
+		if db := rtkDBPath(cfg); db != "" && !hasRTKDBPath(commandEnv) {
+			commandEnv = append(commandEnv, "RTK_DB_PATH="+db)
+		}
+	}
 	return commandInvocation{
-		command: request.Cmd, workdir: workdir, env: commandEnv, skillRelease: lease.Release,
+		command: command, workdir: workdir, env: commandEnv, skillRelease: lease.Release,
+		shell: session.ShellSpec{Path: cfg.CommandShell, Args: cfg.CommandShellArgs},
 	}, nil
+}
+
+// hasRTKDBPath avoids duplicating RTK_DB_PATH if the caller already set one.
+func hasRTKDBPath(env []string) bool {
+	for _, item := range env {
+		if strings.HasPrefix(item, "RTK_DB_PATH=") {
+			return true
+		}
+	}
+	return false
 }
 
 func (svc *Service) resolveHostCommandWorkdir(requested, skillDir string) (string, error) {

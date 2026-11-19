@@ -150,6 +150,9 @@ type Config struct {
 	AgentDockHome                string
 	AgentDockDefaultDir          string
 	CommandEnvFromEnv            map[string]string
+	CommandShell                 string
+	CommandShellArgs             []string
+	RTKEnabled                   bool
 	Host                         string
 	Port                         int
 	AuthToken                    string
@@ -207,6 +210,17 @@ type ACPProfile struct {
 
 func FromEnv() (Config, error) {
 	port, err := getenvInt("AGENTDOCK_PORT", 8765)
+	if err != nil {
+		return Config{}, err
+	}
+	// exec_command 的 shell：恒默认 /bin/bash，不继承进程 $SHELL（否则用户
+	// 在 fish/zsh 下会得到与 bash 语法不兼容的解释器）。只有显式设置
+	// AGENTDOCK_SHELL 才覆盖；这与 rtk 重写只在 bash 下生效的约定一致。
+	commandShell := strings.TrimSpace(os.Getenv("AGENTDOCK_SHELL"))
+	if commandShell == "" {
+		commandShell = "/bin/bash"
+	}
+	rtkEnabled, err := getenvBool("AGENTDOCK_RTK_ENABLED", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -352,6 +366,9 @@ func FromEnv() (Config, error) {
 		AgentDockHome:                strings.TrimSpace(os.Getenv("AGENTDOCK_HOME")),
 		AgentDockDefaultDir:          strings.TrimSpace(os.Getenv("AGENTDOCK_DEFAULT_DIR")),
 		CommandEnvFromEnv:            commandEnvFromEnv,
+		CommandShell:                 commandShell,
+		CommandShellArgs:             []string{"-c"},
+		RTKEnabled:                   rtkEnabled,
 		Host:                         getenv("AGENTDOCK_HOST", "127.0.0.1"),
 		Port:                         port,
 		AuthToken:                    os.Getenv("AGENTDOCK_AUTH_TOKEN"),

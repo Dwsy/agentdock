@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Settings2, Save, RotateCw, AlertTriangle, CheckCircle2, Server,
-  Monitor, Bug, FileClock, Wifi, RefreshCw, Info,
+  Monitor, Bug, FileClock, Wifi, RefreshCw, Info, Terminal,
 } from 'lucide-react';
 import { api, type AppConfig } from '../api';
 import { Panel, SectionTitle } from '../ui';
@@ -24,6 +24,12 @@ const FIELDS: { group: string; icon: any; fields: Field[] }[] = [
       { key: 'AGENTDOCK_HOST', label: '监听地址', kind: 'text', hint: '0.0.0.0 允许局域网访问，需配合鉴权' },
       { key: 'AGENTDOCK_PORT', label: '端口', kind: 'int', min: 1, max: 65535 },
       { key: 'AGENTDOCK_LOG_LEVEL', label: '日志级别', kind: 'enum', options: ['debug', 'info', 'warn', 'error'].map(v => ({ value: v, label: v })) },
+    ],
+  },
+  {
+    group: '命令执行', icon: Terminal, fields: [
+      { key: 'AGENTDOCK_SHELL', label: 'Shell 解释器', kind: 'text', hint: 'exec_command 使用的 shell，默认 /bin/bash（不继承进程 $SHELL）；如 /bin/zsh' },
+      { key: 'AGENTDOCK_RTK_ENABLED', label: 'RTK 输出压缩', kind: 'bool', hint: '开启后 git/rg/go test/ls/cat 等白名单命令自动经 rtk 压缩输出（仅 bash/sh，需已安装 rtk）' },
     ],
   },
   {
@@ -221,7 +227,7 @@ export default function ConfigPage() {
       <Panel className="flex items-start gap-2.5 p-4 text-xs text-muted-foreground">
         <Bug size={15} className="mt-0.5 shrink-0" />
         <div>
-          敏感项（访问令牌、OAuth 密钥、设备身份、配对码）不在此展示或修改。配置写入 <code className="rounded bg-muted/40 px-1">agentdock.env</code>，保留其它原有键，文件权限 0600。
+          访问令牌、Nexus 配对与 Cloudflare 隧道在「远程访问」页管理；本页与该页都不回显密钥值。配置写入 <code className="rounded bg-muted/40 px-1">agentdock.env</code>，保留其它原有键，文件权限 0600。
         </div>
       </Panel>
     </div>

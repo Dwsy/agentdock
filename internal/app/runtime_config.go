@@ -25,6 +25,8 @@ var editableConfigKeys = []string{
 	"AGENTDOCK_HOST",
 	"AGENTDOCK_PORT",
 	"AGENTDOCK_LOG_LEVEL",
+	"AGENTDOCK_SHELL",
+	"AGENTDOCK_RTK_ENABLED",
 	"AGENTDOCK_MCP_APPS_MODE",
 	"AGENTDOCK_BROWSER_ENABLED",
 	"AGENTDOCK_BROWSER_CDP_URL",
@@ -94,6 +96,8 @@ func (r *Runtime) RuntimeConfig() Result {
 		"AGENTDOCK_HOST":                           cfg.Host,
 		"AGENTDOCK_PORT":                           strconv.Itoa(cfg.Port),
 		"AGENTDOCK_LOG_LEVEL":                      cfg.LogLevel,
+		"AGENTDOCK_SHELL":                          cfg.CommandShell,
+		"AGENTDOCK_RTK_ENABLED":                    strconv.FormatBool(cfg.RTKEnabled),
 		"AGENTDOCK_MCP_APPS_MODE":                  string(cfg.MCPAppsMode),
 		"AGENTDOCK_BROWSER_ENABLED":                strconv.FormatBool(cfg.BrowserEnabled),
 		"AGENTDOCK_BROWSER_CDP_URL":                cfg.BrowserCDPURL,
@@ -151,6 +155,14 @@ func validateConfigUpdate(key, value string) error {
 		case "debug", "info", "warn", "error":
 		default:
 			return errors.New("log_level 必须是 debug/info/warn/error")
+		}
+	case "AGENTDOCK_SHELL":
+		if strings.TrimSpace(value) == "" {
+			return errors.New("shell 不能为空（默认 /bin/bash）")
+		}
+	case "AGENTDOCK_RTK_ENABLED":
+		if _, err := strconv.ParseBool(strings.TrimSpace(value)); err != nil {
+			return errors.New("rtk_enabled 必须是 true/false")
 		}
 	case "AGENTDOCK_MCP_APPS_MODE":
 		switch strings.ToLower(strings.TrimSpace(value)) {

@@ -7,7 +7,7 @@ import (
 	"github.com/uvwt/agentdock/internal/taskstate"
 )
 
-const runtimeOverviewTaskLimit = 200
+const runtimeOverviewTaskLimit = taskstate.MaxListLimit
 
 // RuntimeOverview 返回控制面板需要的 Task 轻量统计，避免为了几个数字把完整
 // Task 列表跨 Nexus Bridge 传输。统计上限与既有 Runtime 概览保持一致。
@@ -84,5 +84,5 @@ func (s *Service) BlockedTasks() ([]taskstate.Task, error) {
 }
 
 func (s *Service) BlockedTasksContext(ctx context.Context) ([]taskstate.Task, error) {
-	return s.tasks.ListContext(ctx, taskstate.StatusBlocked, 200)
+	return s.tasks.ListContext(ctx, taskstate.StatusBlocked, taskstate.MaxListLimit)
 }

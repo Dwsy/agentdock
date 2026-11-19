@@ -53,8 +53,10 @@ func (s *Store) ListContext(ctx context.Context, status Status, limit int) ([]Ta
 		return nil, err
 	}
 	defer release()
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 50
+	} else if limit > MaxListLimit {
+		limit = MaxListLimit
 	}
 	var matched []*Task
 	if err := s.scanTasksLocked(ctx, func(task *Task) error {
@@ -88,8 +90,10 @@ func (s *Store) OverviewCountsContext(ctx context.Context, limit int) (map[strin
 		return nil, err
 	}
 	defer release()
-	if limit <= 0 || limit > 200 {
+	if limit <= 0 {
 		limit = 200
+	} else if limit > MaxListLimit {
+		limit = MaxListLimit
 	}
 	var items []taskOverviewMeta
 	if err := s.scanTasksLocked(ctx, func(task *Task) error {

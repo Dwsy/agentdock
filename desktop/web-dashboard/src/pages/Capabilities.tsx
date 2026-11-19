@@ -2,11 +2,12 @@ import { useState } from 'react';
 import { Boxes, Plug, Wifi, FileText, ShieldCheck, Search } from 'lucide-react';
 import type { Catalog, Skills, Plugins, MCPs, Status } from '../api';
 import { Panel, SectionTitle, Badge, fmt } from '../ui';
+import { usePersistedState } from '../lib/usePersistedState';
 
 type Props = { catalog: Catalog; skills: Skills; plugins: Plugins; mcp: MCPs; status: Status };
 
 export default function Capabilities({ catalog, skills, plugins, mcp, status }: Props) {
-  const [tab, setTab] = useState<'tools' | 'rules' | 'skills' | 'common'>('tools');
+  const [tab, setTab] = usePersistedState<'tools' | 'rules' | 'skills' | 'common'>('capabilities-tab', 'tools');
   const [q, setQ] = useState('');
 
   const tools = catalog.tools.filter((t) => !q || (t.name + t.description).toLowerCase().includes(q.toLowerCase()));

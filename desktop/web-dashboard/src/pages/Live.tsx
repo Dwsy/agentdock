@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Radio, CircleSlash, Zap, ScrollText, Package, Pause, Play } from 'lucide-react';
 import type { RuntimeEvent } from '../api';
 import { Badge, Panel, SectionTitle, fmt, ms, relTime } from '../ui';
+import { usePersistedState } from '../lib/usePersistedState';
 
 const MAX_EVENTS = 200;
 
@@ -45,7 +46,7 @@ export default function Live({
   onTogglePause: () => void;
   onClear: () => void;
 }) {
-  const [filter, setFilter] = useState<string>('all');
+  const [filter, setFilter] = usePersistedState('live-filter', 'all');
   const shown = filter === 'all' ? events : events.filter((e) => e.kind === filter);
   const counts = {
     call: events.filter((e) => e.kind === 'call').length,

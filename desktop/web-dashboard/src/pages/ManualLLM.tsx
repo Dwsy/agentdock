@@ -23,6 +23,7 @@ import {
   type QueueFilter,
 } from '../lib/manualLLMQueue.ts';
 import { Badge, EmptyState, Panel, SectionTitle, StatCard } from '../ui.tsx';
+import { usePersistedState } from '../lib/usePersistedState';
 
 type Props = {
   data: ManualLLMQueue;
@@ -31,8 +32,8 @@ type Props = {
 };
 
 export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) {
-  const [filter, setFilter] = useState<QueueFilter>('all');
-  const [autoPoll, setAutoPoll] = useState(true);
+  const [filter, setFilter] = usePersistedState<QueueFilter>('manual-llm-filter', 'all');
+  const [autoPoll, setAutoPoll] = usePersistedState('manual-llm-auto-poll', true);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [busyID, setBusyID] = useState<string | null>(null);
   const [toggleBusy, setToggleBusy] = useState(false);

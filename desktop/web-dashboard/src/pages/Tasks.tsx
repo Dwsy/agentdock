@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ChevronDown,
@@ -13,13 +13,13 @@ import {
 } from 'lucide-react';
 import type { Tasks as TasksData, Alerts as AlertsData, Task } from '../api';
 import { Badge, Panel, fmt, relTime } from '../ui';
+import { usePersistedState } from '../lib/usePersistedState';
+import Modal from '../components/Modal';
 import TaskDetailPage from './TaskDetailPage';
 import {
   ALL_PROJECTS,
-  TASK_FETCH_LIMIT,
   buildProjectGroups,
   classifyStatus,
-  isTaskListCapped,
   normalizeProject,
   projectBasename,
   resolveSelectedProjectKey,
@@ -131,18 +131,15 @@ function TaskRow({
 
 export default function Tasks({ data, alerts }: { data: TasksData; alerts: AlertsData }) {
   const [q, setQ] = useState('');
-  const [status, setStatus] = useState<StatusFilter>('all');
-  const [projectKey, setProjectKey] = useState<string>(ALL_PROJECTS);
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [doneOpen, setDoneOpen] = useState<Record<string, boolean>>({});
+  const [status, setStatus] = usePersistedState<StatusFilter>('tasks-status', 'all');
+  const [projectKey, setProjectKey] = usePersistedState<string>('tasks-project-key', ALL_PROJECTS);
+  const [collapsed, setCollapsed] = usePersistedState<Record<string, boolean>>('tasks-collapsed', {});
+  const [doneOpen, setDoneOpen] = usePersistedState<Record<string, boolean>>('tasks-done-open', {});
   const [detailTask, setDetailTask] = useState<Task | null>(null);
   const [alertsOpen, setAlertsOpen] = useState(false);
-  const scrollY = useRef(0);
-  const restoreScroll = useRef(false);
 
   const groups = useMemo(() => buildProjectGroups(data.tasks), [data.tasks]);
   const scope = useMemo(() => scopeTasks(groups, { projectKey, query: q, status }), [groups, projectKey, q, status]);
-  const capped = isTaskListCapped(data.tasks.length);
   const activeAlerts = alerts.alerts.filter((alert) => alert.active);
   const selectedGroup = groups.find((group) => group.key === projectKey) ?? null;
   const showProjectName = projectKey === ALL_PROJECTS;
@@ -154,18 +151,6 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
     if (next !== projectKey) setProjectKey(next);
   }, [groups, projectKey]);
 
-  useLayoutEffect(() => {
-    if (!detailTask && restoreScroll.current) {
-      restoreScroll.current = false;
-      window.scrollTo({ top: scrollY.current, behavior: 'auto' });
-    }
-  }, [detailTask]);
-
-  const openDetail = (task: Task) => {
-    scrollY.current = window.scrollY;
-    restoreScroll.current = true;
-    setDetailTask(task);
-  };
 
   const selectProject = (key: string) => {
     setProjectKey(key);
@@ -177,10 +162,6 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
     setStatus('all');
     setProjectKey(ALL_PROJECTS);
   };
-
-  if (detailTask) {
-    return <TaskDetailPage id={detailTask.id} fallback={detailTask} onBack={() => setDetailTask(null)} />;
-  }
 
   const segments = [
     BASE_SEGMENTS[0],
@@ -200,6 +181,7 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
     : `${fmt.format(scope.visible.length)} / ${fmt.format(scope.searched.length)} 条`;
 
   return (
+    <>
     <div className="task-workspace animate-float-in space-y-3">
       {/* 紧凑分段统计：点击即状态筛选，计数与右侧列表同源 */}
       <Panel className="p-1.5">
@@ -221,16 +203,12 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
             );
           })}
           <div className="ml-auto hidden shrink-0 flex-col justify-center px-3 text-right sm:flex">
-            <span className="text-xs text-muted-foreground">已加载 {fmt.format(data.tasks.length)} 条</span>
-            <span className="text-[11px] text-muted-foreground">
-              {capped ? `最近 ${TASK_FETCH_LIMIT} 条，非全量` : '计数基于当前加载集合'}
-            </span>
+            <span className="text-xs text-muted-foreground">全量 {fmt.format(data.tasks.length)} 条</span>
+            <span className="text-[11px] text-muted-foreground">计数基于全部任务</span>
           </div>
         </div>
         <div className="px-3 pb-1 pt-2 text-[11px] text-muted-foreground sm:hidden">
-          {capped
-            ? `已加载最近 ${TASK_FETCH_LIMIT} 条任务，不是全量；计数基于当前加载集合。`
-            : `已加载 ${fmt.format(data.tasks.length)} 条任务；计数基于当前加载集合。`}
+          已加载全部 {fmt.format(data.tasks.length)} 条任务；计数基于全部任务。
         </div>
       </Panel>
 
@@ -399,7 +377,7 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
                           key={task.id}
                           task={task}
                           projectName={showProjectName ? projectBasename(group.full) : null}
-                          onOpen={openDetail}
+                          onOpen={setDetailTask}
                         />
                       ))}
                       {doneTasks.length > 0 && (
@@ -423,7 +401,7 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
                                   key={task.id}
                                   task={task}
                                   projectName={showProjectName ? projectBasename(group.full) : null}
-                                  onOpen={openDetail}
+                                  onOpen={setDetailTask}
                                 />
                               ))}
                             </div>
@@ -452,5 +430,17 @@ export default function Tasks({ data, alerts }: { data: TasksData; alerts: Alert
         </div>
       </div>
     </div>
+
+    <Modal
+      open={!!detailTask}
+      onClose={() => setDetailTask(null)}
+      title={detailTask ? `任务详情 · ${detailTask.title}` : '任务详情'}
+      wide
+    >
+      {detailTask && (
+        <TaskDetailPage id={detailTask.id} fallback={detailTask} onClose={() => setDetailTask(null)} />
+      )}
+    </Modal>
+    </>
   );
 }

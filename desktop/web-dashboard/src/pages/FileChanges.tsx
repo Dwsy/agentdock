@@ -7,13 +7,14 @@ import { buildProjectGroups } from '../lib/taskProjects';
 import { changeDisplayPath, groupChangesByProject, type ChangeProjectGroup } from '../lib/changeProjects';
 import DiffViewer from '../components/DiffViewer';
 import MarkdownView, { markdownFromDiff } from '../components/MarkdownView';
+import { usePersistedState } from '../lib/usePersistedState';
 
 function isMarkdown(path: string) {
   return /\.(md|mdx)$/i.test(path);
 }
 
 function FileDetail({ change }: { change: FileChange }) {
-  const [tab, setTab] = useState<'diff' | 'render'>('diff');
+  const [tab, setTab] = usePersistedState<'diff' | 'render'>('file-detail-tab', 'diff');
   const [copied, setCopied] = useState(false);
   const md = useMemo(() => markdownFromDiff(change.diff || ''), [change.diff]);
   const markdown = isMarkdown(change.path);
@@ -108,7 +109,7 @@ function ProjectGroupBlock({
 export default function FileChanges({ data, tasks }: { data: FileChangesData; tasks: TasksData }) {
   const [q, setQ] = useState('');
   // 两种分组只是左侧选择器的视图切换；选中项、搜索、右侧详情共用一套状态。
-  const [mode, setMode] = useState<'tree' | 'project'>('tree');
+  const [mode, setMode] = usePersistedState<'tree' | 'project'>('files-mode', 'tree');
   const [selectedId, setSelectedId] = useState<string | number | null>(null);
   const filtered = useMemo(() => data.changes.filter((c) => !q || c.path.toLowerCase().includes(q.toLowerCase())), [data.changes, q]);
   const projectGroups = useMemo(() => buildProjectGroups(tasks.tasks), [tasks.tasks]);

@@ -10,6 +10,10 @@ const (
 	FinalReviewPass   = "pass"
 	FinalReviewFailed = "failed"
 
+	// MaxListLimit 是任务列表/统计接口允许的最大条数。控制面板以「全量」为目标，
+	// 设一个宽松上限既覆盖实际任务量，又避免异常参数撑爆内存与响应体。
+	MaxListLimit = 10000
+
 	maxTaskTitleBytes        = 512
 	maxTaskGoalBytes         = 16 << 10
 	maxTaskConditionBytes    = 4 << 10

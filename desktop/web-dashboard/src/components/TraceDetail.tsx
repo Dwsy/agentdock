@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { FileJson, FileText, Code2, RefreshCw, AlertCircle, FilePenLine, Tag } from 'lucide-react';
 import { api, type TraceRecord, type TraceDetail as TraceDetailData } from '../api';
 import { ms, shortPath } from '../ui';
+import { usePersistedState } from '../lib/usePersistedState';
 import CommandBlock from './CommandBlock';
 import MarkdownView from './MarkdownView';
 import DiffViewer from './DiffViewer';
@@ -26,7 +27,7 @@ function extractMarkdown(s?: string): string | null {
 export default function TraceDetail({ record }: { record: TraceRecord }) {
   const [detail, setDetail] = useState<TraceDetailData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState<'auto' | 'source'>('auto');
+  const [view, setView] = usePersistedState<'auto' | 'source'>('trace-detail-view', 'auto');
   const [openFile, setOpenFile] = useState<number>(0);
 
   useEffect(() => {

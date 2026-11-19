@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Columns2, Rows3, Copy, Check } from 'lucide-react';
+import { usePersistedState } from '../lib/usePersistedState';
 
 type DiffLine = { type: 'add' | 'del' | 'ctx' | 'hunk' | 'meta'; oldNo?: number; newNo?: number; text: string };
 type Pair = { left: DiffLine | null; right: DiffLine | null };
@@ -80,7 +81,7 @@ function CodeLine({ line }: { line: DiffLine }) {
 }
 
 export default function DiffViewer({ diff, filePath }: { diff: string; filePath?: string }) {
-  const [mode, setMode] = useState<'split' | 'unified'>('split');
+  const [mode, setMode] = usePersistedState<'split' | 'unified'>('diff-mode', 'split');
   const [copied, setCopied] = useState(false);
   const lines = useMemo(() => parseDiff(diff), [diff]);
   const pairs = useMemo(() => pairLines(lines), [lines]);

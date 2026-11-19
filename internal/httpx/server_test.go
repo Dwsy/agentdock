@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 	"github.com/uvwt/agentdock/internal/auth"
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/mcp"
+	"github.com/uvwt/agentdock/internal/taskstate"
 )
 
 func testConfig(t *testing.T) config.Config {
@@ -240,7 +242,7 @@ func TestRuntimeAPIRejectsInvalidTaskQuery(t *testing.T) {
 	}{
 		{name: "non-integer limit", url: "/internal/runtime/tasks?limit=many", code: "INVALID_LIMIT"},
 		{name: "negative limit", url: "/internal/runtime/tasks?limit=-1", code: "INVALID_LIMIT"},
-		{name: "excessive limit", url: "/internal/runtime/tasks?limit=201", code: "INVALID_LIMIT"},
+		{name: "excessive limit", url: fmt.Sprintf("/internal/runtime/tasks?limit=%d", taskstate.MaxListLimit+1), code: "INVALID_LIMIT"},
 		{name: "invalid status", url: "/internal/runtime/tasks?status=paused", code: "INVALID_STATUS"},
 	}
 	for _, test := range tests {

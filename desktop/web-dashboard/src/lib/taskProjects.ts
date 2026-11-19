@@ -1,7 +1,7 @@
 import type { Task } from '../api';
 
-/** 任务列表接口单次最多返回 200 条，达到上限时只能标为“最近 200 条”。 */
-export const TASK_FETCH_LIMIT = 200;
+/** 任务列表一次拉全量对应的接口硬上限（与后端 taskstate.MaxListLimit 一致）。 */
+export const TASK_FETCH_LIMIT = 10000;
 
 export const ALL_PROJECTS = '__all_projects__';
 export const UNCLASSIFIED_PROJECT = '';
@@ -249,7 +249,7 @@ export function scopeTasks(groups: ProjectGroup[], filters: TaskFilters): TaskSc
   return { scoped: selected.flatMap((group) => group.tasks), searched, visible, statusCounts, groups: groupsOut };
 }
 
-/** 列表是否达到接口返回上限；达到时只能称“最近 N 条”。 */
+/** 列表是否达到接口硬上限（正常全量场景不会触发）。 */
 export function isTaskListCapped(loaded: number, limit = TASK_FETCH_LIMIT): boolean {
   return loaded >= limit;
 }

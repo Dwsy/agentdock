@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { api, type ArtifactItem } from '../api';
 import { bytes } from '../ui';
+import { usePersistedState } from '../lib/usePersistedState';
 import {
   classifyPreviewKind,
   formatJsonPreview,
@@ -140,7 +141,7 @@ export default function ArtifactPreview({ item }: { item: ArtifactItem }) {
 
   const [imgStatus, setImgStatus] = useState<'loading' | 'ok' | 'error'>('loading');
   const [textState, setTextState] = useState<TextLoadState>({ status: 'idle' });
-  const [viewMode, setViewMode] = useState<'rendered' | 'source'>('rendered');
+  const [viewMode, setViewMode] = usePersistedState<'rendered' | 'source'>('artifact-view-mode', 'rendered');
   const [wrapLines, setWrapLines] = useState(false);
 
   useEffect(() => {

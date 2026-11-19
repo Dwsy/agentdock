@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { api, type ArtifactItem, type Artifacts as ArtifactsData } from '../api';
 import { Badge, EmptyState, Panel, SectionTitle, bytes, relTime } from '../ui';
+import { usePersistedState } from '../lib/usePersistedState';
 import ArtifactPreview from '../components/ArtifactPreview';
 import {
   classifyPreviewKind,
@@ -104,7 +105,7 @@ export default function PublishedPage({
   onRefresh: () => void | Promise<void>;
 }) {
   const [q, setQ] = useState('');
-  const [category, setCategory] = useState<CategoryFilter>('all');
+  const [category, setCategory] = usePersistedState<CategoryFilter>('published-category', 'all');
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // 主动发布面板状态

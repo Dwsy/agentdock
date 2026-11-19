@@ -4,6 +4,7 @@ import type { Traces as TracesData, TraceRecord } from '../api';
 import { Panel, SectionTitle, ms, relTime } from '../ui';
 import TraceDetail from '../components/TraceDetail';
 import { groupTracesByProject, type TraceProjectGroup } from '../lib/traceProjects';
+import { usePersistedState } from '../lib/usePersistedState';
 
 type StatusFilter = 'all' | 'ok' | 'fail';
 
@@ -76,15 +77,15 @@ function ProjectBlock({
 }
 
 export default function Traces({ data }: { data: TracesData }) {
-  const [tool, setTool] = useState('all');
-  const [status, setStatus] = useState<StatusFilter>('all');
+  const [tool, setTool] = usePersistedState('traces-tool', 'all');
+  const [status, setStatus] = usePersistedState<StatusFilter>('traces-status', 'all');
   const [q, setQ] = useState('');
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // 左侧列表视图切换：时间平铺 / 按项目分组（分组是展示投影，筛选轴不变）。
-  const [listMode, setListMode] = useState<ListMode>('time');
+  const [listMode, setListMode] = usePersistedState<ListMode>('traces-list-mode', 'time');
   // 请求头分组是第三条筛选轴，和工具/状态/搜索共用同一条 rows 管道。
-  const [dimKey, setDimKey] = useState<string | null>(null);
-  const [headerValue, setHeaderValue] = useState<string | null>(null);
+  const [dimKey, setDimKey] = usePersistedState<string | null>('traces-dim', null);
+  const [headerValue, setHeaderValue] = usePersistedState<string | null>('traces-header-value', null);
 
   // 工具分类（按出现次数排序）
   const toolCounts = useMemo(() => {

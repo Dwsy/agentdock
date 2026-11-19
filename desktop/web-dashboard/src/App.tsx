@@ -17,6 +17,7 @@ import {
   Settings2,
   Terminal,
   Share2,
+  Globe,
 } from 'lucide-react';
 import {
   api,
@@ -45,7 +46,9 @@ import PublishedPage from './pages/Published';
 import CapabilitiesPage from './pages/Capabilities';
 import ConfigPage from './pages/Config';
 import ManualLLMPage from './pages/ManualLLM';
+import RemoteAccessPage from './pages/RemoteAccess';
 import { Panel } from './ui';
+import { useHashRoute } from './lib/useHashRoute';
 
 type Snapshot = {
   status: Status;
@@ -63,8 +66,8 @@ type Snapshot = {
   manualLLM: ManualLLMQueue;
 };
 
-/** 任务列表接口上限 200；达到时页面只称“最近 200 条”。 */
-const TASK_LIMIT = 200;
+/** 任务列表一次拉全量（接口硬上限 10000，实际任务量远小于此）。 */
+const TASK_LIMIT = 10000;
 
 const NAV = [
   { id: 'overview', label: '概览', icon: LayoutDashboard, group: '监控' },
@@ -76,8 +79,10 @@ const NAV = [
   { id: 'manual_llm', label: '手动推理', icon: Terminal, group: '管理' },
   { id: 'capabilities', label: '能力目录', icon: Boxes, group: '管理' },
   { id: 'config', label: '配置', icon: Settings2, group: '管理' },
+  { id: 'remote', label: '远程访问', icon: Globe, group: '管理' },
 ] as const;
 type PageId = (typeof NAV)[number]['id'];
+const PAGE_IDS: readonly PageId[] = NAV.map((n) => n.id);
 
 type SnapshotKey = keyof Snapshot;
 const SHELL_KEYS: readonly SnapshotKey[] = ['status', 'alerts', 'manualLLM'];
@@ -91,6 +96,7 @@ const PAGE_KEYS: Record<PageId, readonly SnapshotKey[]> = {
   manual_llm: [],
   capabilities: ['catalog', 'skills', 'plugins', 'mcp'],
   config: [],
+  remote: [],
 };
 
 const FETCHERS: { [K in SnapshotKey]: () => Promise<Snapshot[K]> } = {
@@ -116,7 +122,8 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   // 初始值对齐 index.html 预执行脚本定好的 class（记忆 > 系统偏好）
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
-  const [page, setPage] = useState<PageId>('overview');
+  // 当前页写进 URL hash，刷新/前进后退都保持。
+  const [page, setHashPage] = useHashRoute<PageId>(PAGE_IDS, 'overview');
   const pageRef = useRef<PageId>(page);
   pageRef.current = page;
   const inFlightRef = useRef(false);
@@ -242,10 +249,20 @@ export default function App() {
 
   const navigate = (id: PageId) => {
     pageRef.current = id;
-    setPage(id);
+    setHashPage(id);
     setSidebarOpen(false);
     void load(true);
   };
+
+  // 浏览器前进/后退改了 page（非点击导航）时，补拉目标页数据。
+  const prevPageRef = useRef(page);
+  useEffect(() => {
+    if (prevPageRef.current !== page) {
+      prevPageRef.current = page;
+      setSidebarOpen(false);
+      void load(true);
+    }
+  }, [page, load]);
 
   /* ---------- render states ---------- */
 
@@ -305,6 +322,8 @@ export default function App() {
         return <CapabilitiesPage catalog={catalog} skills={skills} plugins={plugins} mcp={mcp} status={status} />;
       case 'config':
         return <ConfigPage />;
+      case 'remote':
+        return <RemoteAccessPage />;
     }
   })();
 

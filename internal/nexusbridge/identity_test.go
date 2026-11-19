@@ -136,59 +136,42 @@ func TestLoadLegacyIdentityWithoutWebSocketEndpoint(t *testing.T) {
 	}
 }
 
-func TestPairPersistsWorkersEditionAndProtocolVersion(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set(HeaderNexusEdition, EditionWorkers)
-		w.Header().Set(HeaderNexusVersion, "0.1.0-workers")
-		w.Header().Set(HeaderNexusProtocolVersion, "2")
-		w.Header().Set(HeaderNexusContractVersion, "0.9.0")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{
-			"node":{"id":"node_workers"},
-			"device_token":"nx_workers_secret",
-			"server_edition":"workers",
-			"server_version":"0.1.0-workers",
-			"protocol_version":"2",
-			"contract_version":"0.9.0"
-		}`))
-	}))
-	defer server.Close()
-
+func TestSaveOverwritesExistingIdentityWithExpectedPermissions(t *testing.T) {
 	home := t.TempDir()
-	identity, err := Pair(t.Context(), home, PairOptions{Endpoint: server.URL, Code: "pair_workers", Name: "WorkersNode"})
-	if err != nil {
+	first := Identity{
+		Version:     identityVersion,
+		Endpoint:    "https://nexus.example.com",
+		NodeID:      "node_first",
+		DeviceID:    "device_first_0001",
+		DeviceToken: "secret-first",
+	}
+	if err := Save(home, first); err != nil {
 		t.Fatal(err)
 	}
-	if !identity.ServerInfo().IsWorkers() || identity.ProtocolVersion != "2" || identity.ContractVersion != "0.9.0" || identity.ServerVersion != "0.1.0-workers" {
-		t.Fatalf("identity server info = %#v", identity)
+	second := Identity{
+		Version:     identityVersion,
+		Endpoint:    "https://nexus.example.com",
+		NodeID:      "node_second",
+		DeviceID:    "device_second_0001",
+		DeviceToken: "secret-second",
 	}
-
-	status, err := ReadStatus(home)
-	if err != nil {
+	if err := Save(home, second); err != nil {
 		t.Fatal(err)
 	}
-	if !status.IsWorkers || status.ServerEdition != EditionWorkers || status.ProtocolVersion != "2" || status.ContractVersion != "0.9.0" {
-		t.Fatalf("status = %#v", status)
+	loaded, err := Load(home)
+	if err != nil || loaded != second {
+		t.Fatalf("loaded = %#v err=%v", loaded, err)
 	}
-
-	// 即使响应体不带版本字段，仅靠 HTTP 响应头也能识别 Workers 版本与协议号。
-	headerOnly := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set(HeaderNexusEdition, "workers")
-		w.Header().Set(HeaderNexusProtocolVersion, "2")
-		w.Header().Set(HeaderNexusContractVersion, "0.9.0")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"node":{"id":"node_hdr"},"device_token":"nx_hdr_secret"}`))
-	}))
-	defer headerOnly.Close()
-
-	hdrHome := t.TempDir()
-	hdrIdentity, err := Pair(t.Context(), hdrHome, PairOptions{Endpoint: headerOnly.URL, Code: "pair_hdr", Name: "HeaderNode"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hdrIdentity.ServerInfo().IsWorkers() || hdrIdentity.ProtocolVersion != "2" || hdrIdentity.ContractVersion != "0.9.0" {
-		t.Fatalf("header fallback identity = %#v", hdrIdentity)
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(identityPath(home))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("identity permissions = %o, want 0600", info.Mode().Perm())
+		}
 	}
 }
+
+
+

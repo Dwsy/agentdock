@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { FolderTree, FolderGit2, Search, GitCompare, FileText, Columns2, ChevronDown, ChevronRight, Clock3, Copy, Check } from 'lucide-react';
 import type { FileChanges as FileChangesData, FileChange, Tasks as TasksData } from '../api';
 import { Panel, SectionTitle, Badge, fmt, relTime } from '../ui';
@@ -59,7 +59,7 @@ function FileDetail({ change }: { change: FileChange }) {
   );
 }
 
-/** 项目分组的一段：项目头可折叠，下面平铺该项目的文件变更。 */
+/** 项目分组：项目头可折叠，内部按文件树展示并合并同一文件的多次修改。 */
 function ProjectGroupBlock({
   group,
   selectedId,
@@ -70,6 +70,7 @@ function ProjectGroupBlock({
   onSelect: (change: FileChange) => void;
 }) {
   const [open, setOpen] = useState(true);
+  const getPath = useCallback((c: FileChange) => changeDisplayPath(c, group), [group]);
   return (
     <div>
       <button
@@ -86,22 +87,19 @@ function ProjectGroupBlock({
           {group.deletions > 0 && <span className="text-red-500">-{group.deletions}</span>}
         </span>
       </button>
-      {open &&
-        group.changes.map((change) => (
-          <button
-            key={change.id}
-            onClick={() => onSelect(change)}
-            className={`flex w-full items-center gap-1 rounded-md py-1 pl-7 pr-2 text-left text-xs ${selectedId === String(change.id) ? 'glass-chosen text-foreground' : 'text-muted-foreground hover:bg-muted/40'}`}
-            title={change.path}
-          >
-            <span className="min-w-0 truncate">{changeDisplayPath(change, group)}</span>
-            <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] tabular">
-              {change.insertions > 0 && <span className="text-emerald-500">+{change.insertions}</span>}
-              {change.deletions ? <span className="text-red-500">-{change.deletions}</span> : null}
-            </span>
-          </button>
-        ))}
-      {open && group.changes.length === 0 && <div className="py-1 pl-7 text-[11px] text-muted-foreground">没有文件</div>}
+      {open && (
+        group.changes.length === 0
+          ? <div className="py-1 pl-7 text-[11px] text-muted-foreground">没有文件</div>
+          : <div className="pl-3 pt-0.5">
+              <FileTree
+                changes={group.changes}
+                selected={selectedId ?? undefined}
+                onSelect={onSelect}
+                getDisplayPath={getPath}
+                className="pr-1"
+              />
+            </div>
+      )}
     </div>
   );
 }

@@ -148,18 +148,28 @@ func runtimeAPIHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore
 // body. They require Content-Type: application/json so browsers cannot trigger
 // them as CORS "simple requests" (text/plain, form-urlencoded, multipart).
 var jsonBodyPostEndpoints = map[string]struct{}{
-	"/internal/runtime/mcp":               {},
+	"/internal/runtime/mcp":                {},
 	"/internal/runtime/mcp/oauth/callback": {},
-	"/internal/runtime/evolve":            {},
-	runtimeapi.ResourceLibraryPath:        {},
+	"/internal/runtime/evolve":             {},
+	"/internal/runtime/config":             {},
+	"/internal/runtime/manual-llm/cancel":  {},
+	"/internal/runtime/manual-llm/toggle":  {},
+	"/internal/runtime/remote/token":       {},
+	"/internal/runtime/remote/nexus/pair":  {},
+	"/internal/runtime/remote/tunnel":      {},
+	runtimeapi.ResourceLibraryPath:         {},
 }
 
 func requiresJSONContentType(method, path string) bool {
 	if method != http.MethodPost {
 		return false
 	}
-	_, ok := jsonBodyPostEndpoints[strings.TrimSuffix(path, "/")]
-	return ok
+	cleanPath := strings.TrimSuffix(path, "/")
+	if _, ok := jsonBodyPostEndpoints[cleanPath]; ok {
+		return true
+	}
+	// 任务写操作与发布物延期同样以 JSON 为请求体，一并纳入强制范围。
+	return runtimeapi.IsTaskActionsPath(cleanPath) || runtimeapi.IsArtifactExtendPath(cleanPath)
 }
 
 func runtimeRequestBody(r *http.Request) ([]byte, error) {
@@ -167,7 +177,8 @@ func runtimeRequestBody(r *http.Request) ([]byte, error) {
 	if runtimeapi.IsArtifactPublishPath(r.Method, cleanPath) {
 		return io.ReadAll(io.LimitReader(r.Body, runtimeapi.MaxArtifactPublishBodyBytes+1))
 	}
-	if r.Method != http.MethodPost || (cleanPath != "/internal/runtime/mcp" && cleanPath != "/internal/runtime/mcp/oauth/callback" && cleanPath != "/internal/runtime/evolve" && cleanPath != "/internal/runtime/config" && cleanPath != "/internal/runtime/manual-llm/cancel" && cleanPath != "/internal/runtime/manual-llm/toggle" && cleanPath != "/internal/runtime/remote/token" && cleanPath != "/internal/runtime/remote/nexus/pair" && cleanPath != "/internal/runtime/remote/tunnel" && cleanPath != runtimeapi.ResourceLibraryPath && !runtimeapi.IsTaskActionsPath(cleanPath) && !runtimeapi.IsArtifactExtendPath(cleanPath)) {
+	// 需要读 JSON 体的路由与强制 Content-Type 的路由是同一集合，避免两份清单漂移。
+	if !requiresJSONContentType(r.Method, cleanPath) {
 		return nil, nil
 	}
 	return io.ReadAll(io.LimitReader(r.Body, 64*1024+1))

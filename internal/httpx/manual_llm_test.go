@@ -72,7 +72,7 @@ func TestManualLLMEndpointsDisabledByDefault(t *testing.T) {
 
 	// Verify live toggle activates /v1/responses and /mcp/manual immediately without restart.
 	tRec := httptest.NewRecorder()
-	mux.ServeHTTP(tRec, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":true,"persist":false}`)))
+	mux.ServeHTTP(tRec, newLocalJSONRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":true,"persist":false}`)))
 	if tRec.Code != http.StatusOK || !strings.Contains(tRec.Body.String(), `"enabled":true`) {
 		t.Fatalf("live toggle failed: status=%d body=%s", tRec.Code, tRec.Body.String())
 	}
@@ -85,7 +85,7 @@ func TestManualLLMEndpointsDisabledByDefault(t *testing.T) {
 
 	// Verify toggling back false closes routes to 404 again.
 	offRec := httptest.NewRecorder()
-	mux.ServeHTTP(offRec, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":false,"persist":false}`)))
+	mux.ServeHTTP(offRec, newLocalJSONRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":false,"persist":false}`)))
 	if offRec.Code != http.StatusOK || !strings.Contains(offRec.Body.String(), `"enabled":false`) {
 		t.Fatalf("live toggle off failed: status=%d body=%s", offRec.Code, offRec.Body.String())
 	}
@@ -99,7 +99,7 @@ func TestManualLLMEndpointsDisabledByDefault(t *testing.T) {
 	runtimeRoot := t.TempDir()
 	t.Setenv("AGENTDOCK_RUNTIME_ROOT", runtimeRoot)
 	persistRec := httptest.NewRecorder()
-	mux.ServeHTTP(persistRec, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":true}`)))
+	mux.ServeHTTP(persistRec, newLocalJSONRuntimeRequest(http.MethodPost, "/internal/runtime/manual-llm/toggle", strings.NewReader(`{"enabled":true}`)))
 	if persistRec.Code != http.StatusOK || !strings.Contains(persistRec.Body.String(), `"persisted":true`) {
 		t.Fatalf("expected default persisted toggle, got status=%d body=%s", persistRec.Code, persistRec.Body.String())
 	}

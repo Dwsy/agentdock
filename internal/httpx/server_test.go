@@ -37,6 +37,14 @@ func newLocalRuntimeRequest(method, target string, body io.Reader) *http.Request
 	return request
 }
 
+// newLocalJSONRuntimeRequest 用于请求体为 JSON 的写操作路由：HTTP 入口强制
+// Content-Type: application/json，测试必须模拟真实客户端的这一点。
+func newLocalJSONRuntimeRequest(method, target string, body io.Reader) *http.Request {
+	request := newLocalRuntimeRequest(method, target, body)
+	request.Header.Set("Content-Type", "application/json")
+	return request
+}
+
 func newMCPRequest(method, target string, body io.Reader) *http.Request {
 	request := httptest.NewRequest(method, target, body)
 	request.Header.Set("Content-Type", "application/json")
@@ -702,7 +710,7 @@ func TestRuntimeAPITaskWriteActionsLifecycle(t *testing.T) {
 	postAction := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, newLocalRuntimeRequest(http.MethodPost, "/internal/runtime/tasks/"+taskID+"/actions", strings.NewReader(body)))
+		handler.ServeHTTP(recorder, newLocalJSONRuntimeRequest(http.MethodPost, "/internal/runtime/tasks/"+taskID+"/actions", strings.NewReader(body)))
 		return recorder
 	}
 

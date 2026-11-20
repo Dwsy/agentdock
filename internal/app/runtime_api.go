@@ -63,6 +63,26 @@ func (r *Runtime) RuntimeAnalytics() Result {
 	}
 }
 
+// RuntimeCallAnalytics returns the same metadata projection for all matching calls in the selected range.
+func (r *Runtime) RuntimeCallAnalytics(query observability.CallAnalyticsQuery) Result {
+	snapshot := r.observer.CallAnalytics(query)
+	return Result{
+		"ok":        true,
+		"source":    runtimeAPISource,
+		"window":    snapshot.Window,
+		"totals":    snapshot.Totals,
+		"buckets":   snapshot.Buckets,
+		"by_tool":   snapshot.ByTool,
+		"by_source": snapshot.BySource,
+		"by_client": snapshot.ByClient,
+		"by_task":   snapshot.ByTask,
+		"by_error":  snapshot.ByError,
+		"by_stage":  snapshot.ByStage,
+		"facets":    snapshot.Facets,
+		"calls":     snapshot.Calls,
+	}
+}
+
 // RuntimeDiagnostics 只暴露最近调用的零 Payload 投影，供 Nexus 按需远程排障。
 // 本地 analytics 的进程指标与聚合统计不进入跨节点契约。
 func (r *Runtime) RuntimeDiagnostics() Result {

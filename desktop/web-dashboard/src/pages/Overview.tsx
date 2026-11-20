@@ -2,6 +2,7 @@ import { useMemo, type ElementType } from 'react';
 import {
   Activity,
   AlertTriangle,
+  ArrowUpRight,
   Blocks,
   Bot,
   Boxes,
@@ -24,6 +25,7 @@ type Props = {
   analytics: Analytics;
   alerts: Alerts;
   tasks: Tasks;
+  onOpenAnalytics: () => void;
 };
 
 type Tone = 'default' | 'green' | 'amber' | 'red' | 'violet' | 'sky';
@@ -153,7 +155,7 @@ const statusMeta: Record<string, { label: string; cls: string }> = {
   pending: { label: '待处理', cls: 'bg-muted/20 text-muted-foreground' },
 };
 
-export default function Overview({ status, overview, analytics, alerts, tasks }: Props) {
+export default function Overview({ status, overview, analytics, alerts, tasks, onOpenAnalytics }: Props) {
   const errorRate = analytics.total_calls ? ((analytics.total_errors / analytics.total_calls) * 100).toFixed(2) : '0';
   const activeAlerts = alerts.alerts.filter((a) => a.active).length;
   const recentTasks = useMemo(
@@ -180,7 +182,16 @@ export default function Overview({ status, overview, analytics, alerts, tasks }:
           <TokenChart data={analytics.daily_tokens} />
         </Panel>
         <Panel className="p-4 lg:col-span-4">
-          <WidgetTitle icon={Terminal} title="工具调用排行" hint="Top 8" />
+          <WidgetTitle
+            icon={Terminal}
+            title="工具调用排行"
+            hint="最近 5 分钟"
+            action={
+              <button type="button" onClick={onOpenAnalytics} className="flex items-center gap-1 whitespace-nowrap text-xs text-primary hover:underline">
+                调用分析 <ArrowUpRight size={13} aria-hidden="true" />
+              </button>
+            }
+          />
           <ToolBars stats={analytics.tool_stats} />
         </Panel>
       </div>

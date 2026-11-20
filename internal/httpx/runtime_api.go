@@ -23,6 +23,7 @@ func registerRuntimeAPI(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg conf
 	mux.HandleFunc("/internal/runtime/config", h)
 	mux.HandleFunc("/internal/runtime/config/restart", h)
 	mux.HandleFunc("/internal/runtime/analytics", h)
+	mux.HandleFunc(runtimeapi.CallAnalyticsPath, h)
 	mux.HandleFunc("/internal/runtime/events", h)
 	mux.HandleFunc("/internal/runtime/alerts", h)
 	mux.HandleFunc("/internal/runtime/overview", h)

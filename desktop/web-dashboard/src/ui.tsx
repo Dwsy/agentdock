@@ -40,21 +40,23 @@ export function StatCard({
   value,
   sub,
   tone = 'default',
+  dense = false,
 }: {
   icon: ElementType;
   label: string;
   value: string | number;
   sub?: string;
   tone?: keyof typeof toneMap;
+  dense?: boolean;
 }) {
   return (
-    <Panel className="animate-float-in p-5">
-      <div className="flex items-start justify-between">
+    <Panel className={dense ? 'p-3 sm:p-4' : 'animate-float-in p-5'}>
+      <div className="flex items-start justify-between gap-1">
         <span className="text-xs font-medium text-muted-foreground">{label}</span>
-        <Icon size={16} className="text-muted-foreground/70" />
+        <Icon size={dense ? 14 : 16} className="shrink-0 text-muted-foreground/70" />
       </div>
-      <div className={`tabular mt-3 text-3xl font-semibold leading-none ${toneMap[tone]}`}>{value}</div>
-      {sub && <div className="mt-2 text-xs text-muted-foreground">{sub}</div>}
+      <div className={`tabular font-semibold leading-none ${dense ? 'mt-2 text-xl sm:text-2xl' : 'mt-3 text-3xl'} ${toneMap[tone]}`}>{value}</div>
+      {sub && <div className={`${dense ? 'mt-1.5' : 'mt-2'} text-xs text-muted-foreground`}>{sub}</div>}
     </Panel>
   );
 }

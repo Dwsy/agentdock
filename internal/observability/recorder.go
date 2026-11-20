@@ -25,8 +25,7 @@ const WindowMinutes = 5
 // windowDuration 是统计窗口长度。
 const windowDuration = time.Duration(WindowMinutes) * time.Minute
 
-// windowMaxRecords 是窗口内最多保留的记录条数。窗口里的高频调用可能
-// 产生大量记录，超限时丢弃最旧的条目，保证内存有界。
+// windowMaxRecords 限制内存中保留的调用统计明细，超限时先淘汰最旧记录。
 const windowMaxRecords = 20000
 
 // ExecutionRecord 是运行分析保存的最小工具调用元数据。
@@ -153,17 +152,9 @@ type dailyBucket struct {
 	Output uint64 `json:"output_tokens"`
 }
 
-// windowStat 是窗口内一次调用的统计投影。窗口聚合只需要工具、耗时、
-// 成败和行数/token 增量，不保留 Stages 等明细，避免窗口吃掉内存。
+// windowStat 和最近调用环共享不可变的白名单元数据。
 type windowStat struct {
-	tool         string
-	durationMS   float64
-	success      bool
-	insertions   int
-	deletions    int
-	inputTokens  int
-	outputTokens int
-	// completedAt 是调用结束时刻，窗口按它淘汰过期条目。
+	record      *ExecutionRecord
 	completedAt time.Time
 }
 
@@ -171,14 +162,14 @@ type Recorder struct {
 	mu sync.RWMutex
 
 	startedAt time.Time
-	records   []ExecutionRecord
+	records   []*ExecutionRecord
 	capacity  int
 	next      int
 	size      int
 
-	// window 是最近 WindowMinutes 分钟内完成的调用统计投影，按完成时刻
-	// 升序。窗口调用数与工具聚合都从它计算，与最近调用环的容量无关。
-	window []windowStat
+	// window 按完成时刻升序。旧分析和告警只读取尾部的 5 分钟。
+	window          []windowStat
+	windowDroppedAt time.Time
 
 	nextID      uint64
 	totalCalls  uint64
@@ -232,7 +223,7 @@ func NewRecorder(capacity int, statePath string) *Recorder {
 	}
 	recorder := &Recorder{
 		startedAt:   time.Now(),
-		records:     make([]ExecutionRecord, capacity),
+		records:     make([]*ExecutionRecord, capacity),
 		capacity:    capacity,
 		dailyTokens: make(map[string]dailyBucket),
 		statePath:   statePath,
@@ -292,7 +283,7 @@ func (r *Recorder) EndTool(meta CallMeta) uint64 {
 	r.totalOutputTokens += uint64(maxInt(meta.OutputTokens, 0))
 	r.addTokenUsageLocked(meta.InputTokens, meta.OutputTokens)
 
-	record := ExecutionRecord{
+	record := &ExecutionRecord{
 		ID:            r.nextID,
 		Tool:          meta.Tool,
 		Source:        normalizedSource(meta.Source),
@@ -321,45 +312,30 @@ func (r *Recorder) EndTool(meta CallMeta) uint64 {
 	return record.ID
 }
 
-// appendWindowLocked 把一次调用记入统计窗口，并淘汰过期与超量的条目。
-func (r *Recorder) appendWindowLocked(record ExecutionRecord) {
+// appendWindowLocked 以记账时间计入窗口，与 Token 的完工记账口径一致。
+func (r *Recorder) appendWindowLocked(record *ExecutionRecord) {
 	now := time.Now()
-	r.window = append(r.window, windowStat{
-		tool:         record.Tool,
-		durationMS:   record.DurationMS,
-		success:      record.Success,
-		insertions:   record.Insertions,
-		deletions:    record.Deletions,
-		inputTokens:  record.InputTokens,
-		outputTokens: record.OutputTokens,
-		completedAt:  now,
-	})
+	r.window = append(r.window, windowStat{record: record, completedAt: now})
 	r.pruneWindowLocked(now)
 }
 
-// pruneWindowLocked 丢弃窗口里过期与超量的条目。条目按完成时刻升序，
-// 过期的都在队首，直接从头搬移即可。
 func (r *Recorder) pruneWindowLocked(now time.Time) {
-	cutoff := now.Add(-windowDuration)
-	expired := 0
-	for expired < len(r.window) && r.window[expired].completedAt.Before(cutoff) {
-		expired++
+	expired := len(r.window) - len(r.windowSinceLocked(now.Add(-callHistoryDuration)))
+	if overflow := len(r.window) - expired - windowMaxRecords; overflow > 0 {
+		expired += overflow
+		r.windowDroppedAt = r.window[expired-1].completedAt
 	}
-	if expired > 0 {
-		r.window = r.dropWindowLocked(expired)
-	}
-	if overflow := len(r.window) - windowMaxRecords; overflow > 0 {
-		r.window = r.dropWindowLocked(overflow)
-	}
+	// 从队首推进，避免高负载下每淘汰一条都搬移整个队列。
+	clear(r.window[:expired])
+	r.window = r.window[expired:]
 }
 
-// dropWindowLocked 从窗口头部丢弃 count 条记录，并清掉搬移后残留的引用。
-func (r *Recorder) dropWindowLocked(count int) []windowStat {
-	kept := copy(r.window, r.window[count:])
-	for i := kept; i < len(r.window); i++ {
-		r.window[i] = windowStat{}
-	}
-	return r.window[:kept]
+// windowSinceLocked 利用完成顺序查找范围起点。调用方必须持有锁。
+func (r *Recorder) windowSinceLocked(from time.Time) []windowStat {
+	first := sort.Search(len(r.window), func(i int) bool {
+		return !r.window[i].completedAt.Before(from)
+	})
+	return r.window[first:]
 }
 
 // schedulePersistLocked 标记未落盘变化，并在距上次落盘超过节流间隔时
@@ -385,10 +361,11 @@ func (r *Recorder) WindowErrorStats() (calls int, errors int) {
 		return 0, 0
 	}
 	r.mu.Lock()
-	r.pruneWindowLocked(time.Now())
-	for _, stat := range r.window {
+	now := time.Now()
+	r.pruneWindowLocked(now)
+	for _, stat := range r.windowSinceLocked(now.Add(-windowDuration)) {
 		calls++
-		if !stat.success {
+		if !stat.record.Success {
 			errors++
 		}
 	}
@@ -404,10 +381,7 @@ func (r *Recorder) RecentCalls() []ExecutionRecord {
 	r.mu.RLock()
 	recent := r.recentLocked()
 	r.mu.RUnlock()
-	for i := range recent {
-		recent[i].Stages = append([]StageRecord(nil), recent[i].Stages...)
-	}
-	return recent
+	return cloneRecentStages(recent)
 }
 
 func (r *Recorder) Snapshot() Snapshot {
@@ -416,8 +390,8 @@ func (r *Recorder) Snapshot() Snapshot {
 	}
 
 	r.mu.Lock()
-	// 快照是读路径，但窗口要按当前时刻淘汰过期条目，必须拿写锁。
-	r.pruneWindowLocked(time.Now())
+	now := time.Now()
+	r.pruneWindowLocked(now)
 	startedAt := r.startedAt
 	capacity := r.capacity
 	totalCalls := r.totalCalls
@@ -431,7 +405,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	dailyTokens := r.dailyTokensLocked()
 	recent := r.recentLocked()
 	// 窗口切片在解锁后仍会被写入路径追加，必须拷贝后再用。
-	window := append([]windowStat(nil), r.window...)
+	window := append([]windowStat(nil), r.windowSinceLocked(now.Add(-windowDuration))...)
 	r.mu.Unlock()
 
 	heapAlloc, heapInuse, heapSys, gcCycles := readProcessMemory()
@@ -453,7 +427,7 @@ func (r *Recorder) Snapshot() Snapshot {
 		WindowOutputTokens:    windowOutputTokens,
 		DailyTokens:           dailyTokens,
 		ToolStats:             aggregateToolStats(window),
-		RecentCalls:           recent,
+		RecentCalls:           cloneRecentStages(recent),
 		Process: ProcessSnapshot{
 			Goroutines:     runtime.NumGoroutine(),
 			HeapAllocBytes: heapAlloc,
@@ -646,7 +620,14 @@ func (r *Recorder) recentLocked() []ExecutionRecord {
 	recent := make([]ExecutionRecord, 0, r.size)
 	for offset := 0; offset < r.size; offset++ {
 		index := (r.next - 1 - offset + r.capacity) % r.capacity
-		recent = append(recent, r.records[index])
+		recent = append(recent, *r.records[index])
+	}
+	return recent
+}
+
+func cloneRecentStages(recent []ExecutionRecord) []ExecutionRecord {
+	for i := range recent {
+		recent[i].Stages = append([]StageRecord(nil), recent[i].Stages...)
 	}
 	return recent
 }
@@ -663,20 +644,21 @@ func aggregateToolStats(stats []windowStat) []ToolStats {
 	}
 	byTool := make(map[string]*accumulator)
 	for _, stat := range stats {
-		current := byTool[stat.tool]
+		record := stat.record
+		current := byTool[record.Tool]
 		if current == nil {
 			current = &accumulator{}
-			byTool[stat.tool] = current
+			byTool[record.Tool] = current
 		}
 		current.count++
-		if !stat.success {
+		if !record.Success {
 			current.errorCount++
 		}
-		current.durations = append(current.durations, stat.durationMS)
-		current.insertions += stat.insertions
-		current.deletions += stat.deletions
-		current.inputTokens += stat.inputTokens
-		current.outputTokens += stat.outputTokens
+		current.durations = append(current.durations, record.DurationMS)
+		current.insertions += record.Insertions
+		current.deletions += record.Deletions
+		current.inputTokens += record.InputTokens
+		current.outputTokens += record.OutputTokens
 	}
 
 	toolStats := make([]ToolStats, 0, len(byTool))

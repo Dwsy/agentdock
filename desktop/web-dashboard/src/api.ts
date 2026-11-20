@@ -48,6 +48,54 @@ export type RecentCall = {
   error_code?: string;
 };
 
+export type CallRange = '5m' | '1h' | '24h';
+export type CallFilterKey = 'tool' | 'source' | 'status' | 'user_agent' | 'task_id' | 'error_code' | 'error_category' | 'stage';
+export type CallFilters = Partial<Record<CallFilterKey, string>>;
+
+export type CallMetrics = {
+  count: number;
+  error_count: number;
+  avg_duration_ms: number;
+  p50_duration_ms: number;
+  p95_duration_ms: number;
+  p99_duration_ms: number;
+  max_duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  insertions: number;
+  deletions: number;
+};
+
+export type CallBucket = CallMetrics & { start: string; end: string };
+export type CallGroup = CallMetrics & { key: string; category?: string };
+export type CallStage = { name: string; started_offset_ms: number; duration_ms: number; success: boolean };
+export type AnalyticsCall = RecentCall & {
+  completed_at: string;
+  task_id?: string;
+  trace_id?: string;
+  span_id?: string;
+  error_category?: string;
+  insertions?: number;
+  deletions?: number;
+  stages?: CallStage[];
+};
+
+export type CallAnalytics = {
+  ok: true;
+  source: 'agentdock-api';
+  window: { from: string; to: string; covered_from: string; limited_by?: 'restart' | 'capacity' };
+  totals: CallMetrics;
+  buckets: CallBucket[];
+  by_tool: CallGroup[];
+  by_source: CallGroup[];
+  by_client: CallGroup[];
+  by_task: CallGroup[];
+  by_error: CallGroup[];
+  by_stage: CallGroup[];
+  facets: { tools: string[]; sources: string[] };
+  calls: AnalyticsCall[];
+};
+
 export type DailyToken = { date: string; input_tokens: number; output_tokens: number };
 
 export type ProcessSnapshot = {
@@ -301,26 +349,36 @@ export type Catalog = {
   common_skills: { root: string; total: number; truncated: boolean; items: SkillItem[] };
 };
 
-async function get<T>(path: string): Promise<T> {
-  // 上游 AgentDock 在忙时可能几秒才回甚至超时；加超时避免无限挂起。
+export class DashboardRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+  // 超时覆盖响应体。外部取消用于停止已经离开或隐藏的页面请求。
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 25_000);
-  let res: Response;
+  const abort = () => ctrl.abort();
+  if (signal?.aborted) abort();
+  signal?.addEventListener('abort', abort, { once: true });
   try {
-    res = await fetch(`/dashboard/api${path}`, { cache: 'no-store', signal: ctrl.signal });
+    const res = await fetch(`/dashboard/api${path}`, { cache: 'no-store', signal: ctrl.signal });
+    let data;
+    try {
+      data = await res.json();
+    } catch (error) {
+      if (ctrl.signal.aborted) throw error;
+      throw new DashboardRequestError(`HTTP ${res.status} · 响应不是 JSON`, res.status);
+    }
+    if (!res.ok || (data && data.ok === false)) {
+      throw new DashboardRequestError(data?.error || data?.code || `HTTP ${res.status}`, res.status);
+    }
+    return data as T;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
-  let data: any;
-  try {
-    data = await res.json();
-  } catch {
-    throw new Error(`HTTP ${res.status} · 响应不是 JSON`);
-  }
-  if (!res.ok || (data && data.ok === false)) {
-    throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
-  }
-  return data as T;
 }
 
 export type AppConfig = {
@@ -493,6 +551,15 @@ export const api = {
   configRestart: () => post<ConfigRestartResult>('/config/restart', {}),
   overview: () => get<Overview>('/overview'),
   analytics: () => get<Analytics>('/analytics'),
+  callAnalytics: async (query: string, signal: AbortSignal) => {
+    const data = await get<CallAnalytics>(`/analytics/calls?${query}`, signal);
+    if (data?.ok !== true || data.source !== 'agentdock-api' || !data.window || !data.totals || !data.facets ||
+        ![data.buckets, data.by_tool, data.by_source, data.by_client, data.by_task, data.by_error, data.by_stage,
+          data.facets.tools, data.facets.sources, data.calls].every(Array.isArray)) {
+      throw new DashboardRequestError('调用分析响应格式不兼容', 200);
+    }
+    return data;
+  },
   alerts: () => get<Alerts>('/alerts'),
   tasks: (limit = 10000) => get<Tasks>(`/tasks?limit=${limit}`),
   taskDetail: (id: string) => get<TaskDetail>(`/tasks/${encodeURIComponent(id)}`),

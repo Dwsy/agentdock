@@ -213,6 +213,8 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		return map[string]any(runtime.RuntimeStatus()), nil
 	case path == "/internal/runtime/analytics":
 		return map[string]any(runtime.RuntimeAnalytics()), nil
+	case path == CallAnalyticsPath:
+		return dispatchCallAnalytics(runtime, request)
 	case path == "/internal/runtime/overview":
 		if ctxOverview, ok := runtime.(ContextOverviewRuntime); ok {
 			result, err := ctxOverview.RuntimeOverviewContext(ctx)

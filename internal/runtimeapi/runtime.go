@@ -35,6 +35,14 @@ type Runtime interface {
 	RuntimeEvolve(context.Context, map[string]any) (app.Result, error)
 }
 
+// CallAnalyticsRuntime is an optional read-only capability for windowed call analytics.
+type CallAnalyticsRuntime interface {
+	RuntimeCallAnalytics(observability.CallAnalyticsQuery) app.Result
+}
+
+// CallAnalyticsPath is the Runtime API route used by the call analytics dashboard.
+const CallAnalyticsPath = "/internal/runtime/analytics/calls"
+
 // MCPOAuthRuntime 是可选能力：只有支持 Remote MCP OAuth 的 Runtime 才实现。
 // 保持它独立于 Runtime 主接口，避免 callback relay 把所有测试替身和只读调用方一起扩展。
 // DiagnosticsRuntime 是增量只读能力。保持它独立于 Runtime 主接口，

@@ -8,6 +8,7 @@ import {
   Sun,
   Moon,
   LayoutDashboard,
+  ChartNoAxesCombined,
   ScrollText,
   Layers,
   ListChecks,
@@ -38,6 +39,7 @@ import {
   type Traces,
 } from './api';
 import OverviewPage from './pages/Overview';
+import AnalyticsPage from './pages/Analytics';
 import LivePage from './pages/Live';
 import TracesPage from './pages/Traces';
 import FileChangesPage from './pages/FileChanges';
@@ -71,6 +73,7 @@ const TASK_LIMIT = 10000;
 
 const NAV = [
   { id: 'overview', label: '概览', icon: LayoutDashboard, group: '监控' },
+  { id: 'analytics', label: '调用分析', icon: ChartNoAxesCombined, group: '监控' },
   { id: 'live', label: '实时事件', icon: Radio, group: '监控' },
   { id: 'traces', label: '调用追踪', icon: ScrollText, group: '监控' },
   { id: 'files', label: '文件变更', icon: Layers, group: '监控' },
@@ -88,6 +91,7 @@ type SnapshotKey = keyof Snapshot;
 const SHELL_KEYS: readonly SnapshotKey[] = ['status', 'alerts', 'manualLLM'];
 const PAGE_KEYS: Record<PageId, readonly SnapshotKey[]> = {
   overview: ['overview', 'analytics', 'tasks'],
+  analytics: [],
   live: [],
   traces: ['traces'],
   files: ['fileChanges', 'tasks'],
@@ -128,6 +132,7 @@ export default function App() {
   pageRef.current = page;
   const inFlightRef = useRef(false);
   const pendingForceRef = useRef(false);
+  const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
   const [connected, setConnected] = useState(false);
@@ -144,6 +149,7 @@ export default function App() {
       return;
     }
     inFlightRef.current = true;
+    if (pageRef.current === 'analytics') setAnalyticsRefresh((tick) => tick + 1);
     try {
       // 上游忙时个别接口会超时；按可见页按需拉取并用 allSettled 隔离单项超时。
       const keys = Array.from(new Set<SnapshotKey>([...SHELL_KEYS, ...PAGE_KEYS[pageRef.current]]));
@@ -297,7 +303,9 @@ export default function App() {
   const content = (() => {
     switch (page) {
       case 'overview':
-        return <OverviewPage status={status} overview={overview} analytics={analytics} alerts={alerts} tasks={tasks} />;
+        return <OverviewPage status={status} overview={overview} analytics={analytics} alerts={alerts} tasks={tasks} onOpenAnalytics={() => navigate('analytics')} />;
+      case 'analytics':
+        return <AnalyticsPage refreshKey={analyticsRefresh} onOpenTraces={() => navigate('traces')} />;
       case 'live':
         return (
           <LivePage

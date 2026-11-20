@@ -7,6 +7,7 @@
 | 页面 | 内容 |
 |---|---|
 | 概览 | 服务/任务/调用/告警关键指标、14 天 Token 趋势、工具排行、进程健康、能力开关 |
+| 调用分析 | 按调用完成时刻统计 5 分钟、1 小时、24 小时的调用量、失败率、耗时分位数、输入/输出 Token、代码增删。可按工具、来源、User-Agent、任务、错误和阶段查看分组，筛选结果同步更新趋势和最近 30 条明细。 |
 | 实时事件 | SSE 订阅 AgentDock 事件总线，实时显示调用/任务/发布物事件，支持筛选、暂停、清空 |
 | 调用追踪 | 左右布局：左侧可在「按时间」与「按项目」之间切换——按项目时用调用的路径信号（命令工作目录 `command.workdir`，其次文件变更的 `project_root`）分组，同名路径用多段后缀区分、无路径的落「未分类」并排最后，组头聚合次数/失败数/平均耗时；两种视图共用工具分类 chips + 请求头分组（按上游客户端头/本地 UA 聚合次数、失败数、平均耗时，点分组即按该值筛选）+ 成功/失败筛选 + 搜索，右侧单条详情；详情走 `/traces/detail` 接口，命令类展示完整命令/工作目录/stdout/stderr，`read_file` 渲染带行号的正文（超预览上限时走全文旁路），`view_image` 直接显示图片（字节走 `/traces/image` sidecar），其余结果里的 markdown 可切换渲染 |
 | 文件变更 | 左右布局：左侧可在「目录树」（按路径层级）与「按项目」（按任务项目路径分组，未匹配的落「未分类」）之间切换，右侧详情；diff 支持「左右对比 / 统一视图」切换，`.md` 文件额外提供 Markdown 渲染标签 |
@@ -18,7 +19,9 @@
 
 ## 数据来源
 
-统一走 `/dashboard/api/*`（而非直连 `/internal/runtime/*`），用到 status / overview / analytics / alerts / tasks / traces / traces/detail / traces/image / file-changes / artifacts（含 `/artifacts/{id}/extend`、`/artifacts/{id}/content`）/ skills / plugins / mcp / catalog / config / manual-llm / events。
+统一走 `/dashboard/api/*`（而非直连 `/internal/runtime/*`），用到 status / overview / analytics / analytics/calls / alerts / tasks / traces / traces/detail / traces/image / file-changes / artifacts（含 `/artifacts/{id}/extend`、`/artifacts/{id}/content`）/ skills / plugins / mcp / catalog / config / manual-llm / events。
+
+调用分析从当前 Core 进程内保留的最近 24 小时、最多 20,000 条调用元数据聚合。重启或容量淘汰后，页面会标出实际覆盖时段。Token 以工具入参和结果估算，概览中的历史按日累计继续从已有统计读取。
 
 - **生产**：AgentDock Go core 用 go:embed 把本目录 `dist/` 打进二进制，托盘菜单打开 `http://127.0.0.1:<port>/dashboard/`。`/dashboard/api/*` 由 core 做 loopback-only 反向代理，内部注入 token 转发到 `/internal/runtime/*`。
 - **开发**：Vite dev server 的中间件把 `/dashboard/api/*` 代理到本机 core，token 从 `agentdock.env` 读取后注入。

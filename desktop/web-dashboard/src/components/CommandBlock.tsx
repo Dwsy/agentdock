@@ -2,27 +2,12 @@ import { useState } from 'react';
 import { Terminal, Copy, Check, ChevronDown, Folder, Clock3, TerminalSquare } from 'lucide-react';
 import type { TraceRecord } from '../api';
 import { Badge, ms, bytes } from '../ui';
-
-/** 轻量 shell 高亮：命令名、flag、字符串、变量、注释。 */
-function highlightShell(line: string): React.ReactNode[] {
-  const out: React.ReactNode[] = [];
-  const re = /(#.*$)|('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")|(\$[A-Za-z_][A-Za-z0-9_]*)|(\s--?[A-Za-z][\w-]*)|(\b(?:bash|sh|git|npm|pnpm|yarn|cd|ls|cat|echo|curl|grep|rg|find|sudo|kill|ps|mkdir|rm|cp|mv|go|cargo|python3?|node|docker|sed|awk)\b)/g;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  let k = 0;
-  while ((m = re.exec(line))) {
-    if (m.index > last) out.push(line.slice(last, m.index));
-    const cls = m[1] ? 'text-muted-foreground' : m[2] ? 'text-emerald-500' : m[3] ? 'text-violet-400' : m[4] ? 'text-sky-400' : 'text-amber-400 font-semibold';
-    out.push(<span key={k++} className={cls}>{m[0]}</span>);
-    last = m.index + m[0].length;
-  }
-  if (last < line.length) out.push(line.slice(last));
-  return out;
-}
+import { CodeTokens, useCodeTokens } from './CodeSource';
 
 function HighlightedBlock({ text, label, tone = 'default' }: { text: string; label?: string; tone?: 'default' | 'error' }) {
   const [copied, setCopied] = useState(false);
   const lines = text.split('\n');
+  const tokens = useCodeTokens(text, label ? 'bash' : undefined);
   return (
     <div>
       {label && (
@@ -33,12 +18,12 @@ function HighlightedBlock({ text, label, tone = 'default' }: { text: string; lab
           </button>
         </div>
       )}
-      <div className="scrollbar-thin max-h-64 overflow-auto rounded-lg border border-border/60 bg-muted/20 py-1.5">
+      <div className="code-surface scrollbar-thin max-h-64 overflow-auto rounded-lg border border-border/60 py-1.5">
         {lines.map((l, i) => (
           <div key={i} className="flex font-mono text-[11px] leading-[1.55] hover:bg-muted/30">
             <span className="w-9 shrink-0 select-none pr-2 text-right text-[10px] tabular text-muted-foreground/40">{i + 1}</span>
             <span className={`min-w-0 flex-1 whitespace-pre-wrap break-all pr-2 ${tone === 'error' ? 'text-red-400/90' : ''}`}>
-              {tone === 'default' ? highlightShell(l) : l || ' '}
+              <CodeTokens text={l || ' '} tokens={tokens?.[i]} />
             </span>
           </div>
         ))}

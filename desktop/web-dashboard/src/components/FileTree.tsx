@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { ChevronRight, ChevronDown, Folder, FolderOpen, FileCode2, FileText, File } from 'lucide-react';
 import type { FileChange } from '../api';
+import { fileChangeKey } from '../lib/changeProjects';
 import { relTime } from '../ui';
 
 type Node = {
@@ -66,7 +67,7 @@ function sumStats(changes: FileChange[]) {
 }
 
 function ChangeSubRow({ change, depth, selected, onSelect }: { change: FileChange; depth: number; selected?: string; onSelect: (c: FileChange) => void }) {
-  const active = selected === String(change.id);
+  const active = selected === fileChangeKey(change);
   return (
     <button
       onClick={() => onSelect(change)}
@@ -78,7 +79,7 @@ function ChangeSubRow({ change, depth, selected, onSelect }: { change: FileChang
       <span className="shrink-0 text-[10px] text-muted-foreground/70">{relTime(change.started_at)}</span>
       <span className="min-w-0 truncate text-[10px] opacity-70">{change.tool}</span>
       <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] tabular">
-        {change.insertions > 0 && <span className="text-emerald-500">+{change.insertions}</span>}
+        {(change.insertions || 0) > 0 && <span className="text-emerald-500">+{change.insertions}</span>}
         {change.deletions ? <span className="text-red-500">-{change.deletions}</span> : null}
       </span>
     </button>
@@ -91,7 +92,7 @@ function FileNodeRow({ node, depth, selected, onSelect }: { node: Node; depth: n
 
   if (items.length <= 1) {
     const change = items[0];
-    const active = change && selected === String(change.id);
+    const active = change && selected === fileChangeKey(change);
     return (
       <button
         onClick={() => change && onSelect(change)}
@@ -104,7 +105,7 @@ function FileNodeRow({ node, depth, selected, onSelect }: { node: Node; depth: n
         <span className="truncate">{node.name}</span>
         {change && (
           <span className="ml-auto flex shrink-0 items-center gap-1 text-[10px] tabular">
-            {change.insertions > 0 && <span className="text-emerald-500">+{change.insertions}</span>}
+            {(change.insertions || 0) > 0 && <span className="text-emerald-500">+{change.insertions}</span>}
             {change.deletions ? <span className="text-red-500">-{change.deletions}</span> : null}
           </span>
         )}
@@ -113,7 +114,7 @@ function FileNodeRow({ node, depth, selected, onSelect }: { node: Node; depth: n
   }
 
   const { ins, del } = sumStats(items);
-  const hasActive = items.some((c) => selected === String(c.id));
+  const hasActive = items.some((c) => selected === fileChangeKey(c));
   return (
     <div>
       <button
@@ -132,7 +133,7 @@ function FileNodeRow({ node, depth, selected, onSelect }: { node: Node; depth: n
         </span>
       </button>
       {open && items.map((change) => (
-        <ChangeSubRow key={change.id} change={change} depth={depth + 1} selected={selected} onSelect={onSelect} />
+        <ChangeSubRow key={fileChangeKey(change)} change={change} depth={depth + 1} selected={selected} onSelect={onSelect} />
       ))}
     </div>
   );

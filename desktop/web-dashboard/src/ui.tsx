@@ -16,11 +16,11 @@ export function SectionTitle({
   action?: ReactNode;
 }) {
   return (
-    <div className="mb-4 flex items-center gap-2.5">
-      <Icon size={16} className="text-muted-foreground" />
+    <div className="mb-4 flex flex-wrap items-center gap-2.5">
+      <Icon size={16} className="shrink-0 text-muted-foreground" />
       <h2 className="text-sm font-semibold tracking-wide">{title}</h2>
-      {hint && <span className="text-xs text-muted-foreground">{hint}</span>}
-      {action && <div className="ml-auto">{action}</div>}
+      {hint && <span className="min-w-0 text-xs text-muted-foreground">{hint}</span>}
+      {action && <div className="ml-auto min-w-0 max-w-full">{action}</div>}
     </div>
   );
 }

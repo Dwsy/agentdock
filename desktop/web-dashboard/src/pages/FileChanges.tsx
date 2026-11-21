@@ -4,9 +4,10 @@ import type { FileChanges as FileChangesData, FileChange, Tasks as TasksData } f
 import { Panel, SectionTitle, Badge, fmt, relTime } from '../ui';
 import FileTree from '../components/FileTree';
 import { buildProjectGroups } from '../lib/taskProjects';
-import { changeDisplayPath, groupChangesByProject, type ChangeProjectGroup } from '../lib/changeProjects';
+import { changeDisplayPath, fileChangeKey, groupChangesByProject, type ChangeProjectGroup } from '../lib/changeProjects';
 import DiffViewer from '../components/DiffViewer';
-import MarkdownView, { markdownFromDiff } from '../components/MarkdownView';
+import MarkdownView from '../components/MarkdownView';
+import { fileDiffPreview } from '../lib/diffPreview';
 import { usePersistedState } from '../lib/usePersistedState';
 
 function isMarkdown(path: string) {
@@ -16,8 +17,36 @@ function isMarkdown(path: string) {
 function FileDetail({ change }: { change: FileChange }) {
   const [tab, setTab] = usePersistedState<'diff' | 'render'>('file-detail-tab', 'diff');
   const [copied, setCopied] = useState(false);
-  const md = useMemo(() => markdownFromDiff(change.diff || ''), [change.diff]);
   const markdown = isMarkdown(change.path);
+  // 批量预览在旧记录里每行都可能是同一段多文件 diff；Markdown 正文只能取
+  // 当前选中文件的分节，否则会把别的文件新增行拼进来。
+  const preview = useMemo(
+    () => fileDiffPreview(change.diff || '', { path: change.path, moveTo: change.move_to }),
+    [change.diff, change.path, change.move_to],
+  );
+  const md = useMemo(
+    () => preview.lines.filter((line) => line.type === 'add').map((line) => line.text).join('\n'),
+    [preview.lines],
+  );
+  // 渲染标签的持久化状态跨文件共享：切到非 Markdown 文件时必须回到 Diff。
+  const activeTab = markdown ? tab : 'diff';
+  const markdownHint = !(change.diff || '').trim()
+    ? '暂无此文件的 diff 预览，无法还原 Markdown 正文'
+    : !preview.matched
+      ? '未能从 diff 预览中定位该文件的分节，无法还原 Markdown 正文'
+      : md.trim()
+        ? ''
+        : '该文件的 diff 分节中没有新增行，无法还原 Markdown 正文';
+
+  const copyPath = async () => {
+    try {
+      await navigator.clipboard.writeText(change.path);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // 剪贴板写入被拒绝时保持未复制状态，不能谎报成功。
+    }
+  };
 
   return (
     <div className="animate-fade-in">
@@ -32,24 +61,33 @@ function FileDetail({ change }: { change: FileChange }) {
             {change.deletions != null && <span className="text-red-500">-{change.deletions}</span>}
           </div>
         </div>
-        <button onClick={() => { navigator.clipboard?.writeText(change.path); setCopied(true); setTimeout(() => setCopied(false), 1500); }} className="glass-control rounded-md p-1.5 text-muted-foreground" title="复制路径">
+        <button onClick={copyPath} className="glass-control rounded-md p-1.5 text-muted-foreground" title="复制路径">
           {copied ? <Check size={13} /> : <Copy size={13} />}
         </button>
       </div>
 
       <div className="mb-2 flex flex-wrap gap-1">
-        <button onClick={() => setTab('diff')} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 text-xs ${tab === 'diff' ? 'text-foreground' : 'text-muted-foreground'}`}>
+        <button onClick={() => setTab('diff')} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 text-xs ${activeTab === 'diff' ? 'text-foreground' : 'text-muted-foreground'}`}>
           <GitCompare size={12} /> Diff
         </button>
         {markdown && (
-          <button onClick={() => setTab('render')} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 text-xs ${tab === 'render' ? 'text-foreground' : 'text-muted-foreground'}`}>
+          <button onClick={() => setTab('render')} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 text-xs ${activeTab === 'render' ? 'text-foreground' : 'text-muted-foreground'}`}>
             <FileText size={12} /> Markdown 渲染
           </button>
         )}
       </div>
 
-      {tab === 'diff' ? (
-        <DiffViewer diff={change.diff || ''} filePath={change.path} />
+      {activeTab === 'diff' ? (
+        <DiffViewer
+          diff={change.diff || ''}
+          filePath={change.path}
+          moveTo={change.move_to}
+          insertions={change.insertions}
+          deletions={change.deletions}
+          truncated={change.truncated}
+        />
+      ) : markdownHint ? (
+        <div className="rounded-lg border border-border/60 bg-muted/20 px-4 py-8 text-center text-xs text-muted-foreground">{markdownHint}</div>
       ) : (
         <div className="scrollbar-thin max-h-[520px] overflow-auto rounded-lg border border-border/60 bg-muted/20 p-4">
           <MarkdownView content={md} />
@@ -108,14 +146,14 @@ export default function FileChanges({ data, tasks }: { data: FileChangesData; ta
   const [q, setQ] = useState('');
   // 两种分组只是左侧选择器的视图切换；选中项、搜索、右侧详情共用一套状态。
   const [mode, setMode] = usePersistedState<'tree' | 'project'>('files-mode', 'tree');
-  const [selectedId, setSelectedId] = useState<string | number | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const filtered = useMemo(() => data.changes.filter((c) => !q || c.path.toLowerCase().includes(q.toLowerCase())), [data.changes, q]);
   const projectGroups = useMemo(() => buildProjectGroups(tasks.tasks), [tasks.tasks]);
   const grouped = useMemo(() => groupChangesByProject(filtered, projectGroups), [filtered, projectGroups]);
-  const selected = filtered.find((c) => String(c.id) === String(selectedId)) || filtered[0];
+  const selected = filtered.find((c) => fileChangeKey(c) === selectedId) || filtered[0];
   const totalIns = data.changes.reduce((s, c) => s + (c.insertions || 0), 0);
   const totalDel = data.changes.reduce((s, c) => s + (c.deletions || 0), 0);
-  const selectedKey = selected ? String(selected.id) : null;
+  const selectedKey = selected ? fileChangeKey(selected) : null;
 
   return (
     <Panel className="p-5">
@@ -147,11 +185,11 @@ export default function FileChanges({ data, tasks }: { data: FileChangesData; ta
             <span className="ml-auto tabular text-[11px] text-muted-foreground/60">{filtered.length}</span>
           </div>
           {mode === 'tree' ? (
-            <FileTree changes={filtered} selected={selectedKey ?? undefined} onSelect={(c) => setSelectedId(c.id)} />
+            <FileTree changes={filtered} selected={selectedKey ?? undefined} onSelect={(c) => setSelectedId(fileChangeKey(c))} />
           ) : (
             <div className="scrollbar-thin max-h-[640px] space-y-1 overflow-auto pr-1">
               {grouped.map((group) => (
-                <ProjectGroupBlock key={group.key || '__unclassified__'} group={group} selectedId={selectedKey} onSelect={(c) => setSelectedId(c.id)} />
+                <ProjectGroupBlock key={group.key || '__unclassified__'} group={group} selectedId={selectedKey} onSelect={(c) => setSelectedId(fileChangeKey(c))} />
               ))}
               {grouped.length === 0 && <div className="py-12 text-center text-sm text-muted-foreground">没有文件</div>}
             </div>

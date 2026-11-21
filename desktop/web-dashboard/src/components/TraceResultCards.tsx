@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { FileText, Image as ImageIcon, AlertTriangle } from 'lucide-react';
 import { api, type TraceRecord } from '../api';
 import { bytes } from '../ui';
+import { CodeTokens, fileLanguage, useCodeTokens } from './CodeSource';
 
 /** read_file 结果（internal/tool/file/runtime_files.go）。 */
 export type ReadFileResult = {
@@ -60,6 +61,7 @@ export function ReadFileCard({ data }: { data: ReadFileResult }) {
   // 末尾空行只来自文件结尾换行，不占一条行号，否则总行数会虚高一行。
   const shown = lines.length && lines[lines.length - 1] === '' ? lines.slice(0, -1) : lines;
   const gutter = String(start + Math.max(shown.length, 1) - 1).length;
+  const tokens = useCodeTokens(content, fileLanguage(data.path));
 
   return (
     <div className="space-y-2">
@@ -76,12 +78,12 @@ export function ReadFileCard({ data }: { data: ReadFileResult }) {
         )}
       </div>
       {shown.length > 0 ? (
-        <div className="scrollbar-thin max-h-[520px] overflow-auto rounded-lg border border-border/60 bg-muted/20 py-1.5">
+        <div className="code-surface scrollbar-thin max-h-[520px] overflow-auto rounded-lg border border-border/60 py-1.5">
           <div className="min-w-max font-mono text-[11px] leading-[1.55]">
             {shown.map((line, i) => (
               <div key={i} className="flex">
                 <span style={{ width: `${gutter + 2}ch` }} className="shrink-0 select-none pr-3 text-right tabular text-muted-foreground/40">{start + i}</span>
-                <span className="whitespace-pre pr-3">{line || ' '}</span>
+                <span className="whitespace-pre pr-3"><CodeTokens text={line || ' '} tokens={tokens?.[i]} /></span>
               </div>
             ))}
           </div>

@@ -131,6 +131,14 @@ body {
   }
 }
 
+.code-token {
+  color: var(--hls-light, inherit);
+}
+
+.dark .code-token {
+  color: var(--hls-dark, inherit);
+}
+
 /* highlight.js 精简主题（适配 Solid Glass 明暗双色） */
 .hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type { color: #f59e0b; }
 .hljs-string, .hljs-attr, .hljs-addition, .hljs-regexp { color: #10b981; }

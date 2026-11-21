@@ -109,7 +109,9 @@ const FETCHERS: { [K in SnapshotKey]: () => Promise<Snapshot[K]> } = {
   analytics: () => api.analytics(),
   alerts: () => api.alerts(),
   tasks: () => api.tasks(TASK_LIMIT),
-  traces: () => api.traces(80),
+  // 首屏只拉摘要，并显式 before_id=0 走 ID 降序游标：磁盘回放可能按
+  // StartedAt 排序，旧顺序的首屏最小 ID 会让后续游标漏记录。
+  traces: () => api.traces({ limit: 80, view: 'summary', beforeId: 0 }),
   fileChanges: () => api.fileChanges(80),
   artifacts: () => api.artifacts(),
   skills: () => api.skills(),
@@ -132,6 +134,9 @@ export default function App() {
   pageRef.current = page;
   const inFlightRef = useRef(false);
   const pendingForceRef = useRef(false);
+  // 浏览更早记录时暂停 traces 轮询，避免新记录把列表和选中项顶掉；
+  // 返回最新时由页面显式刷新并恢复。
+  const tracesPausedRef = useRef(false);
   const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
@@ -152,11 +157,14 @@ export default function App() {
     if (pageRef.current === 'analytics') setAnalyticsRefresh((tick) => tick + 1);
     try {
       // 上游忙时个别接口会超时；按可见页按需拉取并用 allSettled 隔离单项超时。
-      const keys = Array.from(new Set<SnapshotKey>([...SHELL_KEYS, ...PAGE_KEYS[pageRef.current]]));
+      const keys = Array.from(new Set<SnapshotKey>([...SHELL_KEYS, ...PAGE_KEYS[pageRef.current]]))
+        .filter((key) => !(key === 'traces' && tracesPausedRef.current));
       const results = await Promise.allSettled(keys.map((key) => FETCHERS[key]()));
       const got: Partial<Snapshot> = {};
       const failed: string[] = [];
       results.forEach((r, i) => {
+        // 请求发出后用户可能已进入历史浏览：晚到的 traces 响应也要丢弃。
+        if (keys[i] === 'traces' && tracesPausedRef.current) return;
         if (r.status === 'fulfilled') (got as Record<string, unknown>)[keys[i]] = r.value;
         else failed.push(keys[i]);
       });
@@ -221,6 +229,16 @@ export default function App() {
       setConnected,
     );
     return unsub;
+  }, [load]);
+
+  const setTracesHistoryMode = useCallback((paused: boolean) => {
+    tracesPausedRef.current = paused;
+  }, []);
+
+  // 返回最新：清掉历史游标后立刻重拉，而不是等下一次 10s 轮询。
+  const refreshTraces = useCallback(() => {
+    tracesPausedRef.current = false;
+    void load(true);
   }, [load]);
 
   useEffect(() => {
@@ -317,7 +335,7 @@ export default function App() {
           />
         );
       case 'traces':
-        return <TracesPage data={traces} />;
+        return <TracesPage data={traces} onHistoryModeChange={setTracesHistoryMode} onRefreshLatest={refreshTraces} />;
       case 'files':
         return <FileChangesPage data={fileChanges} tasks={tasks} />;
       case 'tasks':
@@ -401,7 +419,7 @@ export default function App() {
         </nav>
 
         <div className="mt-auto space-y-1.5 border-t border-border/50 pt-3 text-[11px] text-muted-foreground">
-          <div className="flex items-center justify-between"><span>服务</span><span className={status.ok ? 'text-emerald-500' : 'text-red-500'}>{status.ok ? '在线' : '离线'}</span></div>
+          <div className="flex items-center justify-between"><span>服务</span><span className={status.ok ? 'text-emerald-500' : 'text-muted-foreground'}>{status.ok ? '在线' : '未知'}</span></div>
           <div className="flex min-w-0 items-center justify-between gap-2"><span className="shrink-0">版本</span><span className="truncate font-mono" title={`v${status.version}`}>v{status.version}</span></div>
           <div className="flex items-center justify-between"><span>工具</span><span className="tabular">{status.tool_count}</span></div>
         </div>
@@ -422,16 +440,23 @@ export default function App() {
           </button>
           <div className="flex min-w-0 items-center gap-2">
             <h1 className="truncate text-sm font-semibold">{NAV.find((n) => n.id === page)?.label}</h1>
-            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.ok ? 'bg-emerald-500' : 'bg-red-500'}`} />
-            <span className="hidden whitespace-nowrap text-xs text-muted-foreground sm:inline">
-              {status.ok ? '在线' : '离线'}
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${status.ok ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+            <span className="hidden whitespace-nowrap text-xs text-muted-foreground sm:inline" title={status.ok ? '服务在线' : '状态未知：状态接口请求未成功'}>
+              {status.ok ? '在线' : '未知'}
             </span>
           </div>
           <div className="ml-auto flex items-center gap-1.5">
             <span className="hidden items-center gap-1.5 text-xs text-muted-foreground md:flex">
               {error ? <><WifiOff size={13} className="text-red-500" /> 刷新失败</> : <><Radio size={13} className="text-emerald-500" /> 10s</>}
             </span>
-            {lastUpdated && <span className="tabular hidden text-xs text-muted-foreground md:inline">{lastUpdated.toLocaleTimeString('zh-CN')}</span>}
+            {lastUpdated && (
+              <span
+                className="tabular hidden text-xs text-muted-foreground md:inline"
+                title="页面刷新时间（不是服务端统计生成时间）"
+              >
+                {lastUpdated.toLocaleTimeString('zh-CN')}
+              </span>
+            )}
             <button
               onClick={() => void load(true)}
               aria-label="立即刷新"

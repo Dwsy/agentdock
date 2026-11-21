@@ -2,6 +2,11 @@ import type { FileChange } from '../api';
 // 带 .ts 扩展名是为了 node --test 直跑源码（Node ESM 不做扩展名补全）；tsconfig 已开启 allowImportingTsExtensions。
 import { normalizeProject, projectBasename, UNCLASSIFIED_LABEL, type ProjectGroup } from './taskProjects.ts';
 
+/** 同一次调用可能产生多条文件变更，服务端 ID 是调用级的。 */
+export function fileChangeKey(change: FileChange): string {
+  return JSON.stringify([change.id, change.path, change.action]);
+}
+
 /** 一个项目下的文件变更汇总；key 与 taskProjects 的项目 key 同源，直接复用。 */
 export type ChangeProjectGroup = {
   key: string;
@@ -18,7 +23,7 @@ export type ChangeProjectGroup = {
  * 文件变更的 path / project_root 保留原样，直接比会全部落空。
  * （Linux 上同名不同大小写的目录会被并到一起，相对少见，可接受。）
  */
-function foldPath(value: string): string {
+function foldPath(value: string | undefined): string {
   return normalizeProject(value).toLowerCase();
 }
 

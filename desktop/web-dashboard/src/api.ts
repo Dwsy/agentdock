@@ -1,5 +1,8 @@
 export type Status = {
   ok: boolean;
+  source?: string;
+  /** 服务端生成该响应的时间；缺失表示接口未提供，不能回退成页面刷新时间。 */
+  generated_at?: string;
   service: string;
   version: string;
   agentdock_home: string;
@@ -17,7 +20,21 @@ export type Status = {
 export type Overview = {
   ok: boolean;
   source: string;
-  tasks: { active: number; completed: number; blocked: number; active_recent_24h: number };
+  /** 服务端统计生成时间。 */
+  generated_at?: string;
+  tasks: {
+    active: number;
+    completed: number;
+    blocked: number;
+    active_recent_24h: number;
+    /** 取样范围：扫描到的任务总数、统计上限与「近期活跃」窗口。 */
+    scope?: {
+      limit?: number;
+      matched?: number;
+      truncated?: boolean;
+      recent_window_hours?: number;
+    };
+  };
   skills: { count: number };
   plugins: { count: number; available: boolean };
   mcp: { count: number };
@@ -110,17 +127,31 @@ export type ProcessSnapshot = {
 export type Analytics = {
   ok: boolean;
   source: string;
+  /** 进程启动时间，不是本快照的计算时间。 */
   started_at: string;
+  /** 本快照的计算时间；与窗口起点、页面刷新时间都不同。 */
+  generated_at?: string;
   total_calls: number;
   total_errors: number;
   window_calls: number;
   active_calls: number;
   total_input_tokens: number;
   total_output_tokens: number;
-  process: ProcessSnapshot;
-  tool_stats: ToolStat[];
-  recent_calls: RecentCall[];
-  daily_tokens: DailyToken[];
+  /** 窗口调用与工具聚合使用的滚动窗口长度（分钟），由后端下发。 */
+  window_minutes?: number;
+  /** 窗口明细环保留的历史长度（分钟）。 */
+  window_history_minutes?: number;
+  /** 窗口明细环的条数上限；超限时窗口统计可能偏低。 */
+  window_capacity?: number;
+  window_limited?: boolean;
+  /** 自然日 token 桶的保留天数。 */
+  daily_token_retention_days?: number;
+  /** 累计值是否从本地状态文件恢复（包含此前进程的累计）。 */
+  totals_restored?: boolean;
+  process?: ProcessSnapshot;
+  tool_stats?: ToolStat[];
+  recent_calls?: RecentCall[];
+  daily_tokens?: DailyToken[];
 };
 
 export type Alert = {
@@ -134,12 +165,16 @@ export type Alert = {
   active: boolean;
 };
 
+export type AlertRule = { kind?: string; threshold?: number; enabled?: boolean; min_calls?: number };
+
 export type Alerts = {
   ok: boolean;
   source: string;
+  /** 本次惰性评估的生成时间；resolved_count 只统计本次 Core 进程内的恢复。 */
+  generated_at?: string;
   alerts: Alert[];
   resolved_count: number;
-  rules: unknown[];
+  rules: AlertRule[];
 };
 
 export type TaskStepRef = { id: string; title: string; status: string };
@@ -165,7 +200,17 @@ export type Task = {
   summary?: string;
 };
 
-export type Tasks = { ok: boolean; source: string; action: string; count: number; tasks: Task[] };
+export type Tasks = {
+  ok: boolean;
+  source: string;
+  action: string;
+  /** 本次列表载入的服务端时间。 */
+  generated_at?: string;
+  /** 本次请求生效的条数上限；count === limit 表示可能还有更早任务未载入。 */
+  limit?: number;
+  count: number;
+  tasks: Task[];
+};
 
 export type TaskCondition = { id: string; text: string; created_at: string };
 export type TaskStep = { id: string; title: string; phase?: string; status: string; updated_at: string };
@@ -195,6 +240,22 @@ export type TaskDetail = {
   };
 };
 
+/** 任务活动接口的逐文件投影：只有文件维度字段，没有 FileChangeEntry 的调用维度字段。 */
+export type TaskActivityChange = {
+  trace_id: string;
+  tool: string;
+  started_at: string;
+  path: string;
+  action: string;
+  /** 活动契约固定下发完整键集合，move 之外为空串。 */
+  move_to: string;
+  insertions: number;
+  deletions: number;
+  diff: string;
+  /** 调用级标记：同一次调用的所有文件共享一个 diff 预览上限。 */
+  truncated: boolean;
+};
+
 export type TaskActivity = {
   ok: boolean;
   source: string;
@@ -203,15 +264,32 @@ export type TaskActivity = {
   call_count: number;
   calls: TraceRecord[];
   change_count: number;
-  file_changes: FileChange[];
+  file_changes: TaskActivityChange[];
 };
 
 export type TraceDetail = {
   ok: boolean;
   source: string;
   record: TraceRecord;
-  full?: { arguments?: string; result?: string; error?: string; command?: { command?: string; stdout?: string; stderr?: string } } | null;
+  full?: {
+    arguments?: string;
+    result?: string;
+    error?: string;
+    command?: { command?: string; stdout?: string; stderr?: string };
+    /** 全文旁路本身也到 256 KiB/侧上限时置位。 */
+    full_truncated?: boolean;
+  } | null;
   full_available?: boolean;
+};
+
+/** trace 保留窗口状态：旧 Core 可能只给 mode 字符串，调用方需兼容两种形态。 */
+export type TraceStatus = {
+  mode: string;
+  root?: string;
+  retention_days?: number;
+  max_records: number;
+  count: number;
+  buffered: number;
 };
 
 /** 私有图片 sidecar：data 是标准 base64，前端拼 data URL 直接渲染。 */
@@ -233,6 +311,8 @@ export type TraceRecord = {
   success: boolean;
   error_code?: string;
   error_category?: string;
+  /** 记录级截断标记：任一侧预览被截到 8 KiB 时为 true（summary 视图保留）。 */
+  truncated?: boolean;
   arguments?: string;
   result?: string;
   command?: {
@@ -250,6 +330,11 @@ export type TraceRecord = {
     stderr_bytes?: number;
     exit_code?: number;
     command_ok?: boolean;
+    stdout_truncated?: boolean;
+    stderr_truncated?: boolean;
+    command_preview_truncated?: boolean;
+    stdout_preview_truncated?: boolean;
+    stderr_preview_truncated?: boolean;
   };
   // file_edit 的结构化文件变更（与 /file-changes 同源），有 diff 可直接渲染。
   file_changes?: FileChange[];
@@ -259,24 +344,45 @@ export type Traces = {
   ok: boolean;
   source: string;
   count: number;
-  status: string;
+  /** 新 Core 返回 TraceStatus；旧 Core 的 mode=off 响应只有 mode 字符串。 */
+  status?: TraceStatus | string;
+  mode?: string;
   view: string;
   tools: string[];
   records: TraceRecord[];
+  /** 是否还有更早的匹配记录；旧 Core 不提供时为 undefined。 */
+  has_more?: boolean;
 };
 
+export type TraceQueryOptions = {
+  limit?: number;
+  /**
+   * opt-in ID 游标：0 表示游标第一页（无上界，仍按 ID 降序），正数表示
+   * 只取更早记录；缺省（undefined）保持旧列表行为。
+   */
+  beforeId?: number;
+  view?: 'summary' | 'full';
+};
+
+/** /file-changes 与 trace 记录里的文件变更：后端用 omitempty，空字段可能缺席。 */
 export type FileChange = {
   id: number;
+  trace_id?: string;
   tool: string;
   source: string;
+  user_agent?: string;
   started_at: string;
   success: boolean;
   path: string;
   action: string;
-  project_root: string;
-  insertions: number;
+  /** move 的目标路径；其他动作为空。 */
+  move_to?: string;
+  project_root?: string;
+  insertions?: number;
   deletions?: number;
-  diff: string;
+  diff?: string;
+  /** 调用级标记：同一次调用的所有文件共享一个 diff 预览上限。 */
+  truncated?: boolean;
 };
 
 export type FileChanges = { ok: boolean; source: string; count: number; status: string; changes: FileChange[] };
@@ -564,8 +670,12 @@ export const api = {
   tasks: (limit = 10000) => get<Tasks>(`/tasks?limit=${limit}`),
   taskDetail: (id: string) => get<TaskDetail>(`/tasks/${encodeURIComponent(id)}`),
   taskActivity: (id: string) => get<TaskActivity>(`/tasks/${encodeURIComponent(id)}/activity`),
-  traces: (limit = 50) => get<Traces>(`/traces?limit=${limit}`),
-  traceDetail: (id: number, full = false) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`),
+  traces: (options: TraceQueryOptions = {}) => {
+    const params = new URLSearchParams({ limit: String(options.limit ?? 80), view: options.view ?? 'summary' });
+    if (options.beforeId !== undefined) params.set('before_id', String(options.beforeId));
+    return get<Traces>(`/traces?${params.toString()}`);
+  },
+  traceDetail: (id: number, full = false, signal?: AbortSignal) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`, signal),
   traceImage: (id: number) => get<TraceImage>(`/traces/image?id=${id}`),
   fileChanges: (limit = 50) => get<FileChanges>(`/file-changes?limit=${limit}`),
   artifacts: () => get<Artifacts>('/artifacts'),

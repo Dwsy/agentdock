@@ -103,6 +103,8 @@ export default function TaskDetailPage({ id, fallback, onClose }: { id: string; 
 
   const load = () => {
     setLoading(true);
+    // 展开状态用数组索引：重新拉取活动后列表可能变化，先折叠避免指向别的条目。
+    setExpandedDiff(null);
     Promise.allSettled([api.taskDetail(id), api.taskActivity(id)]).then(([d, a]) => {
       if (d.status === 'fulfilled') setDetail(d.value);
       else if (!fallback) setPartialError(`详情：${d.reason?.message || d.reason}`);
@@ -264,14 +266,26 @@ export default function TaskDetailPage({ id, fallback, onClose }: { id: string; 
         <Panel className="p-3.5">
           <Section icon={FolderTree} title="关联文件变更" hint={`${changeCount} 处`}>
             <div className="scrollbar-thin max-h-72 space-y-1.5 overflow-y-auto pr-1">
-              {activity?.file_changes.map((c) => (
-                <div key={c.id} className="rounded-lg border border-border/50 bg-card/40">
-                  <button onClick={() => setExpandedDiff(expandedDiff === c.id ? null : c.id)} className="flex w-full items-center gap-2 p-2 text-left text-xs">
+              {/* 活动投影没有稳定的逐文件 id（trace_id 只到调用级），用数组索引作为展开状态与 key。 */}
+              {activity?.file_changes.map((c, index) => (
+                <div key={index} className="rounded-lg border border-border/50 bg-card/40">
+                  <button onClick={() => setExpandedDiff(expandedDiff === index ? null : index)} className="flex w-full items-center gap-2 p-2 text-left text-xs">
                     <Badge className={c.action === 'create' ? 'bg-sky-500/10 text-sky-500' : 'bg-violet-500/10 text-violet-500'}>{c.action}</Badge>
                     <span className="min-w-0 flex-1 truncate font-mono" title={c.path}>{shortPath(c.path)}</span>
                     <span className="text-[10px] text-emerald-500">+{c.insertions || 0}</span>
                   </button>
-                  {expandedDiff === c.id && <div className="border-t border-border/50 p-2"><DiffViewer diff={c.diff || ''} filePath={c.path} /></div>}
+                  {expandedDiff === index && (
+                    <div className="border-t border-border/50 p-2">
+                      <DiffViewer
+                        diff={c.diff || ''}
+                        filePath={c.path}
+                        moveTo={c.move_to}
+                        insertions={c.insertions}
+                        deletions={c.deletions}
+                        truncated={c.truncated}
+                      />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

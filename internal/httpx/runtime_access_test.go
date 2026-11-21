@@ -218,11 +218,15 @@ func TestWarnIfUnauthenticatedPublicExposureLogsLoudWarning(t *testing.T) {
 
 	cfg := testConfig(t)
 	cfg.OAuthServerURL = "https://demo-tunnel.trycloudflare.com"
+	cfg.Host = "127.0.0.1"
+	cfg.Port = 8765
 	warnIfUnauthenticatedPublicExposure(cfg)
 
 	output := logs.String()
-	if !strings.Contains(output, `"level":"WARN"`) || !strings.Contains(output, "AGENTDOCK_AUTH_TOKEN") {
-		t.Fatalf("expected loud warning in log output, got: %s", output)
+	for _, want := range []string{`"level":"WARN"`, "AGENTDOCK_AUTH_TOKEN", `"server_url":"https://demo-tunnel.trycloudflare.com"`, `"host":"127.0.0.1"`, `"port":8765`} {
+		if !strings.Contains(output, want) {
+			t.Errorf("warning missing %s: %s", want, output)
+		}
 	}
 
 	logs.Reset()

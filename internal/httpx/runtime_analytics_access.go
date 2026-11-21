@@ -10,16 +10,18 @@ import (
 	"github.com/uvwt/agentdock/internal/config"
 )
 
-// warnIfUnauthenticatedPublicExposure emits a loud startup warning when the
-// server is reachable at a configured public URL but has no authentication.
-// Runtime management APIs then reject all unauthenticated requests, so the
-// warning tells the operator how to restore remote access.
+// warnIfUnauthenticatedPublicExposure reports a public URL configured without
+// authentication. Runtime API requests are blocked in this mode.
 func warnIfUnauthenticatedPublicExposure(cfg config.Config) {
-	if strings.TrimSpace(cfg.OAuthServerURL) == "" || cfg.AuthRequired() {
+	serverURL := strings.TrimSpace(cfg.OAuthServerURL)
+	if cfg.AuthRequired() || serverURL == "" {
 		return
 	}
-	slog.Warn("Runtime API 已拒绝无凭证的远程请求：配置了公网地址但未启用认证，" +
-		"请设置 AGENTDOCK_AUTH_TOKEN 或启用 OAuth 后再通过公网访问管理接口与仪表盘")
+	slog.Warn("配置了公网地址但未启用认证，Runtime API 将拒绝所有请求；/mcp 仍可能收到未认证流量。请设置 AGENTDOCK_AUTH_TOKEN 或启用 OAuth",
+		"server_url", serverURL,
+		"host", cfg.Host,
+		"port", cfg.Port,
+	)
 }
 
 // analyticsProxyHeaders 是 Tunnel/反向代理常见的转发特征。

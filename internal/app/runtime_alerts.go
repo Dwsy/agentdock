@@ -76,6 +76,8 @@ type alertRule struct {
 	Kind      string  `json:"kind"`
 	Threshold float64 `json:"threshold"`
 	Enabled   bool    `json:"enabled"`
+	// MinCalls 是该规则开始评估所需的窗口调用数下限；0 表示无门槛。
+	MinCalls int `json:"min_calls,omitempty"`
 }
 
 // alertEntry 是一条活跃告警。ID 形如 "<kind>:<key>"，是去重表的键。
@@ -156,7 +158,10 @@ func (r *Runtime) RuntimeAlertsContext(ctx context.Context) (Result, error) {
 		return nil, err
 	}
 	if r == nil {
-		return Result{"ok": true, "source": runtimeAPISource, "alerts": []alertEntry{}, "resolved_count": 0, "rules": []alertRule{}}, nil
+		return Result{
+			"ok": true, "source": runtimeAPISource, "generated_at": time.Now().UTC(),
+			"alerts": []alertEntry{}, "resolved_count": 0, "rules": []alertRule{},
+		}, nil
 	}
 	thresholds := alertThresholdsFromEnv()
 	now := time.Now().UTC()
@@ -226,13 +231,14 @@ func (r *Runtime) RuntimeAlertsContext(ctx context.Context) (Result, error) {
 
 	alerts, resolved := r.alerts.update(current, now)
 	rules := []alertRule{
-		{Kind: alertKindErrorRate, Threshold: thresholds.errorRate, Enabled: true},
+		{Kind: alertKindErrorRate, Threshold: thresholds.errorRate, Enabled: true, MinCalls: alertErrorRateMinWindow},
 		{Kind: alertKindTraceDisk, Threshold: thresholds.traceDiskMB, Enabled: traceDiskEnabled},
 		{Kind: alertKindTaskBlocked, Threshold: thresholds.blockedTaskH, Enabled: true},
 	}
 	return Result{
 		"ok":             true,
 		"source":         runtimeAPISource,
+		"generated_at":   now,
 		"alerts":         alerts,
 		"resolved_count": resolved,
 		"rules":          rules,

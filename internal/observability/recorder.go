@@ -18,8 +18,7 @@ const DefaultRecentCapacity = 500
 
 // WindowMinutes 是统计窗口长度（分钟）。窗口调用数与工具聚合都按这个
 // 长度滚动统计：窗口内发生过多少次调用就是多少次，不再被最近调用环的
-// 固定容量截断。桌面端把这张卡标成「最近 5 分钟」，改这个常量要同步改
-// 两端文案。
+// 固定容量截断。该值通过快照的 window_minutes 下发，控制台不再复制常量。
 const WindowMinutes = 5
 
 // windowDuration 是统计窗口长度。
@@ -79,8 +78,19 @@ type ProcessSnapshot struct {
 
 type Snapshot struct {
 	StartedAt time.Time `json:"started_at"`
+	// GeneratedAt 是本快照的计算时间。它与 StartedAt（进程启动时间）和窗口
+	// 起点都不同，控制台不能拿页面刷新时间冒充它。
+	GeneratedAt time.Time `json:"generated_at"`
 	// RecentCapacity 是最近调用环的容量：它只约束「最近调用流水」的条数。
 	RecentCapacity int `json:"recent_capacity"`
+	// WindowMinutes 是窗口调用数与工具聚合使用的滚动窗口长度。
+	WindowMinutes int `json:"window_minutes"`
+	// WindowHistoryMinutes 是窗口明细环保留的历史长度（24 小时）。
+	WindowHistoryMinutes int `json:"window_history_minutes"`
+	// WindowCapacity 是窗口明细环的条数上限；超限时淘汰最旧记录。
+	WindowCapacity int `json:"window_capacity"`
+	// WindowLimited 表示当前窗口内已因明细容量上限丢弃过记录，窗口统计可能偏低。
+	WindowLimited bool `json:"window_limited"`
 	// WindowCalls 是统计窗口（WindowMinutes）内完成的调用次数。
 	WindowCalls     int    `json:"window_calls"`
 	TotalCalls      uint64 `json:"total_calls"`
@@ -99,11 +109,15 @@ type Snapshot struct {
 	// WindowInputTokens/WindowOutputTokens 是当前累计段内的 token 值。
 	WindowInputTokens  uint64 `json:"window_input_tokens"`
 	WindowOutputTokens uint64 `json:"window_output_tokens"`
+	// DailyTokenRetentionDays 是自然日 token 桶的保留天数。
+	DailyTokenRetentionDays int `json:"daily_token_retention_days"`
 	// DailyTokens 是按本地日期分桶的 token 累计，最近的在前。
 	DailyTokens []DailyTokens     `json:"daily_tokens"`
 	ToolStats   []ToolStats       `json:"tool_stats"`
 	RecentCalls []ExecutionRecord `json:"recent_calls"`
 	Process     ProcessSnapshot   `json:"process"`
+	// TotalsRestored 表示累计值是否从本地状态文件恢复（包含此前进程的累计）。
+	TotalsRestored bool `json:"totals_restored"`
 }
 
 // DailyTokens 是一个自然日（本地时区）的 token 累计值。
@@ -189,6 +203,8 @@ type Recorder struct {
 	dailyTokens map[string]dailyBucket
 	// statePath 是累计统计的落盘路径；空字符串表示不持久化（测试）。
 	statePath string
+	// totalsRestored 表示启动时成功读取了状态文件，累计值包含此前进程的历史。
+	totalsRestored bool
 	// persistPending 表示有未落盘的累计变化；lastPersist 用于落盘节流。
 	persistPending bool
 	lastPersist    time.Time
@@ -392,6 +408,7 @@ func (r *Recorder) Snapshot() Snapshot {
 	r.mu.Lock()
 	now := time.Now()
 	r.pruneWindowLocked(now)
+	windowStart := now.Add(-windowDuration)
 	startedAt := r.startedAt
 	capacity := r.capacity
 	totalCalls := r.totalCalls
@@ -404,30 +421,39 @@ func (r *Recorder) Snapshot() Snapshot {
 	windowInputTokens, windowOutputTokens, segmentStartedAt := r.tokenSegmentLocked()
 	dailyTokens := r.dailyTokensLocked()
 	recent := r.recentLocked()
+	windowDroppedAt := r.windowDroppedAt
+	totalsRestored := r.totalsRestored
 	// 窗口切片在解锁后仍会被写入路径追加，必须拷贝后再用。
-	window := append([]windowStat(nil), r.windowSinceLocked(now.Add(-windowDuration))...)
+	window := append([]windowStat(nil), r.windowSinceLocked(windowStart)...)
 	r.mu.Unlock()
 
 	heapAlloc, heapInuse, heapSys, gcCycles := readProcessMemory()
 
 	return Snapshot{
-		StartedAt:             startedAt.UTC(),
-		RecentCapacity:        capacity,
-		WindowCalls:           len(window),
-		TotalCalls:            totalCalls,
-		TotalErrors:           totalErrors,
-		ActiveCalls:           activeCalls,
-		TotalInsertions:       totalInsertions,
-		TotalDeletions:        totalDeletions,
-		TotalInputTokens:      totalInputTokens,
-		TotalOutputTokens:     totalOutputTokens,
-		TokenWindowSeconds:    tokenSegmentSeconds,
-		TokenSegmentStartedAt: segmentStartedAt,
-		WindowInputTokens:     windowInputTokens,
-		WindowOutputTokens:    windowOutputTokens,
-		DailyTokens:           dailyTokens,
-		ToolStats:             aggregateToolStats(window),
-		RecentCalls:           cloneRecentStages(recent),
+		StartedAt:               startedAt.UTC(),
+		GeneratedAt:             now.UTC(),
+		RecentCapacity:          capacity,
+		WindowMinutes:           WindowMinutes,
+		WindowHistoryMinutes:    int(callHistoryDuration / time.Minute),
+		WindowCapacity:          windowMaxRecords,
+		WindowLimited:           !windowDroppedAt.IsZero() && !windowDroppedAt.Before(windowStart),
+		WindowCalls:             len(window),
+		TotalCalls:              totalCalls,
+		TotalErrors:             totalErrors,
+		ActiveCalls:             activeCalls,
+		TotalInsertions:         totalInsertions,
+		TotalDeletions:          totalDeletions,
+		TotalInputTokens:        totalInputTokens,
+		TotalOutputTokens:       totalOutputTokens,
+		TokenWindowSeconds:      tokenSegmentSeconds,
+		TokenSegmentStartedAt:   segmentStartedAt,
+		WindowInputTokens:       windowInputTokens,
+		WindowOutputTokens:      windowOutputTokens,
+		DailyTokenRetentionDays: dailyTokenRetentionDays,
+		DailyTokens:             dailyTokens,
+		ToolStats:               aggregateToolStats(window),
+		RecentCalls:             cloneRecentStages(recent),
+		TotalsRestored:          totalsRestored,
 		Process: ProcessSnapshot{
 			Goroutines:     runtime.NumGoroutine(),
 			HeapAllocBytes: heapAlloc,
@@ -545,6 +571,7 @@ func (r *Recorder) loadPersistedState() {
 		slog.Warn("observability stats state is corrupted, starting fresh", "path", r.statePath, "error", err)
 		return
 	}
+	r.totalsRestored = true
 	r.totalCalls = state.TotalCalls
 	r.totalErrors = state.TotalErrors
 	r.totalInsertions = state.TotalInsertions

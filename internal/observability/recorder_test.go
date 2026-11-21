@@ -372,6 +372,43 @@ func TestRecorderPersistsAndRestoresAcrossRestart(t *testing.T) {
 	if snapshot.TotalCalls != 1 || len(snapshot.RecentCalls) != 0 {
 		t.Fatalf("restored recent calls = %#v, want empty", snapshot.RecentCalls)
 	}
+	if !snapshot.TotalsRestored {
+		t.Fatal("restored snapshot must report totals_restored=true")
+	}
+}
+
+// 快照必须自带计算时间与统计范围：控制台用这些字段区分「统计时间」和
+// 「取样窗口」，不能在前端复制窗口常量或拿页面刷新时间顶替。
+func TestSnapshotExposesStatisticsScope(t *testing.T) {
+	recorder := NewRecorder(10, "")
+	recorder.BeginTool()
+	recorder.EndTool(CallMeta{
+		Tool: "read_file", Source: SourceMCP, StartedAt: time.Now(),
+		Duration: time.Millisecond, Success: true, InputTokens: 1, OutputTokens: 2,
+	})
+
+	snapshot := recorder.Snapshot()
+	if snapshot.GeneratedAt.IsZero() {
+		t.Fatal("GeneratedAt is zero")
+	}
+	if snapshot.WindowMinutes != WindowMinutes {
+		t.Fatalf("WindowMinutes = %d, want %d", snapshot.WindowMinutes, WindowMinutes)
+	}
+	if snapshot.WindowCapacity != windowMaxRecords {
+		t.Fatalf("WindowCapacity = %d, want %d", snapshot.WindowCapacity, windowMaxRecords)
+	}
+	if snapshot.WindowHistoryMinutes != int(callHistoryDuration/time.Minute) {
+		t.Fatalf("WindowHistoryMinutes = %d, want %d", snapshot.WindowHistoryMinutes, int(callHistoryDuration/time.Minute))
+	}
+	if snapshot.DailyTokenRetentionDays != dailyTokenRetentionDays {
+		t.Fatalf("DailyTokenRetentionDays = %d, want %d", snapshot.DailyTokenRetentionDays, dailyTokenRetentionDays)
+	}
+	if snapshot.TotalsRestored {
+		t.Fatal("fresh recorder must report totals_restored=false")
+	}
+	if snapshot.WindowLimited {
+		t.Fatal("fresh recorder must not report a limited window")
+	}
 }
 
 func TestRecorderSnapshotProcessMetricsConsistent(t *testing.T) {

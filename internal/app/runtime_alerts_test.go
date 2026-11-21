@@ -46,6 +46,9 @@ func mustAlerts(t *testing.T, rt *Runtime) ([]alertEntry, uint64, []alertRule) {
 	if result["ok"] != true || result["source"] != "agentdock-api" {
 		t.Fatalf("alert response envelope = %#v", result)
 	}
+	if generated, ok := result["generated_at"].(time.Time); !ok || generated.IsZero() {
+		t.Fatalf("alert generated_at = %#v", result["generated_at"])
+	}
 	alerts, ok := result["alerts"].([]alertEntry)
 	if !ok {
 		t.Fatalf("alerts = %#v", result["alerts"])
@@ -88,7 +91,7 @@ func TestRuntimeAlertsErrorRateHitsWithWarningAndDanger(t *testing.T) {
 	if resolved != 0 {
 		t.Fatalf("resolved_count = %d", resolved)
 	}
-	if rules[0] != (alertRule{Kind: "error_rate", Threshold: 0.1, Enabled: true}) {
+	if rules[0] != (alertRule{Kind: "error_rate", Threshold: 0.1, Enabled: true, MinCalls: 20}) {
 		t.Fatalf("error_rate rule = %#v", rules[0])
 	}
 
@@ -366,7 +369,7 @@ func TestRuntimeAlertsEmptyArrayAndContractShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantRules := []alertRule{
-		{Kind: "error_rate", Threshold: 0.1, Enabled: true},
+		{Kind: "error_rate", Threshold: 0.1, Enabled: true, MinCalls: 20},
 		{Kind: "trace_disk", Threshold: 512, Enabled: false},
 		{Kind: "task_blocked", Threshold: 24, Enabled: true},
 	}

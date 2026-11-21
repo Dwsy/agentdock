@@ -232,3 +232,42 @@ func mustTracesQuery(t *testing.T, rt *Runtime, query observability.TraceQuery) 
 	}
 	return result
 }
+
+// Web 控制台的“加载更早”依赖 has_more 与 before_id：首屏无游标，后续页
+// 只取更早 ID。这里锁定响应字段，避免前端在旧 Core 上无声死循环。
+func TestRuntimeTraceCursorPagination(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	for i := 0; i < 5; i++ {
+		rt.traces.Record(observability.TraceRecord{
+			Tool: "read_file", Source: "mcp", Success: true, StartedAt: time.Now(),
+			Arguments: `{"path":"a.go"}`, Result: `{"ok":true}`,
+		})
+	}
+
+	first, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 2, Summary: true, Cursor: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRecords := first["records"].([]observability.TraceRecord)
+	if first["has_more"] != true || len(firstRecords) != 2 || firstRecords[0].ID != 5 || firstRecords[1].ID != 4 {
+		t.Fatalf("first page = %#v has_more=%#v", firstRecords, first["has_more"])
+	}
+
+	second, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 2, Summary: true, Cursor: true, BeforeID: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRecords := second["records"].([]observability.TraceRecord)
+	if len(secondRecords) != 2 || secondRecords[0].ID != 3 || secondRecords[1].ID != 2 {
+		t.Fatalf("second page = %#v", secondRecords)
+	}
+
+	last, err := rt.RuntimeTraces(observability.TraceQuery{Limit: 2, Summary: true, Cursor: true, BeforeID: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastRecords := last["records"].([]observability.TraceRecord)
+	if last["has_more"] != false || len(lastRecords) != 1 || lastRecords[0].ID != 1 {
+		t.Fatalf("last page = %#v has_more=%#v", lastRecords, last["has_more"])
+	}
+}

@@ -10,6 +10,7 @@ import (
 	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/observability"
@@ -270,6 +271,24 @@ func TestRuntimeAnalyticsCountsTokens(t *testing.T) {
 		if value, _ := result[key].(uint64); value == 0 {
 			t.Fatalf("analytics %s = %#v, want > 0", key, result[key])
 		}
+	}
+	if generated, ok := result["generated_at"].(time.Time); !ok || generated.IsZero() {
+		t.Fatalf("analytics generated_at = %#v", result["generated_at"])
+	}
+	if result["window_minutes"] != observability.WindowMinutes {
+		t.Fatalf("analytics window_minutes = %#v", result["window_minutes"])
+	}
+	if result["window_history_minutes"] != 24*60 {
+		t.Fatalf("analytics window_history_minutes = %#v", result["window_history_minutes"])
+	}
+	if result["daily_token_retention_days"] != 30 {
+		t.Fatalf("analytics daily_token_retention_days = %#v", result["daily_token_retention_days"])
+	}
+	if _, ok := result["totals_restored"].(bool); !ok {
+		t.Fatalf("analytics totals_restored = %#v", result["totals_restored"])
+	}
+	if _, ok := result["window_limited"].(bool); !ok {
+		t.Fatalf("analytics window_limited = %#v", result["window_limited"])
 	}
 	if result["token_window_seconds"] != int64(observability.TokenSegmentMinutes*60) {
 		t.Fatalf("token window = %#v, want %ds", result["token_window_seconds"], observability.TokenSegmentMinutes*60)

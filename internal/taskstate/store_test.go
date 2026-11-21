@@ -633,8 +633,11 @@ func TestListCacheReflectsCreateMutateDeleteAndCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts["blocked"] != 1 || counts["active"] != 0 {
+	if counts.Blocked != 1 || counts.Active != 0 {
 		t.Fatalf("OverviewCountsContext = %#v, want blocked=1 active=0", counts)
+	}
+	if counts.Matched != 1 || counts.Limit != 200 || counts.Matched > counts.Limit {
+		t.Fatalf("OverviewCountsContext scope = %#v, want matched=1 within limit=200", counts)
 	}
 }
 

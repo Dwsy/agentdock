@@ -389,6 +389,19 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			}
 			limit = parsed
 		}
+		// before_id 是可选游标：参数缺席时保持旧列表行为；显式传 0 表示
+		// 游标第一页（无上界，仍按 ID 降序），正整数则只取更早的记录。
+		cursor := false
+		beforeID := uint64(0)
+		if request.Query.Has("before_id") {
+			raw := strings.TrimSpace(request.queryValue("before_id"))
+			parsed, parseErr := strconv.ParseUint(raw, 10, 64)
+			if parseErr != nil {
+				return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace before_id must be a non-negative integer", Category: "validation"}
+			}
+			cursor = true
+			beforeID = parsed
+		}
 		// view=summary 只下发列表摘要；旧客户端不传 view 时保持完整预览语义。
 		summary := false
 		switch view := strings.ToLower(strings.TrimSpace(request.queryValue("view"))); view {
@@ -399,12 +412,14 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			return nil, &app.ToolError{Code: "INVALID_ARGUMENT", Message: "trace view must be full or summary", Category: "validation"}
 		}
 		result, err := traceRuntime.RuntimeTraces(observability.TraceQuery{
-			Query:   request.queryValue("q"),
-			Tool:    request.queryValue("tool"),
-			Source:  request.queryValue("source"),
-			Status:  request.queryValue("status"),
-			Limit:   limit,
-			Summary: summary,
+			Query:    request.queryValue("q"),
+			Tool:     request.queryValue("tool"),
+			Source:   request.queryValue("source"),
+			Status:   request.queryValue("status"),
+			Limit:    limit,
+			Summary:  summary,
+			Cursor:   cursor,
+			BeforeID: beforeID,
 		})
 		return map[string]any(result), err
 	case path == "/internal/runtime/artifacts" && method == http.MethodPost:

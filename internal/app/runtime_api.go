@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/uvwt/agentdock/internal/buildinfo"
 	"github.com/uvwt/agentdock/internal/config"
@@ -19,9 +20,13 @@ const RuntimeAPISource = runtimeAPISource
 
 func (r *Runtime) RuntimeStatus() Result {
 	tools := r.ToolNames()
+	// Memory 能力由 Nexus 端点承载，两个开关保持同一来源，避免控制台出现
+	// 互相矛盾的“Memory 开启、Nexus 关闭”。
+	nexusEnabled := strings.TrimSpace(r.cfg.NexusEndpoint) != ""
 	return Result{
 		"ok":                    true,
 		"source":                runtimeAPISource,
+		"generated_at":          time.Now().UTC(),
 		"service":               config.ServerName,
 		"version":               buildinfo.Version,
 		"agentdock_home":        r.cfg.AgentDockHome,
@@ -30,8 +35,8 @@ func (r *Runtime) RuntimeStatus() Result {
 		"auth_enabled":          r.cfg.AuthRequired(),
 		"browser_enabled":       r.cfg.BrowserEnabled,
 		"manual_llm_enabled":    r.ManualLLMEnabled(),
-		"memory_enabled":        r.cfg.NexusEndpoint != "",
-		"nexus_enabled":         strings.TrimSpace(r.cfg.NexusEndpoint) != "",
+		"memory_enabled":        nexusEnabled,
+		"nexus_enabled":         nexusEnabled,
 		"tool_count":            len(tools),
 		"tools":                 tools,
 	}
@@ -40,26 +45,33 @@ func (r *Runtime) RuntimeStatus() Result {
 func (r *Runtime) RuntimeAnalytics() Result {
 	snapshot := r.observer.Snapshot()
 	return Result{
-		"ok":                       true,
-		"source":                   runtimeAPISource,
-		"started_at":               snapshot.StartedAt,
-		"recent_capacity":          snapshot.RecentCapacity,
-		"window_calls":             snapshot.WindowCalls,
-		"total_calls":              snapshot.TotalCalls,
-		"total_errors":             snapshot.TotalErrors,
-		"active_calls":             snapshot.ActiveCalls,
-		"total_insertions":         snapshot.TotalInsertions,
-		"total_deletions":          snapshot.TotalDeletions,
-		"total_input_tokens":       snapshot.TotalInputTokens,
-		"total_output_tokens":      snapshot.TotalOutputTokens,
-		"token_window_seconds":     snapshot.TokenWindowSeconds,
-		"token_segment_started_at": snapshot.TokenSegmentStartedAt,
-		"window_input_tokens":      snapshot.WindowInputTokens,
-		"window_output_tokens":     snapshot.WindowOutputTokens,
-		"daily_tokens":             snapshot.DailyTokens,
-		"tool_stats":               snapshot.ToolStats,
-		"recent_calls":             snapshot.RecentCalls,
-		"process":                  snapshot.Process,
+		"ok":                         true,
+		"source":                     runtimeAPISource,
+		"started_at":                 snapshot.StartedAt,
+		"generated_at":               snapshot.GeneratedAt,
+		"recent_capacity":            snapshot.RecentCapacity,
+		"window_minutes":             snapshot.WindowMinutes,
+		"window_history_minutes":     snapshot.WindowHistoryMinutes,
+		"window_capacity":            snapshot.WindowCapacity,
+		"window_limited":             snapshot.WindowLimited,
+		"window_calls":               snapshot.WindowCalls,
+		"total_calls":                snapshot.TotalCalls,
+		"total_errors":               snapshot.TotalErrors,
+		"active_calls":               snapshot.ActiveCalls,
+		"total_insertions":           snapshot.TotalInsertions,
+		"total_deletions":            snapshot.TotalDeletions,
+		"total_input_tokens":         snapshot.TotalInputTokens,
+		"total_output_tokens":        snapshot.TotalOutputTokens,
+		"token_window_seconds":       snapshot.TokenWindowSeconds,
+		"token_segment_started_at":   snapshot.TokenSegmentStartedAt,
+		"window_input_tokens":        snapshot.WindowInputTokens,
+		"window_output_tokens":       snapshot.WindowOutputTokens,
+		"daily_token_retention_days": snapshot.DailyTokenRetentionDays,
+		"daily_tokens":               snapshot.DailyTokens,
+		"totals_restored":            snapshot.TotalsRestored,
+		"tool_stats":                 snapshot.ToolStats,
+		"recent_calls":               snapshot.RecentCalls,
+		"process":                    snapshot.Process,
 	}
 }
 
@@ -114,12 +126,13 @@ func (r *Runtime) RuntimeOverviewContext(ctx context.Context) (Result, error) {
 	}
 	pluginCount, pluginErr := r.plugins.RuntimeCount()
 	return Result{
-		"ok":      true,
-		"source":  runtimeAPISource,
-		"tasks":   tasks,
-		"skills":  map[string]any{"count": skillCount},
-		"plugins": map[string]any{"count": pluginCount, "available": pluginErr == nil},
-		"mcp":     map[string]any{"count": r.dynamicMCP.RuntimeCount()},
+		"ok":           true,
+		"source":       runtimeAPISource,
+		"generated_at": time.Now().UTC(),
+		"tasks":        tasks,
+		"skills":       map[string]any{"count": skillCount},
+		"plugins":      map[string]any{"count": pluginCount, "available": pluginErr == nil},
+		"mcp":          map[string]any{"count": r.dynamicMCP.RuntimeCount()},
 	}, nil
 }
 

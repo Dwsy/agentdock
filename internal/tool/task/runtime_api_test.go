@@ -45,4 +45,14 @@ func TestRuntimeOverviewCountsTaskStatesAndRecentActiveTasks(t *testing.T) {
 	if counts["active"] != 2 || counts["blocked"] != 1 || counts["completed"] != 0 || counts["active_recent_24h"] != 1 {
 		t.Fatalf("overview counts = %#v", counts)
 	}
+	scope, ok := counts["scope"].(map[string]any)
+	if !ok {
+		t.Fatalf("overview scope = %#v", counts["scope"])
+	}
+	if scope["limit"] != runtimeOverviewTaskLimit || scope["matched"] != 3 || scope["truncated"] != false {
+		t.Fatalf("overview scope = %#v, want limit=%d matched=3 truncated=false", scope, runtimeOverviewTaskLimit)
+	}
+	if scope["recent_window_hours"] != 24 {
+		t.Fatalf("overview recent window = %#v, want 24h", scope["recent_window_hours"])
+	}
 }

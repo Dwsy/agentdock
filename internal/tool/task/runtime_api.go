@@ -3,6 +3,7 @@ package task
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/uvwt/agentdock/internal/taskstate"
 )
@@ -11,16 +12,28 @@ const runtimeOverviewTaskLimit = taskstate.MaxListLimit
 
 // RuntimeOverview 返回控制面板需要的 Task 轻量统计，避免为了几个数字把完整
 // Task 列表跨 Nexus Bridge 传输。统计上限与既有 Runtime 概览保持一致。
-func (s *Service) RuntimeOverview() (map[string]int, error) {
+func (s *Service) RuntimeOverview() (map[string]any, error) {
 	return s.RuntimeOverviewContext(context.Background())
 }
 
-func (s *Service) RuntimeOverviewContext(ctx context.Context) (map[string]int, error) {
+func (s *Service) RuntimeOverviewContext(ctx context.Context) (map[string]any, error) {
 	counts, err := s.tasks.OverviewCountsContext(ctx, runtimeOverviewTaskLimit)
 	if err != nil {
 		return nil, taskToolError(err)
 	}
-	return counts, nil
+	return map[string]any{
+		"active":            counts.Active,
+		"completed":         counts.Completed,
+		"blocked":           counts.Blocked,
+		"active_recent_24h": counts.ActiveRecent,
+		// 计数不是无界的全量哈希：控制台需要知道扫描了多少条、截断发生在哪里。
+		"scope": map[string]any{
+			"limit":               counts.Limit,
+			"matched":             counts.Matched,
+			"truncated":           counts.Matched > counts.Limit,
+			"recent_window_hours": int(taskstate.OverviewRecentWindow / time.Hour),
+		},
+	}, nil
 }
 
 func (s *Service) RuntimeTasks(status string, limit int) (Result, error) {
@@ -55,7 +68,15 @@ func (s *Service) RuntimeTasksContext(ctx context.Context, status string, limit 
 		}
 		items = append(items, item)
 	}
-	return Result{"ok": true, "source": "agentdock-api", "action": "list", "tasks": items, "count": len(items)}, nil
+	return Result{
+		"ok":           true,
+		"source":       "agentdock-api",
+		"action":       "list",
+		"generated_at": time.Now().UTC(),
+		"limit":        limit,
+		"tasks":        items,
+		"count":        len(items),
+	}, nil
 }
 
 func (s *Service) RuntimeTask(id string) (Result, error) {

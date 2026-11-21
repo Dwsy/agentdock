@@ -407,6 +407,61 @@ func TestDispatchCatalogAndTraces(t *testing.T) {
 			t.Fatalf("error = %#v", err)
 		}
 	})
+	t.Run("traces pass before_id cursor", func(t *testing.T) {
+		stub := &runtimeStub{}
+		_, err := Dispatch(context.Background(), stub, Request{
+			Method: "GET",
+			Path:   "/internal/runtime/traces",
+			Query:  url.Values{"before_id": {"42"}, "limit": {"25"}, "view": {"summary"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !stub.traceQuery.Cursor || stub.traceQuery.BeforeID != 42 || !stub.traceQuery.Summary || stub.traceQuery.Limit != 25 {
+			t.Fatalf("trace args = %#v", stub.traceQuery)
+		}
+	})
+	t.Run("traces accept cursor first page", func(t *testing.T) {
+		stub := &runtimeStub{}
+		_, err := Dispatch(context.Background(), stub, Request{
+			Method: "GET",
+			Path:   "/internal/runtime/traces",
+			Query:  url.Values{"before_id": {"0"}, "view": {"summary"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !stub.traceQuery.Cursor || stub.traceQuery.BeforeID != 0 {
+			t.Fatalf("trace args = %#v", stub.traceQuery)
+		}
+	})
+	t.Run("traces absent before_id keeps legacy path", func(t *testing.T) {
+		stub := &runtimeStub{}
+		_, err := Dispatch(context.Background(), stub, Request{
+			Method: "GET",
+			Path:   "/internal/runtime/traces",
+			Query:  url.Values{"view": {"summary"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stub.traceQuery.Cursor {
+			t.Fatalf("cursor should stay off without before_id: %#v", stub.traceQuery)
+		}
+	})
+	t.Run("traces reject invalid before_id", func(t *testing.T) {
+		for _, raw := range []string{"-1", "abc", "1.5", ""} {
+			_, err := Dispatch(context.Background(), &runtimeStub{}, Request{
+				Method: "GET",
+				Path:   "/internal/runtime/traces",
+				Query:  url.Values{"before_id": {raw}},
+			})
+			var toolErr *app.ToolError
+			if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" || toolErr.Category != "validation" {
+				t.Fatalf("before_id %q error = %#v", raw, err)
+			}
+		}
+	})
 }
 
 func TestDispatchFileChanges(t *testing.T) {

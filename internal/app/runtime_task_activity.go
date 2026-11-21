@@ -30,6 +30,7 @@ type taskActivityChange struct {
 	StartedAt  time.Time `json:"started_at"`
 	Path       string    `json:"path"`
 	Action     string    `json:"action"`
+	MoveTo     string    `json:"move_to"`
 	Insertions int       `json:"insertions"`
 	Deletions  int       `json:"deletions"`
 	Diff       string    `json:"diff"`
@@ -72,6 +73,7 @@ func (r *Runtime) RuntimeTaskActivity(id string) (Result, error) {
 				StartedAt:  record.StartedAt.UTC(),
 				Path:       change.Path,
 				Action:     change.Action,
+				MoveTo:     change.MoveTo,
 				Insertions: change.Insertions,
 				Deletions:  change.Deletions,
 				Diff:       change.Diff,

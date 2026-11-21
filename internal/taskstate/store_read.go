@@ -78,16 +78,31 @@ func (s *Store) ListContext(ctx context.Context, status Status, limit int) ([]Ta
 	return tasks, nil
 }
 
+// OverviewRecentWindow 是概览页「近期活跃」统计的时间窗。运行时响应会显式
+// 下发窗口小时数，控制台不复制这个常量。
+const OverviewRecentWindow = 24 * time.Hour
+
+// OverviewCounts 是任务概览统计及其取样范围。Matched 是扫描到的任务总数，
+// Limit 是本次统计按更新时间倒序允许纳入的最大条数。
+type OverviewCounts struct {
+	Active       int
+	Completed    int
+	Blocked      int
+	ActiveRecent int
+	Matched      int
+	Limit        int
+}
+
 type taskOverviewMeta struct {
 	status    Status
 	updatedAt time.Time
 }
 
 // OverviewCountsContext computes task status counts without deep-cloning full task payloads.
-func (s *Store) OverviewCountsContext(ctx context.Context, limit int) (map[string]int, error) {
+func (s *Store) OverviewCountsContext(ctx context.Context, limit int) (OverviewCounts, error) {
 	release, err := s.acquireStoreLockContext(ctx)
 	if err != nil {
-		return nil, err
+		return OverviewCounts{}, err
 	}
 	defer release()
 	if limit <= 0 {
@@ -100,23 +115,25 @@ func (s *Store) OverviewCountsContext(ctx context.Context, limit int) (map[strin
 		items = append(items, taskOverviewMeta{status: task.Status, updatedAt: task.UpdatedAt})
 		return nil
 	}); err != nil {
-		return nil, err
+		return OverviewCounts{}, err
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].updatedAt.After(items[j].updatedAt) })
+	counts := OverviewCounts{Matched: len(items), Limit: limit}
 	if len(items) > limit {
 		items = items[:limit]
 	}
-	counts := map[string]int{
-		"active":            0,
-		"completed":         0,
-		"blocked":           0,
-		"active_recent_24h": 0,
-	}
-	recentCutoff := time.Now().UTC().Add(-24 * time.Hour)
+	recentCutoff := time.Now().UTC().Add(-OverviewRecentWindow)
 	for _, item := range items {
-		counts[string(item.status)]++
+		switch item.status {
+		case StatusActive:
+			counts.Active++
+		case StatusCompleted:
+			counts.Completed++
+		case StatusBlocked:
+			counts.Blocked++
+		}
 		if item.status == StatusActive && !item.updatedAt.Before(recentCutoff) {
-			counts["active_recent_24h"]++
+			counts.ActiveRecent++
 		}
 	}
 	return counts, nil

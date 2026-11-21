@@ -185,6 +185,13 @@ type TraceQuery struct {
 	// Summary 只返回列表摘要：去掉 Arguments/Result 与命令输出正文，
 	// 让“100 条记录”的控制面板请求保持在几十 KB 而不是几 MB。
 	Summary bool
+	// Cursor 表示调用方显式请求 ID 游标分页；未置位时完全保持旧列表行为。
+	// 磁盘回放可能按 StartedAt 而不是 ID 排序，游标路径必须自己按 ID 排序，
+	// 否则翻页会跳记录。
+	Cursor bool
+	// BeforeID 是游标上界：只返回 ID 小于它的记录。Cursor 为 true 且
+	// BeforeID 为 0 表示游标第一页（无上界，仍按 ID 降序）。
+	BeforeID uint64
 }
 
 type TraceStatus struct {
@@ -524,14 +531,36 @@ func (s *TraceStore) Query(query TraceQuery) []TraceRecord {
 	if s == nil {
 		return nil
 	}
-	limit := query.Limit
+	return s.filterRecords(query, traceQueryLimitOf(query.Limit), true)
+}
+
+// QueryPage 返回一页记录以及是否还有更早的匹配记录。Cursor 未置位时走
+// Query 的既有顺序，只多探一条判断 has_more；Cursor 置位时只取 ID < BeforeID
+// 的记录（BeforeID=0 表示无上界）并显式按 ID 降序，避免磁盘回放的
+// StartedAt 顺序导致首屏拿到旧 ID、后续翻页跳记录。
+func (s *TraceStore) QueryPage(query TraceQuery) ([]TraceRecord, bool) {
+	if s == nil {
+		return nil, false
+	}
+	limit := traceQueryLimitOf(query.Limit)
+	if !query.Cursor {
+		records := s.filterRecords(query, limit+1, true)
+		if len(records) > limit {
+			return records[:limit], true
+		}
+		return records, false
+	}
+	return s.filterRecordsBeforeID(query, limit)
+}
+
+func traceQueryLimitOf(limit int) int {
 	if limit <= 0 {
-		limit = traceDefaultLimit
+		return traceDefaultLimit
 	}
 	if limit > traceQueryLimit {
-		limit = traceQueryLimit
+		return traceQueryLimit
 	}
-	return s.filterRecords(query, limit, true)
+	return limit
 }
 
 // ExportRecords 按与 Query 相同的过滤语义导出记录（新到旧），但 limit
@@ -588,6 +617,47 @@ func validTraceStatusFilter(statusFilter string) bool {
 	default:
 		return false
 	}
+}
+
+// filterRecordsBeforeID 是游标分页路径。保留窗口默认最多 2000 条，整批收集
+// 再按 ID 排序的代价可忽略；这样能修正磁盘回放的 StartedAt 顺序，并让
+// has_more 对本页过滤后的匹配集合同样准确。
+func (s *TraceStore) filterRecordsBeforeID(query TraceQuery, limit int) ([]TraceRecord, bool) {
+	needle := strings.ToLower(strings.TrimSpace(query.Query))
+	toolFilter := strings.TrimSpace(query.Tool)
+	sourceFilter := strings.TrimSpace(query.Source)
+	statusFilter := strings.ToLower(strings.TrimSpace(query.Status))
+	if !validTraceStatusFilter(statusFilter) {
+		return nil, false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	matches := make([]TraceRecord, 0, min(len(s.records), limit+1))
+	for _, record := range s.records {
+		if record.ID == 0 {
+			continue
+		}
+		// 0 是游标第一页的显式“无上界”，不能用 ID >= 0 把所有记录排除。
+		if query.BeforeID != 0 && record.ID >= query.BeforeID {
+			continue
+		}
+		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter) {
+			continue
+		}
+		matches = append(matches, record)
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].ID > matches[j].ID })
+	hasMore := len(matches) > limit
+	if hasMore {
+		matches = matches[:limit]
+	}
+	if query.Summary {
+		for i := range matches {
+			matches[i] = traceSummaryRecord(matches[i])
+		}
+	}
+	return matches, hasMore
 }
 
 func traceRecordMatches(record TraceRecord, needle, toolFilter, sourceFilter, statusFilter string) bool {

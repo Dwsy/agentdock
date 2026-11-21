@@ -98,11 +98,38 @@ func TestRuntimeTaskActivityAggregatesCallsAndFileChanges(t *testing.T) {
 	for _, field := range []string{
 		`"task_id"`, `"mode"`, `"calls"`, `"file_changes"`, `"call_count"`, `"change_count"`,
 		`"id"`, `"tool"`, `"source"`, `"started_at"`, `"duration_ms"`, `"success"`, `"trace_id"`,
-		`"path"`, `"action"`, `"insertions"`, `"deletions"`, `"diff"`, `"truncated"`,
+		`"path"`, `"action"`, `"move_to"`, `"insertions"`, `"deletions"`, `"diff"`, `"truncated"`,
 	} {
 		if !strings.Contains(body, field) {
 			t.Fatalf("activity JSON is missing %s: %s", field, body)
 		}
+	}
+}
+
+// TestRuntimeTaskActivityProjectsMoveTarget 验证 move 的目标路径随活动投影下发：
+// UI 靠它把源分节和目标分节一起并入同一个文件的 diff 预览。
+func TestRuntimeTaskActivityProjectsMoveTarget(t *testing.T) {
+	rt := newTraceTestRuntime(t, config.TraceModeMemory)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "before.txt")
+	destination := filepath.Join(dir, "after.txt")
+	if err := os.WriteFile(source, []byte("content\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := observability.WithTaskID(context.Background(), "tsk_0123456789abcdef")
+	if _, err := rt.Call(ctx, "file_edit", map[string]any{
+		"action": "move", "path": source, "new_path": destination,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := rt.RuntimeTaskActivity("tsk_0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := result["file_changes"].([]taskActivityChange)
+	// 工具返回的路径可能已解析掉 /var → /private/var 这类符号链接，只比对目标文件名。
+	if len(changes) != 1 || changes[0].Action != "move" || filepath.Base(changes[0].MoveTo) != filepath.Base(destination) || changes[0].MoveTo == "" {
+		t.Fatalf("move projection = %#v", changes)
 	}
 }
 

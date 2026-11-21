@@ -3,6 +3,8 @@ package observability
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -328,5 +330,95 @@ func TestTraceStoreRingEvictionRecordByIDAndSearch(t *testing.T) {
 	}
 	if hits := store.Query(TraceQuery{Query: "配置.MD"}); len(hits) != 1 || hits[0].ID != lastID-1 {
 		t.Fatalf("UTF-8 fold search hits = %#v", hits)
+	}
+}
+
+// 游标分页必须按 ID 降序，不能沿用磁盘回放的 StartedAt 顺序：回放只保证
+// 时间顺序，ID 才是唯一游标。这里故意把内存窗口重排成 StartedAt 顺序，
+// 验证翻页不会跳记录，且无游标的旧路径保持原顺序。
+func TestTraceStoreQueryPageCursorSortsByID(t *testing.T) {
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	base := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 5; i++ {
+		store.Record(TraceRecord{
+			Tool: "exec_command", Source: string(SourceMCP), Success: true,
+			// StartedAt 与 ID 反序，模拟并发写入后按时间回放。
+			StartedAt: base.Add(time.Duration(5-i) * time.Second),
+			Command:   &CommandTrace{Command: "echo hi"},
+		})
+	}
+	store.mu.Lock()
+	sort.Slice(store.records, func(i, j int) bool {
+		return store.records[i].StartedAt.Before(store.records[j].StartedAt)
+	})
+	store.mu.Unlock()
+
+	// 旧路径保持窗口现有顺序：不再额外排序。游标第一页即使不传 BeforeID，
+	// 也必须按 ID 降序，否则从旧顺序取最小 ID 会漏掉其余记录。
+	legacy := store.Query(TraceQuery{Limit: 5})
+	var legacyIDs []uint64
+	for _, record := range legacy {
+		legacyIDs = append(legacyIDs, record.ID)
+	}
+	if !slices.Equal(legacyIDs, []uint64{1, 2, 3, 4, 5}) {
+		t.Fatalf("legacy order = %v, want replay order [1 2 3 4 5]", legacyIDs)
+	}
+
+	page, hasMore := store.QueryPage(TraceQuery{Limit: 2, Summary: true, Cursor: true})
+	if !hasMore || len(page) != 2 || page[0].ID != 5 || page[1].ID != 4 {
+		t.Fatalf("first page = %#v has_more=%v", page, hasMore)
+	}
+	if page[0].Command == nil || page[0].Command.Summary != "echo hi" {
+		t.Fatalf("summary lost command metadata: %#v", page[0].Command)
+	}
+
+	page, hasMore = store.QueryPage(TraceQuery{Limit: 2, Summary: true, Cursor: true, BeforeID: 4})
+	if !hasMore || len(page) != 2 || page[0].ID != 3 || page[1].ID != 2 {
+		t.Fatalf("second page = %#v has_more=%v", page, hasMore)
+	}
+
+	page, hasMore = store.QueryPage(TraceQuery{Limit: 2, Summary: true, Cursor: true, BeforeID: 2})
+	if hasMore || len(page) != 1 || page[0].ID != 1 {
+		t.Fatalf("last page = %#v has_more=%v", page, hasMore)
+	}
+
+	// 过滤条件参与游标判断：只剩 ID 3 匹配时，has_more 必须为 false。
+	store.mu.Lock()
+	store.records[2].Tool = "read_file"
+	store.mu.Unlock()
+	page, hasMore = store.QueryPage(TraceQuery{Limit: 2, Tool: "read_file", Cursor: true, BeforeID: 4})
+	if hasMore || len(page) != 1 || page[0].ID != 3 {
+		t.Fatalf("filtered page = %#v has_more=%v", page, hasMore)
+	}
+
+	if page, hasMore := store.QueryPage(TraceQuery{Cursor: true, BeforeID: 4, Status: "bogus"}); page != nil || hasMore {
+		t.Fatalf("invalid status = %#v has_more=%v", page, hasMore)
+	}
+}
+
+// 无游标请求也要能报告 has_more，供首屏判断是否显示“加载更早”。
+func TestTraceStoreQueryPageWithoutCursorReportsHasMore(t *testing.T) {
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	for i := 0; i < 3; i++ {
+		store.Record(TraceRecord{Tool: "read_file", Source: string(SourceMCP), Success: true, StartedAt: time.Now()})
+	}
+
+	page, hasMore := store.QueryPage(TraceQuery{Limit: 2})
+	if !hasMore || len(page) != 2 || page[0].ID != 3 || page[1].ID != 2 {
+		t.Fatalf("page = %#v has_more=%v", page, hasMore)
+	}
+	page, hasMore = store.QueryPage(TraceQuery{Limit: 3})
+	if hasMore || len(page) != 3 {
+		t.Fatalf("full page = %#v has_more=%v", page, hasMore)
 	}
 }

@@ -15,17 +15,19 @@ func (r *Runtime) RuntimeTraces(query observability.TraceQuery) (Result, error) 
 		return Result{
 			"ok": true, "source": runtimeAPISource, "mode": string(observability.TraceModeOff),
 			"view": view, "records": []observability.TraceRecord{}, "count": 0, "tools": []string{},
+			"has_more": false,
 		}, nil
 	}
-	records := r.traces.Query(query)
+	records, hasMore := r.traces.QueryPage(query)
 	return Result{
-		"ok":      true,
-		"source":  runtimeAPISource,
-		"view":    view,
-		"status":  r.traces.Status(),
-		"records": records,
-		"count":   len(records),
-		"tools":   r.traces.ToolNames(),
+		"ok":       true,
+		"source":   runtimeAPISource,
+		"view":     view,
+		"status":   r.traces.Status(),
+		"records":  records,
+		"count":    len(records),
+		"tools":    r.traces.ToolNames(),
+		"has_more": hasMore,
 	}, nil
 }
 

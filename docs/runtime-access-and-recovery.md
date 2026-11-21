@@ -52,6 +52,15 @@
 
 远程或反向代理访问需要启用并通过 Bearer/OAuth 认证。原生本机客户端可以不发送 Origin。
 
+### Web 控制台远程登录
+
+`/dashboard/*` 另有一条与控制台绑定的凭据路径，不改变上面的 runtime API 边界：
+
+- 启用 `AGENTDOCK_REMOTE_AUTH_ENABLED` 后，浏览器在 `/dashboard/login` 用口令换 `agentdock_session` Cookie（`Secure`/`SameSite=Strict`/`Path=/dashboard`/host-only，HMAC-SHA256 签名，默认 12 小时）。
+- 会话只在 `/dashboard` 路径生效；代理层校验通过后把请求改写成回环形态（`Host→127.0.0.1`，丢弃 Origin/Cookie/转发头）再注入 `Bearer AGENTDOCK_AUTH_TOKEN`，因此 `runtime_api.go` 的回环约束、DNS rebinding 防御与 JSON Content-Type 强制全部原样生效。
+- 会话 Cookie 直接打到 `/internal/runtime/*` 无效；会话对 `/internal/runtime/remote*` 与 `/internal/runtime/config/restart` 的写请求返回 403 `SESSION_SCOPE_DENIED`。
+- 未启用时行为与之前完全一致（仅本机直连）。完整设计、配置与部署验证见 `docs/dashboard-remote-access-login.md`。
+
 ### 调用追踪读取
 
 `/internal/runtime/traces` 默认返回完整预览，`view=summary` 只返回列表摘要：去掉 `arguments`/`result` 与命令正文，只留命令摘要、退出状态与字节数。控制面板列表必须走摘要视图，选中记录后再用 `/internal/runtime/traces/detail?id=<id>` 回读单条完整记录（记录已超出保留窗口时返回 404 `TRACE_NOT_FOUND`）。预览被截断的记录另有旁路全文副本（脱敏后单侧上限 256 KiB，存于 `<trace root>/full/`），用 `?full=1` 按需回读；副本缺失时 `full_available=false`，UI 降级为预览。

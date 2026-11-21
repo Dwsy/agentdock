@@ -39,6 +39,17 @@ func Serve(ctx context.Context, server *mcp.Server, runtime runtimeapi.Runtime, 
 		return fmt.Errorf("clean public artifacts: %w", err)
 	}
 	warnIfUnauthenticatedPublicExposure(cfg)
+	console, err := newDashboardConsoleSession(cfg)
+	if err != nil {
+		return err
+	}
+	if console.Enabled() {
+		slog.Info("console login enabled",
+			"path", dashboardLoginPath,
+			"public_url", cfg.RemoteAuthPublicURL,
+			"session_ttl", console.TTL().String(),
+		)
+	}
 	slog.Info("http server configured", "host", cfg.Host, "port", cfg.Port, "auth_required", authRequired, "endpoint", "/mcp")
 	mux.HandleFunc("/", statusPageHandler(server, runtime, cfg))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -58,8 +69,8 @@ func Serve(ctx context.Context, server *mcp.Server, runtime runtimeapi.Runtime, 
 	registerMCPOAuthCallback(mux, runtime)
 	mux.HandleFunc("/context", agentDockContextHandler(server, cfg, oauthStore))
 	registerRuntimeAPI(mux, runtime, cfg, oauthStore)
-	// 只读 Web 控制台：静态页 + loopback-only API 代理（内部注入 token）。
-	registerDashboard(mux, cfg, runtimeAPIHandler(runtime, cfg, oauthStore))
+	// 只读 Web 控制台：静态页 + API 代理（内部注入 token）；启用远程登录后额外接受会话请求。
+	registerDashboard(mux, cfg, console, runtimeAPIHandler(runtime, cfg, oauthStore))
 	mux.HandleFunc("/mcp", mcpEndpointHandler(server, cfg, oauthStore))
 	registerManualLLM(mux, runtime, cfg, oauthStore)
 

@@ -23,6 +23,12 @@ const (
 
 	defaultOAuthAccessTokenTTLSeconds = int64(time.Hour / time.Second)
 	maxOAuthAccessTokenTTLSeconds     = int64(999999 * 24 * 60 * 60)
+
+	// 远程控制台登录：默认关闭，开启后浏览器可用口令换取会话 Cookie 访问 /dashboard。
+	defaultRemoteAuthSessionTTLSeconds = int64(12 * 60 * 60)
+	minRemoteAuthSessionTTLSeconds     = int64(time.Minute / time.Second)
+	maxRemoteAuthSessionTTLSeconds     = int64(30 * 24 * 60 * 60)
+	minRemoteAuthPasswordLength        = 12
 )
 
 // TraceMode 控制工具调用 trace 的保留方式：off 不采集，memory 只保留在
@@ -160,6 +166,10 @@ type Config struct {
 	OAuthServerURL               string
 	OAuthAccessTokenTTLSeconds   int64
 	OAuthAccessTokenNeverExpires bool
+	RemoteAuthEnabled            bool
+	RemoteAuthPassword           string
+	RemoteAuthSessionTTLSeconds  int64
+	RemoteAuthPublicURL          string
 	LogLevel                     string
 	NexusEndpoint                string
 	NexusDeviceToken             string
@@ -265,6 +275,14 @@ func FromEnv() (Config, error) {
 		return Config{}, err
 	}
 	oauthAccessTokenTTLSeconds, oauthAccessTokenNeverExpires, err := getenvOAuthAccessTokenTTL("AGENTDOCK_OAUTH_ACCESS_TOKEN_TTL", defaultOAuthAccessTokenTTLSeconds)
+	if err != nil {
+		return Config{}, err
+	}
+	remoteAuthEnabled, err := getenvBool("AGENTDOCK_REMOTE_AUTH_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	remoteAuthSessionTTLSeconds, err := getenvRemoteAuthSessionTTL("AGENTDOCK_REMOTE_AUTH_SESSION_TTL", defaultRemoteAuthSessionTTLSeconds)
 	if err != nil {
 		return Config{}, err
 	}
@@ -376,6 +394,10 @@ func FromEnv() (Config, error) {
 		OAuthServerURL:               os.Getenv("AGENTDOCK_SERVER_URL"),
 		OAuthAccessTokenTTLSeconds:   oauthAccessTokenTTLSeconds,
 		OAuthAccessTokenNeverExpires: oauthAccessTokenNeverExpires,
+		RemoteAuthEnabled:            remoteAuthEnabled,
+		RemoteAuthPassword:           os.Getenv("AGENTDOCK_REMOTE_AUTH_PASSWORD"),
+		RemoteAuthSessionTTLSeconds:  remoteAuthSessionTTLSeconds,
+		RemoteAuthPublicURL:          strings.TrimSpace(os.Getenv("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL")),
 		LogLevel:                     getenv("AGENTDOCK_LOG_LEVEL", "info"),
 		MCPAppsMode:                  mcpAppsMode,
 		BrowserEnabled:               browserEnabled,
@@ -546,6 +568,16 @@ func (c *Config) Normalize() error {
 			c.OAuthAccessTokenTTLSeconds,
 		)
 	}
+	c.RemoteAuthPublicURL = strings.TrimSpace(c.RemoteAuthPublicURL)
+	if c.RemoteAuthSessionTTLSeconds == 0 {
+		c.RemoteAuthSessionTTLSeconds = defaultRemoteAuthSessionTTLSeconds
+	}
+	if c.RemoteAuthSessionTTLSeconds < minRemoteAuthSessionTTLSeconds || c.RemoteAuthSessionTTLSeconds > maxRemoteAuthSessionTTLSeconds {
+		return fmt.Errorf(
+			"AGENTDOCK_REMOTE_AUTH_SESSION_TTL must be between 1m and 720h: %ds",
+			c.RemoteAuthSessionTTLSeconds,
+		)
+	}
 	if c.Port == 0 {
 		c.Port = 8765
 	}
@@ -591,6 +623,9 @@ func (c Config) ValidateAuth() error {
 	// AgentDock 暴露命令和文件写入能力，非回环无认证不是可接受的默认配置。
 	if !c.Stdio && !c.AuthRequired() && !isLoopbackBindHost(c.Host) {
 		return fmt.Errorf("non-loopback host %q requires AGENTDOCK_AUTH_TOKEN or OAuth", c.Host)
+	}
+	if err := c.validateRemoteAuth(); err != nil {
+		return err
 	}
 	if !c.OAuthEnabled {
 		return nil
@@ -640,6 +675,78 @@ func (c Config) ValidateAuth() error {
 		}
 	}
 	return nil
+}
+
+// validateRemoteAuth 校验远程控制台登录的启用条件。
+// 默认关闭；开启需要同时满足：足够长的登录口令、已配置的机器凭证（会话请求由
+// 控制台代理注入给 runtime API，人类会话本身永远看不到它），合法且可选的公网地址。
+func (c Config) validateRemoteAuth() error {
+	if !c.RemoteAuthEnabled {
+		if c.RemoteAuthPassword != "" {
+			return errors.New("AGENTDOCK_REMOTE_AUTH_PASSWORD is set but AGENTDOCK_REMOTE_AUTH_ENABLED is false")
+		}
+		return nil
+	}
+	if c.RemoteAuthPassword == "" {
+		return errors.New("AGENTDOCK_REMOTE_AUTH_ENABLED requires AGENTDOCK_REMOTE_AUTH_PASSWORD")
+	}
+	// 前后空白几乎总是 env 文件或 shell 引号带进来的，不会有人真想用它，
+	// 而静默 trim 又会让人对着“密码明明对”的失败登录干瞪眼。
+	if strings.TrimSpace(c.RemoteAuthPassword) != c.RemoteAuthPassword {
+		return errors.New("AGENTDOCK_REMOTE_AUTH_PASSWORD must not begin or end with whitespace")
+	}
+	if len([]rune(c.RemoteAuthPassword)) < minRemoteAuthPasswordLength {
+		return fmt.Errorf("AGENTDOCK_REMOTE_AUTH_PASSWORD must contain at least %d characters", minRemoteAuthPasswordLength)
+	}
+	if c.AuthToken == "" {
+		return errors.New("AGENTDOCK_REMOTE_AUTH_ENABLED requires AGENTDOCK_AUTH_TOKEN: the console injects it into the local runtime API and never exposes it to the browser")
+	}
+	if c.RemoteAuthSessionTTLSeconds < minRemoteAuthSessionTTLSeconds || c.RemoteAuthSessionTTLSeconds > maxRemoteAuthSessionTTLSeconds {
+		return fmt.Errorf(
+			"AGENTDOCK_REMOTE_AUTH_SESSION_TTL must be between 1m and 720h: %ds",
+			c.RemoteAuthSessionTTLSeconds,
+		)
+	}
+	if c.RemoteAuthPublicURL == "" {
+		return nil
+	}
+	// 公网地址只用于两件事：校验浏览器 Origin 是否同名，以及强制 Secure Cookie。
+	publicURL, err := url.Parse(c.RemoteAuthPublicURL)
+	if err != nil || publicURL.Scheme == "" || publicURL.Host == "" {
+		return fmt.Errorf("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL must be an absolute HTTP(S) URL: %q", c.RemoteAuthPublicURL)
+	}
+	if publicURL.User != nil || publicURL.RawQuery != "" || publicURL.Fragment != "" {
+		return fmt.Errorf("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL must not contain user info, a query, or a fragment: %q", c.RemoteAuthPublicURL)
+	}
+	if publicURL.Path != "" && publicURL.Path != "/" {
+		return fmt.Errorf("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL must be an origin without a path: %q", c.RemoteAuthPublicURL)
+	}
+	if publicURL.Scheme == "https" {
+		return nil
+	}
+	if publicURL.Scheme != "http" {
+		return fmt.Errorf("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL must use https, or http for a loopback host: %q", c.RemoteAuthPublicURL)
+	}
+	if !isLoopbackBindHost(publicURL.Hostname()) {
+		return fmt.Errorf("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL must use https for non-loopback hosts: %q", c.RemoteAuthPublicURL)
+	}
+	return nil
+}
+
+func getenvRemoteAuthSessionTTL(key string, fallback int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	seconds, never, err := parseOAuthAccessTokenTTL(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s as duration: %w", key, err)
+	}
+	// 控制台会话不支持永不过期：那等于一次登录换永久访问。
+	if never {
+		return 0, fmt.Errorf("%s does not support \"never\"", key)
+	}
+	return seconds, nil
 }
 
 func isLoopbackBindHost(host string) bool {

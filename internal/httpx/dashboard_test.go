@@ -131,7 +131,7 @@ func TestDashboardArtifactPublishAndContentStreaming(t *testing.T) {
 	t.Cleanup(func() { _ = runtime.Close() })
 
 	mux := http.NewServeMux()
-	registerDashboard(mux, cfg, runtimeAPIHandler(runtime, cfg, auth.NewOAuthStore()))
+	registerDashboard(mux, cfg, nil, runtimeAPIHandler(runtime, cfg, auth.NewOAuthStore()))
 
 	// 1. 发布二进制载荷（含 PNG 头特征字节），确认上传 -> 列表 -> 流式预览/Range -> 下载。
 	pngBytes := []byte("\x89PNG\r\n\x1a\n0123456789")

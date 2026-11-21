@@ -308,6 +308,8 @@ func TestFromEnvRejectsInvalidTypedValues(t *testing.T) {
 		{name: "browser reuse existing cdp", key: "AGENTDOCK_BROWSER_REUSE_EXISTING_CDP", value: "sometimes"},
 		{name: "oauth enabled", key: "AGENTDOCK_OAUTH_ENABLED", value: "enabled"},
 		{name: "oauth access token ttl", key: "AGENTDOCK_OAUTH_ACCESS_TOKEN_TTL", value: "one-day"},
+		{name: "remote auth enabled", key: "AGENTDOCK_REMOTE_AUTH_ENABLED", value: "enabled"},
+		{name: "remote auth session ttl", key: "AGENTDOCK_REMOTE_AUTH_SESSION_TTL", value: "one-day"},
 		{name: "stdio", key: "AGENTDOCK_STDIO", value: "enabled"},
 	}
 	for _, test := range tests {
@@ -317,6 +319,8 @@ func TestFromEnvRejectsInvalidTypedValues(t *testing.T) {
 			t.Setenv("AGENTDOCK_BROWSER_REUSE_EXISTING_CDP", "")
 			t.Setenv("AGENTDOCK_OAUTH_ENABLED", "")
 			t.Setenv("AGENTDOCK_OAUTH_ACCESS_TOKEN_TTL", "")
+			t.Setenv("AGENTDOCK_REMOTE_AUTH_ENABLED", "")
+			t.Setenv("AGENTDOCK_REMOTE_AUTH_SESSION_TTL", "")
 			t.Setenv("AGENTDOCK_STDIO", "")
 			t.Setenv(test.key, test.value)
 			if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), test.key) {
@@ -650,5 +654,128 @@ func TestFromEnvManualLLMTuning(t *testing.T) {
 	t.Setenv("AGENTDOCK_USAGE_COUNT_MODE", "unknown")
 	if _, err := FromEnv(); err == nil || !strings.Contains(err.Error(), "AGENTDOCK_USAGE_COUNT_MODE") {
 		t.Fatalf("expected error for invalid AGENTDOCK_USAGE_COUNT_MODE, got %v", err)
+	}
+}
+
+func TestValidateAuthRemoteConsoleLogin(t *testing.T) {
+	base := Config{
+		Host:                        "127.0.0.1",
+		AuthToken:                   "static-token",
+		RemoteAuthEnabled:           true,
+		RemoteAuthPassword:          "console-password",
+		RemoteAuthSessionTTLSeconds: 3600,
+		RemoteAuthPublicURL:         "https://dock.example.com",
+	}
+	if err := base.ValidateAuth(); err != nil {
+		t.Fatalf("ValidateAuth() error = %v", err)
+	}
+
+	withConfig := func(mutate func(*Config)) Config {
+		cfg := base
+		mutate(&cfg)
+		return cfg
+	}
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "missing password",
+			cfg:  Config{AuthToken: base.AuthToken, RemoteAuthEnabled: true, RemoteAuthSessionTTLSeconds: 3600},
+			want: "AGENTDOCK_REMOTE_AUTH_PASSWORD",
+		},
+		{
+			name: "short password",
+			cfg:  withConfig(func(c *Config) { c.RemoteAuthPassword = "short" }),
+			want: "at least 12 characters",
+		},
+		{
+			name: "padded password",
+			cfg:  withConfig(func(c *Config) { c.RemoteAuthPassword = "console-password " }),
+			want: "whitespace",
+		},
+		{
+			name: "missing machine token",
+			cfg:  withConfig(func(c *Config) { c.AuthToken = "" }),
+			want: "AGENTDOCK_AUTH_TOKEN",
+		},
+		{
+			name: "password without enable flag",
+			cfg:  withConfig(func(c *Config) { c.RemoteAuthEnabled = false }),
+			want: "AGENTDOCK_REMOTE_AUTH_ENABLED",
+		},
+		{
+			name: "session ttl too short",
+			cfg:  withConfig(func(c *Config) { c.RemoteAuthSessionTTLSeconds = 30 }),
+			want: "AGENTDOCK_REMOTE_AUTH_SESSION_TTL",
+		},
+		{
+			name: "session ttl too long",
+			cfg:  withConfig(func(c *Config) { c.RemoteAuthSessionTTLSeconds = 31 * 24 * 60 * 60 }),
+			want: "AGENTDOCK_REMOTE_AUTH_SESSION_TTL",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.ValidateAuth()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateAuth() error = %v, want %s", err, tc.want)
+			}
+		})
+	}
+
+	for _, publicURL := range []string{
+		"relative/path",
+		"ftp://dock.example.com",
+		"http://dock.example.com",
+		"https://user:pass@dock.example.com",
+		"https://dock.example.com/base",
+		"https://dock.example.com?mode=test",
+		"https://dock.example.com/#fragment",
+	} {
+		cfg := base
+		cfg.RemoteAuthPublicURL = publicURL
+		if err := cfg.ValidateAuth(); err == nil {
+			t.Fatalf("ValidateAuth() accepted public URL %q", publicURL)
+		}
+	}
+
+	// 回环地址允许 http：本机调试不需要证书。
+	cfg := base
+	cfg.RemoteAuthPublicURL = "http://127.0.0.1:8765"
+	if err := cfg.ValidateAuth(); err != nil {
+		t.Fatalf("loopback public URL rejected: %v", err)
+	}
+}
+
+func TestFromEnvParsesRemoteConsoleLogin(t *testing.T) {
+	t.Setenv("AGENTDOCK_AUTH_TOKEN", "")
+	t.Setenv("AGENTDOCK_OAUTH_ENABLED", "")
+	t.Setenv("AGENTDOCK_REMOTE_AUTH_ENABLED", "true")
+	t.Setenv("AGENTDOCK_REMOTE_AUTH_PASSWORD", "console-password")
+	t.Setenv("AGENTDOCK_REMOTE_AUTH_SESSION_TTL", "7d")
+	t.Setenv("AGENTDOCK_REMOTE_AUTH_PUBLIC_URL", " https://dock.example.com ")
+	cfg, err := FromEnv()
+	if err != nil {
+		t.Fatalf("FromEnv() error = %v", err)
+	}
+	if !cfg.RemoteAuthEnabled || cfg.RemoteAuthPassword != "console-password" ||
+		cfg.RemoteAuthPublicURL != "https://dock.example.com" ||
+		cfg.RemoteAuthSessionTTLSeconds != int64(7*24*60*60) {
+		t.Fatalf("config = %#v", cfg)
+	}
+	if cfg.AuthRequired() {
+		t.Fatal("remote console login must not make the runtime API require credentials on its own")
+	}
+}
+
+func TestNormalizeDefaultsRemoteAuthSessionTTL(t *testing.T) {
+	cfg := Config{AgentDockDefaultDir: t.TempDir(), AgentDockHome: filepath.Join(t.TempDir(), "home")}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatalf("Normalize() error = %v", err)
+	}
+	if cfg.RemoteAuthSessionTTLSeconds != defaultRemoteAuthSessionTTLSeconds {
+		t.Fatalf("RemoteAuthSessionTTLSeconds = %d, want %d", cfg.RemoteAuthSessionTTLSeconds, defaultRemoteAuthSessionTTLSeconds)
 	}
 }

@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/uvwt/agentdock/internal/auth"
 	"github.com/uvwt/agentdock/internal/config"
 	"github.com/uvwt/agentdock/internal/runtimeapi"
 )
@@ -39,13 +41,17 @@ var (
 // registerDashboard 注册静态页与 API 代理。
 // runtimeHandler 是 /internal/runtime/* 的处理器；代理会把 /dashboard/api/*
 // 重写成 /internal/runtime/* 并注入 Bearer，避免把 token 暴露给浏览器 JS。
-func registerDashboard(mux *http.ServeMux, cfg config.Config, runtimeHandler http.Handler) {
+// console 为空表示未启用远程登录，行为与之前完全一致（只允许本机直连）。
+func registerDashboard(mux *http.ServeMux, cfg config.Config, console *auth.ConsoleSession, runtimeHandler http.Handler) {
 	dist, err := fs.Sub(dashboardFS, "dashboard/dist")
 	if err != nil {
 		slog.Warn("dashboard: embedded dist unavailable", "error", err)
 		return
 	}
-	apiHandler := dashboardAPIHandler(cfg, runtimeHandler)
+	if console.Enabled() {
+		registerDashboardLogin(mux, newDashboardLogin(cfg, console))
+	}
+	apiHandler := dashboardAPIHandler(cfg, console, runtimeHandler)
 
 	mux.HandleFunc(dashboardAPIPrefix, apiHandler)
 	mux.HandleFunc(dashboardPrefix, func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +59,12 @@ func registerDashboard(mux *http.ServeMux, cfg config.Config, runtimeHandler htt
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		// 启用远程登录后，静态页同样要会话：控制台外壳没有秘密，但未登录就
+		// 加载它只会让每个页面都弹一片加载失败，不如直接给登录页。
+		if console.Enabled() && !dashboardConsoleAuthorized(r, cfg, console) {
+			http.Redirect(w, r, dashboardLoginPath+"?next="+url.QueryEscape(dashboardNextParam(r)), http.StatusSeeOther)
 			return
 		}
 		w.Header().Set("Content-Security-Policy", dashboardCSP)
@@ -82,12 +94,21 @@ func serveDashboardFile(w http.ResponseWriter, r *http.Request, dist fs.FS, name
 }
 
 // dashboardAPIHandler 把 /dashboard/api/* 代理到 /internal/runtime/*。
-// 仅接受本机直连（无跨域代理头），注入 Core 的 AuthToken 后交给 runtime handler。
-func dashboardAPIHandler(cfg config.Config, runtimeHandler http.Handler) http.HandlerFunc {
+// 本机直连直接放行；启用远程登录后，带有效会话 Cookie 的请求也放行，
+// 并且只在代理层检查浏览器边界（Host/Origin），到内部 handler 时改写成本机直连形态。
+func dashboardAPIHandler(cfg config.Config, console *auth.ConsoleSession, runtimeHandler http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		viaSession := false
 		if !isDirectLoopbackRequest(r) {
-			writeRuntimeAPIError(w, http.StatusForbidden, "LOCAL_ACCESS_REQUIRED", "dashboard API requires direct local access")
-			return
+			if !console.Enabled() {
+				writeRuntimeAPIError(w, http.StatusForbidden, "LOCAL_ACCESS_REQUIRED", "dashboard API requires direct local access")
+				return
+			}
+			if !dashboardSessionAuthorized(r, cfg, console) {
+				writeRuntimeAPIError(w, http.StatusUnauthorized, "SESSION_REQUIRED", "dashboard console login required")
+				return
+			}
+			viaSession = true
 		}
 		if cfg.AuthToken == "" {
 			writeRuntimeAPIError(w, http.StatusServiceUnavailable, "AUTH_TOKEN_REQUIRED", "dashboard requires AGENTDOCK_AUTH_TOKEN")
@@ -96,12 +117,30 @@ func dashboardAPIHandler(cfg config.Config, runtimeHandler http.Handler) http.Ha
 		sub := strings.TrimPrefix(r.URL.Path, dashboardPrefix) // "api/status"
 		// /dashboard/api/status -> /internal/runtime/status
 		target := "/internal/runtime/" + strings.TrimPrefix(sub, "api/")
+		if viaSession && dashboardSessionDeniesWrite(r.Method, target) {
+			writeRuntimeAPIError(w, http.StatusForbidden, "SESSION_SCOPE_DENIED", "console session cannot change remote access or restart the service")
+			return
+		}
 
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = target
 		r2.Header = r.Header.Clone()
 		r2.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
-
+		if viaSession {
+			// 浏览器侧校验已完成。内部请求必须呈本机直连形态，否则被反向代理
+			// 改写过的 Host 和公开 Origin 会撞上 runtime API 的回环约束，
+			// 而它本来就不该为公网宿主放行。
+			r2.Host = loopbackRuntimeHost(cfg)
+			r2.Header.Del("Origin")
+			r2.Header.Del("Referer")
+			r2.Header.Del("Cookie")
+			for _, header := range []string{"Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest"} {
+				r2.Header.Del(header)
+			}
+			for _, header := range analyticsProxyHeaders {
+				r2.Header.Del(header)
+			}
+		}
 		// SSE 事件流与发布物内容流：直接透传，避免缓冲与 JSON 脱敏改写二进制载荷或破坏 Range。
 		if isRuntimeEventsPath(target) || runtimeapi.IsArtifactContentPath(target) {
 			runtimeHandler.ServeHTTP(w, r2)

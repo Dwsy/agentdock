@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex, nofollow">
+  <title>登录 AgentDock</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f5f5f4;
+      --panel: #ffffff;
+      --text: #1c1917;
+      --muted: #78716c;
+      --border: #d6d3d1;
+      --field: #ffffff;
+      --button: #1c1917;
+      --button-hover: #292524;
+      --button-text: #ffffff;
+      --error: #b42318;
+      --error-bg: #fff6f5;
+      --error-border: #f3b7b2;
+      --focus: rgba(28, 25, 23, 0.16);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --page: #0c0a09;
+        --panel: #191614;
+        --text: #f5f5f4;
+        --muted: #a8a29e;
+        --border: #292524;
+        --field: #0f0d0c;
+        --button: #f5f5f4;
+        --button-hover: #e7e5e4;
+        --button-text: #1c1917;
+        --error: #fda29b;
+        --error-bg: #2a1513;
+        --error-border: #5c2620;
+        --focus: rgba(245, 245, 244, 0.24);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+    }
+
+    body {
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--page);
+      color: var(--text);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .shell {
+      width: min(100%, 380px);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 14px 2px;
+      font-size: 14px;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+    }
+
+    .brand span {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text);
+    }
+
+    .panel {
+      padding: 26px;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      background: var(--panel);
+    }
+
+    h1 {
+      margin: 0 0 20px;
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: -0.02em;
+    }
+
+    label {
+      display: block;
+      margin: 0 0 7px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    input[type="password"] {
+      width: 100%;
+      padding: 11px 13px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--field);
+      color: var(--text);
+      font: inherit;
+      font-size: 15px;
+    }
+
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--text);
+      box-shadow: 0 0 0 3px var(--focus);
+    }
+
+    button {
+      width: 100%;
+      margin-top: 18px;
+      padding: 11px 13px;
+      border: 0;
+      border-radius: 10px;
+      background: var(--button);
+      color: var(--button-text);
+      font: inherit;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button:hover {
+      background: var(--button-hover);
+    }
+
+    .error {
+      margin: 0 0 18px;
+      padding: 10px 12px;
+      border: 1px solid var(--error-border);
+      border-radius: 10px;
+      background: var(--error-bg);
+      color: var(--error);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <div class="brand"><span></span>AgentDock</div>
+    <section class="panel">
+      <h1>登录控制台</h1>
+      {{- if .Error}}
+      <p class="error" role="alert">{{.Error}}</p>
+      {{- end}}
+      <form method="post" action="/dashboard/login">
+        <input type="hidden" name="next" value="{{.Next}}">
+        <label for="password">访问口令</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <button type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Layers3, List } from 'lucide-react';
 import type { AnalyticsCall, CallAnalytics, CallFilters, CallGroup, CallMetrics } from '../api';
+import ListPagination from '../components/ListPagination';
+import { recordDateTime } from '../lib/recordTime';
 import { Badge, Panel, SectionTitle, compact, fmt, ms } from '../ui';
 
 export const countLabel = (count: number) => count < 100_000 ? fmt.format(count) : compact(count);
@@ -135,16 +137,28 @@ export function CallBreakdown({ data, filters, applyFilters, dimension, onDimens
   );
 }
 
-export function RecentCalls({ calls, total }: { calls: AnalyticsCall[]; total: number }) {
-  const recent = [...calls].sort((a, b) => Date.parse(b.completed_at) - Date.parse(a.completed_at)).slice(0, 30);
+export function RecentCalls({ data, pending, onPageChange }: {
+  data: CallAnalytics; pending: boolean; onPageChange: (page: number) => void;
+}) {
+  const { calls, totals, pagination } = data;
+  const page = pagination?.page ?? 1;
+  const pageCount = pagination ? Math.ceil(totals.count / pagination.page_size) : 1;
   return (
     <Panel className="min-w-0 p-3.5 sm:p-5">
-      <SectionTitle icon={List} title="最近调用" hint={`${fmt.format(recent.length)} / ${fmt.format(total)} 条匹配`} />
-      {recent.length ? (
-        <ul className="divide-y divide-border/60">
-          {recent.map((call) => <RecentCallRow key={call.id} call={call} />)}
+      <SectionTitle icon={List} title="调用明细" hint={`共 ${fmt.format(totals.count)} 条匹配 · 本页 ${fmt.format(calls.length)} 条`}
+        action={pagination && (
+          <ListPagination label="调用明细分页" page={page} pageCount={page <= pageCount ? pageCount : undefined}
+            canNext={page < pageCount} disabled={pending}
+            onPrevious={() => onPageChange(Math.min(page - 1, Math.max(pageCount, 1)))} onNext={() => onPageChange(page + 1)} />
+        )} />
+      {!pagination && totals.count > calls.length && (
+        <p className="mb-2 text-xs text-muted-foreground">当前 Core 只返回最近 {fmt.format(calls.length)} 条明细。更新 Core 后可翻页。</p>
+      )}
+      {calls.length ? (
+        <ul className="divide-y divide-border/60" aria-busy={pending}>
+          {calls.map((call) => <RecentCallRow key={call.id} call={call} />)}
         </ul>
-      ) : <p className="text-sm text-muted-foreground">没有可用的调用明细。</p>}
+      ) : <p className="text-sm text-muted-foreground">本页没有可用的调用明细。</p>}
     </Panel>
   );
 }
@@ -155,7 +169,8 @@ function ResultBadge({ success }: { success: boolean }) {
 
 function RecentCallRow({ call }: { call: AnalyticsCall }) {
   const details = [
-    ['开始时间', windowTime(call.started_at)],
+    ['开始时间', recordDateTime(call.started_at)],
+    ['完成时间', recordDateTime(call.completed_at)],
     ['输入 Token', call.input_tokens === undefined ? '—' : fmt.format(call.input_tokens)],
     ['输出 Token', call.output_tokens === undefined ? '—' : fmt.format(call.output_tokens)],
     ['代码变更', call.insertions === undefined && call.deletions === undefined ? '—' : `+${fmt.format(call.insertions ?? 0)} / −${fmt.format(call.deletions ?? 0)}`],

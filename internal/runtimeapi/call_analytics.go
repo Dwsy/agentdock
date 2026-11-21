@@ -1,7 +1,9 @@
 package runtimeapi
 
 import (
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/observability"
@@ -44,6 +46,20 @@ func dispatchCallAnalytics(runtime Runtime, request Request) (map[string]any, er
 		if len(filter) > 256 {
 			return nil, invalidCallAnalyticsQuery("filter value is too long")
 		}
+	}
+	if request.Query.Has("page") {
+		page, err := strconv.Atoi(value("page"))
+		if err != nil || page < 1 {
+			return nil, invalidCallAnalyticsQuery("page must be a positive integer")
+		}
+		query.Page = page
+	}
+	if request.Query.Has("to") {
+		to, err := time.Parse(time.RFC3339Nano, value("to"))
+		if err != nil || to.IsZero() {
+			return nil, invalidCallAnalyticsQuery("to must be an RFC3339 timestamp")
+		}
+		query.To = to
 	}
 	return map[string]any(reader.RuntimeCallAnalytics(query)), nil
 }

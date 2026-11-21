@@ -22,6 +22,14 @@ type CallAnalyticsQuery struct {
 	ErrorCode     string
 	ErrorCategory string
 	Stage         Stage
+	Page          int
+	To            time.Time
+}
+
+// CallAnalyticsPage describes the current page of matching calls.
+type CallAnalyticsPage struct {
+	Page     int `json:"page"`
+	PageSize int `json:"page_size"`
 }
 
 // CallAnalyticsSnapshot contains aggregates and a bounded selection of matching calls.
@@ -36,6 +44,7 @@ type CallAnalyticsSnapshot struct {
 	ByError  []CallGroup         `json:"by_error"`
 	ByStage  []CallGroup         `json:"by_stage"`
 	Facets   CallFacets          `json:"facets"`
+	Page     *CallAnalyticsPage  `json:"pagination,omitempty"`
 	Calls    []AnalyticsCall     `json:"calls"`
 }
 
@@ -99,26 +108,44 @@ func (r *Recorder) CallAnalytics(query CallAnalyticsQuery) CallAnalyticsSnapshot
 	}
 
 	var records []windowStat
-	now := time.Now()
-	startedAt, droppedAt := now, time.Time{}
+	var droppedAt time.Time
 	if r != nil {
 		r.mu.Lock()
-		now = time.Now()
+	}
+	now := time.Now()
+	to := now
+	if !query.To.IsZero() && query.To.Before(now) {
+		to = query.To
+	}
+	from := to.Add(-span)
+	startedAt := now
+	if r != nil {
+		// A frozen query limits the read window without extending record retention.
 		r.pruneWindowLocked(now)
 		startedAt, droppedAt = r.startedAt, r.windowDroppedAt
+		entries := r.windowSinceLocked(from)
+		end := sort.Search(len(entries), func(i int) bool {
+			return entries[i].completedAt.After(to)
+		})
 		// Entries are immutable, so only the slice of references needs copying here.
-		records = append(records, r.windowSinceLocked(now.Add(-span))...)
+		records = append(records, entries[:end]...)
 		r.mu.Unlock()
 	}
-	from := now.Add(-span)
-	window := CallAnalyticsWindow{From: from.UTC(), To: now.UTC(), CoveredFrom: from.UTC()}
+	window := CallAnalyticsWindow{From: from.UTC(), To: to.UTC(), CoveredFrom: from.UTC()}
 	if startedAt.After(from) {
 		window.CoveredFrom = startedAt.UTC()
 		window.LimitedBy = "restart"
 	}
-	if !droppedAt.Before(window.CoveredFrom) {
+	if !droppedAt.IsZero() && !droppedAt.Before(window.CoveredFrom) {
 		window.CoveredFrom = droppedAt.UTC()
 		window.LimitedBy = "capacity"
+	}
+	if retentionFrom := now.Add(-callHistoryDuration); retentionFrom.After(window.CoveredFrom) {
+		window.CoveredFrom = retentionFrom.UTC()
+		window.LimitedBy = "retention"
+	}
+	if window.CoveredFrom.After(window.To) {
+		window.CoveredFrom = window.To
 	}
 	return summarizeCalls(window, span/time.Duration(bucketCount), bucketCount, records, query)
 }
@@ -129,11 +156,18 @@ func summarizeCalls(window CallAnalyticsWindow, bucketSpan time.Duration, bucket
 		Buckets: make([]CallBucket, bucketCount),
 		Calls:   make([]AnalyticsCall, 0, min(len(records), callDetailLimit)),
 	}
+	var offset int
+	if query.Page > 0 {
+		result.Page = &CallAnalyticsPage{Page: query.Page, PageSize: callDetailLimit}
+		// Bound the multiplication even when an API caller requests a very large page.
+		offset = min(query.Page-1, len(records)/callDetailLimit+1) * callDetailLimit
+	}
 	var totals callAccumulator
 	buckets := make([]callAccumulator, bucketCount)
 	tools, sources := make(map[string]struct{}), make(map[string]struct{})
 	byTool, bySource, byClient := make(callGroups), make(callGroups), make(callGroups)
 	byTask, byError, byStage := make(callGroups), make(callGroups), make(callGroups)
+	// Completion time and ID both advance under the recorder lock.
 	for i := len(records) - 1; i >= 0; i-- {
 		entry := records[i]
 		call := entry.record
@@ -158,7 +192,7 @@ func summarizeCalls(window CallAnalyticsWindow, bucketSpan time.Duration, bucket
 		for _, stage := range call.Stages {
 			byStage.group(string(stage.Name), "").addDuration(stage.DurationMS, stage.Success)
 		}
-		if len(result.Calls) < callDetailLimit {
+		if totals.counts.Count > offset && len(result.Calls) < callDetailLimit {
 			copy := *call
 			copy.Stages = append([]StageRecord(nil), call.Stages...)
 			result.Calls = append(result.Calls, AnalyticsCall{ExecutionRecord: copy, CompletedAt: entry.completedAt.UTC()})

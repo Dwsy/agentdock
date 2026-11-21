@@ -1,28 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, ScrollText, CheckCircle2, XCircle, Clock3, Terminal, ListFilter, CheckCircle, Circle, Wrench, FilePenLine, Tag, X, FolderGit2, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { Search, ScrollText, CheckCircle2, XCircle, Clock3, Terminal, ListFilter, CheckCircle, Circle, Wrench, FilePenLine, Tag, X, FolderGit2, ChevronDown, ChevronRight } from 'lucide-react';
 import { api, type Traces as TracesData, type TraceRecord } from '../api';
 import { Panel, SectionTitle, fmt, ms, relTime } from '../ui';
 import TraceDetail from '../components/TraceDetail';
+import ListPagination from '../components/ListPagination';
+import { recordDateTime } from '../lib/recordTime';
 import { groupTracesByProject, type TraceProjectGroup } from '../lib/traceProjects';
+import { TRACE_PAGE_SIZE, pageTimeRange, nextBeforeId } from '../lib/tracePaging';
 import { usePersistedState } from '../lib/usePersistedState';
 
 type StatusFilter = 'all' | 'ok' | 'fail';
-
-/** 首屏与游标页共用的摘要页大小；正文只走详情接口按需读取。 */
-const TRACE_PAGE_SIZE = 80;
-
-/** 游标页按 ID 去重合并；有更早页时用 ID 降序给列表一个稳定总序。 */
-function mergeTraceRecords(latest: TraceRecord[], older: TraceRecord[]): TraceRecord[] {
-  if (older.length === 0) return latest;
-  const seen = new Set<number>();
-  const merged: TraceRecord[] = [];
-  for (const record of [...latest, ...older]) {
-    if (seen.has(record.id)) continue;
-    seen.add(record.id);
-    merged.push(record);
-  }
-  return merged.sort((a, b) => b.id - a.id);
-}
 
 function traceModeLabel(mode: string): string {
   switch (mode) {
@@ -113,11 +100,11 @@ function ProjectBlock({
   );
 }
 
-export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
-  data: TracesData;
-  onHistoryModeChange: (paused: boolean) => void;
-  onRefreshLatest: () => void;
-}) {
+type History = { index: number; pages: TracesData[] };
+type LatestPage = { scope: string; data?: TracesData; error?: string };
+const emptyRecords: TraceRecord[] = [];
+
+export default function Traces({ refreshKey }: { refreshKey: number }) {
   const [tool, setTool] = usePersistedState('traces-tool', 'all');
   const [status, setStatus] = usePersistedState<StatusFilter>('traces-status', 'all');
   const [q, setQ] = useState('');
@@ -127,40 +114,75 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
   // 请求头分组是第三条筛选轴，和工具/状态/搜索共用同一条 rows 管道。
   const [dimKey, setDimKey] = usePersistedState<string | null>('traces-dim', null);
   const [headerValue, setHeaderValue] = usePersistedState<string | null>('traces-header-value', null);
-  // 更早页单独存放：首屏 80 条来自 App 的轮询快照，历史页只在用户点击后追加。
-  const [older, setOlder] = useState<TraceRecord[]>([]);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const [hasMore, setHasMore] = useState<boolean | undefined>(undefined);
-  const [historyBase, setHistoryBase] = useState<TracesData | null>(null);
+  const [latest, setLatest] = useState<LatestPage>();
+  const [history, setHistory] = useState<History>();
+  const [paging, setPaging] = useState(false);
+  const [pageError, setPageError] = useState<string>();
+  const [retry, setRetry] = useState(0);
+  const pageRequest = useRef<AbortController>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const [olderError, setOlderError] = useState<string | null>(null);
 
-  // 页面卸载时恢复轮询，避免停留在别的页面时 traces 一直不刷新。
-  useEffect(() => () => onHistoryModeChange(false), [onHistoryModeChange]);
+  const traceTool = tool === 'all' ? undefined : tool;
+  const traceStatus = status === 'ok' ? 'success' : status === 'fail' ? 'error' : undefined;
+  const scope = JSON.stringify([traceTool, traceStatus]);
+  const browsing = history !== undefined;
+  const refresh = browsing ? 0 : refreshKey;
 
-  const base = historyBase ?? data;
-  const loadedRecords = useMemo(() => mergeTraceRecords(base.records, older), [base.records, older]);
-  const statusInfo = typeof base.status === 'object' && base.status ? base.status : null;
-  const mode = statusInfo?.mode ?? base.mode ?? (typeof base.status === 'string' ? base.status : '');
+  useEffect(() => () => pageRequest.current?.abort(), []);
+
+  // 未切换条件时复用在途查询，避免轮询不断中断慢请求。
+  const latestRequest = useRef<{ controller: AbortController; promise: Promise<TracesData> }>(null);
+  useEffect(() => () => {
+    latestRequest.current?.controller.abort();
+    latestRequest.current = null;
+  }, [browsing, scope, retry]);
+
+  useEffect(() => {
+    if (browsing) return;
+    if (!latestRequest.current) {
+      const controller = new AbortController();
+      const promise = api.traces({ limit: TRACE_PAGE_SIZE, beforeId: 0, tool: traceTool, status: traceStatus }, controller.signal)
+        .finally(() => {
+          if (latestRequest.current?.controller === controller) latestRequest.current = null;
+        });
+      latestRequest.current = { controller, promise };
+    }
+    let active = true;
+    latestRequest.current.promise.then(
+      (data) => {
+        if (active) setLatest({ scope, data });
+      },
+      (error: unknown) => {
+        if (active) setLatest((previous) => ({ scope, data: previous?.scope === scope ? previous.data : undefined, error: String(error) }));
+      },
+    );
+    return () => { active = false; };
+  }, [browsing, refresh, retry, scope, traceTool, traceStatus]);
+
+  const index = history?.index ?? 0;
+  const data = history?.pages[index] ?? (latest?.scope === scope ? latest.data : undefined);
+  const pageRecords = data?.records ?? emptyRecords;
+  const canNext = (history !== undefined && index + 1 < history.pages.length) ||
+    (data?.has_more ?? pageRecords.length === TRACE_PAGE_SIZE);
+  const pageTime = useMemo(() => pageTimeRange(pageRecords), [pageRecords]);
+  const statusInfo = typeof data?.status === 'object' && data.status ? data.status : null;
+  const mode = statusInfo?.mode ?? data?.mode ?? (typeof data?.status === 'string' ? data.status : '');
   const retained = statusInfo?.count ?? (mode === 'off' ? 0 : undefined);
   const retentionDays = statusInfo?.retention_days;
+  const maxRecords = statusInfo?.max_records;
+  const tools = [...new Set([...(data?.tools ?? latest?.data?.tools ?? []), ...(traceTool ? [traceTool] : [])])];
+  const loadError = !browsing && latest?.scope === scope ? latest.error : undefined;
 
-  // 工具分类（按当前已加载记录的出现次数排序）
-  const toolCounts = useMemo(() => {
-    const c: Record<string, number> = {};
-    loadedRecords.forEach((r) => (c[r.tool] = (c[r.tool] || 0) + 1));
-    return Object.entries(c).sort((a, b) => b[1] - a[1]);
-  }, [loadedRecords]);
-
-  // 维度列表按当前已加载记录里真实出现过的头上发现，避免给空维度造死按钮。
+  // 维度列表按当前这批记录里真实出现过的头上发现，避免给空维度造死按钮。
   const headerDims = useMemo<HeaderDimension[]>(() => {
     const seen = new Set<string>();
-    loadedRecords.forEach((r) => Object.keys(r.upstream_headers || {}).forEach((k) => seen.add(k)));
+    pageRecords.forEach((r) => Object.keys(r.upstream_headers || {}).forEach((k) => seen.add(k)));
+    if (dimKey && dimKey !== LOCAL_UA_DIMENSION) seen.add(dimKey);
     return [
       { key: LOCAL_UA_DIMENSION, label: '本地 UA', read: (r: TraceRecord) => r.user_agent || '' },
       ...[...seen].sort().map((k) => ({ key: k, label: `上游 ${k}`, read: (r: TraceRecord) => r.upstream_headers?.[k] || '' })),
     ];
-  }, [loadedRecords]);
+  }, [pageRecords, dimKey]);
 
   const dim = dimKey ? headerDims.find((d) => d.key === dimKey) : undefined;
 
@@ -168,7 +190,7 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
   const groups = useMemo(() => {
     if (!dim) return [];
     const buckets = new Map<string, { count: number; errors: number; totalMs: number }>();
-    loadedRecords.forEach((r) => {
+    pageRecords.forEach((r) => {
       const value = dim.read(r) || MISSING_VALUE;
       const bucket = buckets.get(value) || { count: 0, errors: 0, totalMs: 0 };
       bucket.count += 1;
@@ -179,19 +201,20 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
     return [...buckets.entries()]
       .map(([value, b]) => ({ value, count: b.count, errors: b.errors, avgMs: b.totalMs / b.count }))
       .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
-  }, [loadedRecords, dim]);
+  }, [pageRecords, dim]);
 
   const needle = q.trim().toLowerCase();
   const rows = useMemo(
     () =>
-      loadedRecords.filter((r) => {
+      pageRecords.filter((r) => {
         if (tool !== 'all' && r.tool !== tool) return false;
         if (status === 'ok' && !r.success) return false;
         if (status === 'fail' && r.success) return false;
         if (dim && headerValue !== null && (dim.read(r) || MISSING_VALUE) !== headerValue) return false;
+        // 摘要视图没有 result 正文，搜索只承诺工具与 ID，不假装能搜结果。
         return !needle || r.tool.toLowerCase().includes(needle) || String(r.id).includes(needle);
       }),
-    [loadedRecords, tool, status, needle, dim, headerValue],
+    [pageRecords, tool, status, needle, dim, headerValue],
   );
 
   // 项目分组只对已筛选的行做投影：先走工具/状态/搜索/头值，再分项目。
@@ -206,38 +229,75 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
 
   const selected = rows.find((r) => r.id === selectedId) || rows[0];
   const errCount = rows.filter((r) => !r.success).length;
-  const cursor = loadedRecords.reduce((min, r) => Math.min(min, r.id), Infinity);
-  const moreAvailable = hasMore ?? base.has_more;
 
-  const loadOlder = async () => {
-    if (loadingOlder || !moreAvailable || !Number.isFinite(cursor)) return;
-    // 固定发出请求时的首屏，晚到的轮询结果不会改动这次翻页的起点。
-    if (!historyBase) {
-      setHistoryBase(data);
-      onHistoryModeChange(true);
+  const resetSelection = () => {
+    setSelectedId(null);
+    listRef.current?.scrollTo(0, 0);
+  };
+
+  const loadNext = async () => {
+    if (!data || !canNext || pageRequest.current) return;
+    if (history && index + 1 < history.pages.length) {
+      setHistory({ ...history, index: index + 1 });
+      setPageError(undefined);
+      resetSelection();
+      return;
     }
-    setLoadingOlder(true);
-    setOlderError(null);
+    const beforeId = nextBeforeId(pageRecords);
+    if (beforeId === undefined) return;
+    const pages = history?.pages ?? [data];
+    const controller = new AbortController();
+    pageRequest.current = controller;
+    setHistory({ index, pages });
+    setPaging(true);
+    setPageError(undefined);
     try {
-      const page = await api.traces({ limit: TRACE_PAGE_SIZE, beforeId: cursor, view: 'summary' });
-      setOlder((prev) => mergeTraceRecords(prev, page.records));
-      setHasMore(page.has_more ?? false);
+      const response = await api.traces({ limit: TRACE_PAGE_SIZE, beforeId, tool: traceTool, status: traceStatus }, controller.signal);
+      if (controller.signal.aborted) return;
+      const records = response.records ?? emptyRecords;
+      const repeated = records.some((record) => record.id >= beforeId);
+      if (repeated || records.length === 0) {
+        setHistory({ index, pages: [...pages.slice(0, index), { ...data, has_more: false }] });
+        if (repeated) setPageError('当前 Core 不支持追踪游标，更新 Core 后可翻页。');
+        return;
+      }
+      setHistory({ index: index + 1, pages: [...pages, response] });
+      resetSelection();
     } catch (error) {
-      setOlderError(`加载失败：${error instanceof Error ? error.message : String(error)}`);
+      if (!controller.signal.aborted) setPageError(`翻页失败。${String(error)}`);
     } finally {
-      setLoadingOlder(false);
+      if (pageRequest.current === controller) {
+        pageRequest.current = null;
+        setPaging(false);
+      }
     }
   };
 
-  // 返回最新：丢掉历史页并立刻重拉首屏，同时恢复 App 的 traces 轮询。
+  const loadPrevious = () => {
+    if (!history || index <= 0) return;
+    setHistory({ ...history, index: index - 1 });
+    setPageError(undefined);
+    resetSelection();
+  };
+
   const returnLatest = () => {
-    setOlder([]);
-    setHasMore(undefined);
-    setHistoryBase(null);
-    setSelectedId(null);
-    setOlderError(null);
-    listRef.current?.scrollTo(0, 0);
-    onRefreshLatest();
+    pageRequest.current?.abort();
+    pageRequest.current = null;
+    setHistory(undefined);
+    setPaging(false);
+    setPageError(undefined);
+    setRetry((value) => value + 1);
+    resetSelection();
+  };
+
+  const changeTool = (tool: string) => {
+    setTool(tool);
+    returnLatest();
+  };
+
+  const changeStatus = (status: StatusFilter) => {
+    setStatus(status);
+    returnLatest();
   };
 
   return (
@@ -245,16 +305,16 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
       <SectionTitle
         icon={ScrollText}
         title="调用追踪"
-        hint={`${fmt.format(rows.length)} 条筛选结果 · ${errCount} 失败 · 点左侧看详情`}
+        hint={`本页匹配 ${fmt.format(rows.length)} 条 · ${fmt.format(errCount)} 条失败`}
         action={
           <div className="flex flex-wrap items-center gap-2">
             <div className="glass-control flex items-center gap-2 rounded-lg px-3 py-1.5">
               <Search size={14} className="text-muted-foreground" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索工具或 ID…" className="w-40 bg-transparent text-xs outline-none placeholder:text-muted-foreground" />
+              <input value={q} onChange={(e) => setQ(e.target.value)} aria-label="搜索本页工具或 ID" placeholder="搜索本页工具或 ID…" className="w-40 bg-transparent text-xs outline-none placeholder:text-muted-foreground" />
             </div>
             <div className="flex gap-1">
               {([['all', '全部', ListFilter], ['ok', '成功', CheckCircle], ['fail', '失败', XCircle]] as const).map(([k, label, Icon]) => (
-                <button key={k} onClick={() => setStatus(k)} aria-pressed={status === k} className={`glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${status === k ? 'text-foreground' : 'text-muted-foreground'}`}>
+                <button key={k} onClick={() => changeStatus(k)} aria-pressed={status === k} className={`glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${status === k ? 'text-foreground' : 'text-muted-foreground'}`}>
                   <Icon size={12} /> {label}
                 </button>
               ))}
@@ -263,25 +323,26 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
         }
       />
 
-      {/* 三个数分开显示：保留量来自 trace 窗口，已加载含游标页，筛选是当前视图。 */}
-      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 bg-muted/10 px-3 py-2 text-[11px] text-muted-foreground">
-        <span>保留 <b className="tabular text-foreground">{retained === undefined ? '未知' : `${fmt.format(retained)} 条`}</b></span>
-        <span>已加载 <b className="tabular text-foreground">{fmt.format(loadedRecords.length)}</b> 条</span>
-        <span>当前筛选 <b className="tabular text-foreground">{fmt.format(rows.length)}</b> 条</span>
-        <span>模式 <b className="text-foreground">{traceModeLabel(mode)}</b></span>
-        {retentionDays ? <span>保留期 {retentionDays} 天</span> : null}
-        {mode === 'off' && <span className="text-amber-500">调用追踪未开启，开启后这里才会记录调用</span>}
-        {historyBase && <span className="text-amber-500">历史浏览中 · 自动刷新已暂停</span>}
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 bg-muted/10 px-3 py-2 text-xs text-muted-foreground">
+        {mode && <span>追踪模式 <b className="text-foreground">{traceModeLabel(mode)}</b></span>}
+        {retained !== undefined && <span>可查询索引 <b className="tabular text-foreground">{fmt.format(retained)}{maxRecords ? ` / ${fmt.format(maxRecords)}` : ''} 条</b></span>}
+        {mode === 'disk' && retentionDays ? <span>磁盘保留 {retentionDays} 天</span> : null}
+        {!!maxRecords && retained === maxRecords && <span>索引已达条数上限</span>}
+        {pageTime && <span>本页开始时间 {recordDateTime(pageTime.from)} 至 {recordDateTime(pageTime.to)}</span>}
+        {mode === 'off' && <span>可在配置页开启调用追踪</span>}
+        {browsing && <span>历史浏览中 · 暂停自动刷新</span>}
+        {paging && <span role="status">正在查询第 {index + 2} 页…</span>}
+        {!data && !loadError && <span role="status">正在查询调用追踪…</span>}
+        {loadError && <span role="alert">查询失败。{loadError} <button type="button" className="text-primary" onClick={returnLatest}>重试</button></span>}
       </div>
 
-      {/* 工具分类 chips */}
       <div className="mb-3 flex flex-wrap gap-1.5">
-        <button onClick={() => setTool('all')} aria-pressed={tool === 'all'} className={`glass-control rounded-md px-2.5 py-1 text-[11px] ${tool === 'all' ? 'text-foreground' : 'text-muted-foreground'}`}>
-          全部 <span className="ml-1 tabular text-muted-foreground/60">{loadedRecords.length}</span>
+        <button type="button" onClick={() => changeTool('all')} aria-pressed={tool === 'all'} className={`glass-control rounded-md px-2.5 py-1 text-[11px] ${tool === 'all' ? 'text-foreground' : 'text-muted-foreground'}`}>
+          全部工具
         </button>
-        {toolCounts.map(([t, n]) => (
-          <button key={t} onClick={() => setTool(t)} aria-pressed={tool === t} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 font-mono text-[11px] ${tool === t ? 'text-foreground' : 'text-muted-foreground'}`}>
-            <Wrench size={11} /> {t} <span className="tabular text-muted-foreground/60">{n}</span>
+        {tools.map((name) => (
+          <button type="button" key={name} onClick={() => changeTool(name)} aria-pressed={tool === name} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 font-mono text-[11px] ${tool === name ? 'text-foreground' : 'text-muted-foreground'}`}>
+            <Wrench size={11} /> {name}
           </button>
         ))}
       </div>
@@ -289,7 +350,7 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
       {/* 请求头分组：选一个维度看聚合数字，点某组按该值筛选 */}
       <div className="mb-3 space-y-1.5">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Tag size={11} /> 按请求头分组</span>
+          <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Tag size={11} /> 按本页请求头分组</span>
           {headerDims.map((d) => (
             <button
               key={d.key}
@@ -350,24 +411,19 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
             ))}
             <span className="ml-auto tabular text-[11px] text-muted-foreground/60">{rows.length}</span>
           </div>
-          <div className="mb-1.5 flex flex-wrap items-center gap-2 border-b border-border/50 px-1 pb-2">
-            <button
-              onClick={() => void loadOlder()}
-              disabled={loadingOlder || !moreAvailable || !Number.isFinite(cursor)}
-              className="glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground disabled:opacity-40"
-            >
-              <RefreshCw size={11} className={loadingOlder ? 'animate-spin' : ''} /> 加载更早
-            </button>
-            {historyBase && (
-              <button onClick={returnLatest} disabled={loadingOlder} className="glass-control rounded-md px-2 py-1 text-[11px] text-foreground disabled:opacity-40">
-                返回最新
-              </button>
-            )}
-            <span className="ml-auto text-[10px] text-muted-foreground/70" aria-live="polite">
-              {moreAvailable === false && loadedRecords.length > 0 ? '已到最早' : moreAvailable ? `每页 ${TRACE_PAGE_SIZE} 条摘要` : ''}
-            </span>
+          {/* 翻页入口在滚动区上方：首屏可见，不用先滚到底。 */}
+          <div className="mb-1.5 border-b border-border/50 px-1 pb-2">
+            <ListPagination label="调用追踪分页" page={index + 1}
+              pageCount={history && history.pages.at(-1)?.has_more === false ? history.pages.length : undefined}
+              canNext={canNext} disabled={paging} onPrevious={loadPrevious} onNext={() => void loadNext()}>
+              {browsing && (
+                <button type="button" onClick={returnLatest} className="glass-control inline-flex min-h-9 items-center rounded-lg px-2 text-xs font-medium text-foreground hover:bg-accent">
+                  返回最新
+                </button>
+              )}
+            </ListPagination>
+            {pageError && <div role="alert" className="mt-1 text-xs text-muted-foreground">{pageError}</div>}
           </div>
-          {olderError && <div role="alert" className="px-1 pb-1 text-[10px] text-amber-500">{olderError}</div>}
           <div ref={listRef} className="scrollbar-thin max-h-[645px] space-y-1 overflow-y-auto pr-1">
             {listMode === 'time'
               ? rows.map((r) => (

@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, AlertCircle, ArrowUpRight, Clock3, Code2, Gauge, Inbox, Layers3, LoaderCircle, X } from 'lucide-react';
 import { api, DashboardRequestError, type CallAnalytics, type CallFilterKey, type CallFilters, type CallRange } from '../api';
+import { recordDateTime } from '../lib/recordTime';
 import { EmptyState, Panel, StatCard, fmt, ms } from '../ui';
-import { CallBreakdown, RecentCalls, countLabel, errorRate, sourceLabel, windowTime, type GroupDimension, type GroupSort } from './AnalyticsDetails';
+import { CallBreakdown, RecentCalls, countLabel, errorRate, sourceLabel, type GroupDimension, type GroupSort } from './AnalyticsDetails';
 import AnalyticsTrend from './AnalyticsTrend';
 
 type Props = { refreshKey: number; onOpenTraces: () => void };
-type CallRequest = { query: string; refreshKey: number; retry: number };
+type CallRequest = { query: string; scope: string; refreshKey: number; retry: number };
 type RequestState = { request: CallRequest; data?: CallAnalytics; error?: string };
+type CallPage = { page: number; to: string };
 
 const ranges = [['5m', '5 分钟'], ['1h', '1 小时'], ['24h', '24 小时']] as const;
 const statusLabels: Record<string, string> = { success: '成功', error: '失败' };
@@ -32,21 +34,30 @@ function FacetSelect({ label, value, options, onChange, format = (option) => opt
   );
 }
 
+const coverageReasons = {
+  restart: 'Core 启动前没有明细',
+  capacity: '较早明细已因容量上限淘汰',
+  retention: '较早明细已超过保留期',
+};
+
 function Coverage({ window }: { window: CallAnalytics['window'] }) {
   const from = Date.parse(window.from);
   const to = Date.parse(window.to);
   const coveredFrom = Date.parse(window.covered_from);
-  const coverage = to > from ? Math.min(1, Math.max(0, (to - coveredFrom) / (to - from))) : 0;
-  const reason = window.limited_by === 'restart' ? '仅含本次 Core 启动后的记录' : '已达到记录容量上限';
-  const percent = coverage < 1 && coverage > 0.999 ? '>99.9%' : errorRate(coverage, 1);
   return (
-    <p className="flex min-w-0 items-start gap-2 text-xs leading-relaxed text-muted-foreground">
+    <div className="flex min-w-0 items-start gap-2 text-xs leading-relaxed text-muted-foreground">
       <Clock3 size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
-      <span>
-        {window.limited_by ? `${reason} · 覆盖 ${percent} · ` : ''}
-        {coverage === 0 ? '窗口内暂无覆盖' : `${windowTime(window.covered_from)} 至 ${windowTime(window.to)}`}
-      </span>
-    </p>
+      <div className="space-y-0.5">
+        <p><span className="font-medium text-foreground">统计时段</span> {recordDateTime(window.from)} 至 {recordDateTime(window.to)}</p>
+        {coveredFrom > from && (
+          <p className="text-foreground">
+            {coveredFrom >= to ? '此时段的明细已不可用' : `实际覆盖 ${recordDateTime(window.covered_from)} 至 ${recordDateTime(window.to)}`}
+            {window.limited_by && ` · ${coverageReasons[window.limited_by]}`}
+          </p>
+        )}
+        <p>按调用完成时间统计 · 浏览器本地时间 · 当前 Core 内存</p>
+      </div>
+    </div>
   );
 }
 
@@ -60,18 +71,26 @@ export default function Analytics({ refreshKey, onOpenTraces }: Props) {
   const [range, setRange] = useState<CallRange>('1h');
   const [filters, setFilters] = useState<CallFilters>({});
   const [retry, setRetry] = useState(0);
+  const [paging, setPaging] = useState<CallPage>();
   const [dimension, setDimension] = useState<GroupDimension>('by_tool');
   const [metricIndex, setMetricIndex] = useState(0);
   const [sort, setSort] = useState<GroupSort>('count');
   const [state, setState] = useState<RequestState>();
   const inFlight = useRef<{ controller: AbortController; promise: Promise<CallAnalytics> } | null>(null);
-  const query = useMemo(() => {
+  const scope = useMemo(() => {
     const params = new URLSearchParams({ range });
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value);
     params.sort();
     return params.toString();
   }, [range, filters]);
-  const request = useMemo(() => ({ query, refreshKey, retry }), [query, refreshKey, retry]);
+  const query = useMemo(() => {
+    const params = new URLSearchParams(scope);
+    params.set('page', String(paging?.page ?? 1));
+    if (paging) params.set('to', paging.to);
+    return params.toString();
+  }, [scope, paging]);
+  const refresh = paging ? 0 : refreshKey;
+  const request = useMemo(() => ({ query, scope, refreshKey: refresh, retry }), [query, scope, refresh, retry]);
 
   useEffect(() => () => {
     inFlight.current?.controller.abort();
@@ -94,19 +113,26 @@ export default function Analytics({ refreshKey, onOpenTraces }: Props) {
       },
       (error: unknown) => {
         if (!active) return;
-        setState((previous) => ({ request, data: previous?.request.query === request.query ? previous.data : undefined, error: requestMessage(error) }));
+        setState((previous) => ({ request, data: previous?.request.scope === request.scope ? previous.data : undefined, error: requestMessage(error) }));
       },
     );
     return () => { active = false; };
   }, [request]);
 
-  const data = state?.request.query === query ? state.data : undefined;
+  const data = state?.request.scope === scope ? state.data : undefined;
   const error = state?.request === request ? state.error : undefined;
   const facets = state?.data?.facets;
   const pending = state?.request !== request;
   const active = Object.entries(filters).filter(([, value]) => value) as [CallFilterKey, string][];
-  const setFilter = (key: CallFilterKey, value: string) => setFilters((previous) => ({ ...previous, [key]: value }));
-  const applyFilters = (patch: CallFilters) => setFilters((previous) => ({ ...previous, ...patch }));
+  const applyFilters = (patch: CallFilters) => {
+    setPaging(undefined);
+    setFilters((previous) => ({ ...previous, ...patch }));
+  };
+  const setFilter = (key: CallFilterKey, value: string) => applyFilters({ [key]: value });
+  const changePage = (page: number) => {
+    if (!data) return;
+    setPaging({ page, to: paging?.to ?? data.window.to });
+  };
 
   return (
     <div className="min-w-0 space-y-3">
@@ -114,7 +140,7 @@ export default function Analytics({ refreshKey, onOpenTraces }: Props) {
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-end gap-3 xl:grid-cols-[auto_minmax(0,1fr)_auto]">
           <div role="group" aria-label="统计窗口" className="glass-control flex w-fit gap-0.5 rounded-lg p-0.5">
             {ranges.map(([option, label]) => (
-              <button key={option} type="button" aria-pressed={range === option} onClick={() => setRange(option)}
+              <button key={option} type="button" aria-pressed={range === option} onClick={() => { setPaging(undefined); setRange(option); }}
                 className={`min-h-8 whitespace-nowrap rounded-md px-2 text-xs font-semibold ${range === option ? 'glass-chosen text-foreground' : 'text-muted-foreground hover:bg-accent'}`}>
                 {label}
               </button>
@@ -141,13 +167,20 @@ export default function Analytics({ refreshKey, onOpenTraces }: Props) {
                 </button>
               );
             })}
-            <button type="button" onClick={() => setFilters({})} className="min-h-8 rounded-lg px-2 text-xs text-muted-foreground hover:bg-accent">清除筛选</button>
+            <button type="button" onClick={() => { setPaging(undefined); setFilters({}); }} className="min-h-8 rounded-lg px-2 text-xs text-muted-foreground hover:bg-accent">清除筛选</button>
           </div>
         )}
         {data && (
           <div className="flex flex-wrap items-start justify-between gap-2 border-t border-border/60 pt-3">
             <Coverage window={data.window} />
-            {pending && <p role="status" className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground"><LoaderCircle size={13} className="motion-safe:animate-spin" />正在刷新</p>}
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              {paging && (
+                <button type="button" onClick={() => setPaging(undefined)} className="glass-control min-h-9 rounded-lg px-2.5 font-medium text-foreground hover:bg-accent">
+                  返回最新
+                </button>
+              )}
+              {pending && <p role="status" className="flex items-center gap-1.5"><LoaderCircle size={13} className="motion-safe:animate-spin" />{paging ? `正在查询第 ${paging.page} 页` : '正在刷新'}</p>}
+            </div>
           </div>
         )}
       </Panel>
@@ -184,8 +217,10 @@ export default function Analytics({ refreshKey, onOpenTraces }: Props) {
           <AnalyticsTrend buckets={data.buckets} window={data.window} metricIndex={metricIndex} onMetric={setMetricIndex} />
           <CallBreakdown data={data} filters={filters} applyFilters={applyFilters}
             dimension={dimension} onDimension={setDimension} sort={sort} onSort={setSort} />
-          <RecentCalls calls={data.calls} total={data.totals.count} />
         </>
+      )}
+      {data && (data.totals.count > 0 || paging) && (
+        <RecentCalls data={data} pending={pending} onPageChange={changePage} />
       )}
     </div>
   );

@@ -81,6 +81,9 @@ type WindowCoverage = { state: 'complete' | 'partial' | 'unknown'; text: string 
  * window_minutes 判断本进程是否已经覆盖完整窗口；任一字段缺失都按未知处理。
  */
 function windowCoverage(analytics: Analytics): WindowCoverage {
+  if (analytics.window_limited) {
+    return { state: 'partial', text: '较早明细已因容量上限淘汰，实际覆盖起点未提供' };
+  }
   const started = analytics.started_at ? new Date(analytics.started_at) : null;
   const generated = analytics.generated_at ? new Date(analytics.generated_at) : null;
   const minutes = analytics.window_minutes;
@@ -383,16 +386,12 @@ export default function Overview({ status, overview, analytics, alerts, tasks, o
       ? 'ok'
       : 'missing';
   const retentionDays = analytics.daily_token_retention_days;
-  const tokenHint = tokenState === 'unavailable'
-    ? '数据暂不可用'
-    : tokenState === 'missing'
-      ? 'Token 日桶字段未提供'
-      : tokenRows.length === 0
-        ? 'Core 本机时区自然日 · 暂无记录'
-        : `Core 本机时区自然日 · ${tokenRows.length} 个有记录日${isNumber(retentionDays) ? ` · 保留 ${retentionDays} 天` : ''}`;
-  const tokenHintTitle = tokenState === 'ok' && tokenRows.length
-    ? `${tokenRows[0].date} 至 ${tokenRows[tokenRows.length - 1].date}；按调用完成时刻计入；Token 为入参与结果文本的估算值`
-    : tokenHint;
+  const tokenDateRange = tokenRows.length > 1
+    ? `${tokenRows[0].date} 至 ${tokenRows[tokenRows.length - 1].date}`
+    : tokenRows[0]?.date;
+  const tokenHint = tokenDateRange
+    ? `${tokenDateRange} · ${tokenRows.length} 个有记录日 · Core 本机时区${isNumber(retentionDays) ? ` · 保留 ${retentionDays} 天` : ''}`
+    : undefined;
 
   const toolStats = Array.isArray(analytics.tool_stats) ? analytics.tool_stats : undefined;
   const toolState: 'ok' | 'unavailable' | 'missing' = !analyticsAvailable
@@ -520,7 +519,8 @@ export default function Overview({ status, overview, analytics, alerts, tasks, o
       {/* 图表 + 排行：主次 8:4，紧凑内边距 */}
       <div className="grid gap-3 lg:grid-cols-12">
         <Panel className="p-4 lg:col-span-8">
-          <WidgetTitle icon={Database} title="每日 Token 用量" hint={tokenHint} hintTitle={tokenHintTitle} />
+          <WidgetTitle icon={Database} title="每日 Token 用量" />
+          {tokenState === 'ok' && tokenHint && <p className="mb-2 text-xs text-muted-foreground">{tokenHint}</p>}
           <TokenChart rows={tokenRows} state={tokenState} />
         </Panel>
         <Panel className="p-4 lg:col-span-4">

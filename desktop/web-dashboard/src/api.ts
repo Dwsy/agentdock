@@ -100,7 +100,8 @@ export type AnalyticsCall = RecentCall & {
 export type CallAnalytics = {
   ok: true;
   source: 'agentdock-api';
-  window: { from: string; to: string; covered_from: string; limited_by?: 'restart' | 'capacity' };
+  window: { from: string; to: string; covered_from: string; limited_by?: 'restart' | 'capacity' | 'retention' };
+  pagination?: { page: number; page_size: number };
   totals: CallMetrics;
   buckets: CallBucket[];
   by_tool: CallGroup[];
@@ -356,6 +357,8 @@ export type Traces = {
 
 export type TraceQueryOptions = {
   limit?: number;
+  tool?: string;
+  status?: 'success' | 'error';
   /**
    * opt-in ID 游标：0 表示游标第一页（无上界，仍按 ID 降序），正数表示
    * 只取更早记录；缺省（undefined）保持旧列表行为。
@@ -670,10 +673,12 @@ export const api = {
   tasks: (limit = 10000) => get<Tasks>(`/tasks?limit=${limit}`),
   taskDetail: (id: string) => get<TaskDetail>(`/tasks/${encodeURIComponent(id)}`),
   taskActivity: (id: string) => get<TaskActivity>(`/tasks/${encodeURIComponent(id)}/activity`),
-  traces: (options: TraceQueryOptions = {}) => {
+  traces: (options: TraceQueryOptions = {}, signal?: AbortSignal) => {
     const params = new URLSearchParams({ limit: String(options.limit ?? 80), view: options.view ?? 'summary' });
     if (options.beforeId !== undefined) params.set('before_id', String(options.beforeId));
-    return get<Traces>(`/traces?${params.toString()}`);
+    if (options.tool) params.set('tool', options.tool);
+    if (options.status) params.set('status', options.status);
+    return get<Traces>(`/traces?${params.toString()}`, signal);
   },
   traceDetail: (id: number, full = false, signal?: AbortSignal) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`, signal),
   traceImage: (id: number) => get<TraceImage>(`/traces/image?id=${id}`),

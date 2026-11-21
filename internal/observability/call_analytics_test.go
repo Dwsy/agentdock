@@ -80,6 +80,85 @@ func TestCallAnalyticsFiltersUseCompletionTimeAndPreserveFacets(t *testing.T) {
 	}
 }
 
+func TestCallAnalyticsPaginationFreezesWindowAndPagesFilteredCalls(t *testing.T) {
+	r := NewRecorder(1, "")
+	now := time.Now()
+	r.startedAt = now.Add(-2 * time.Hour)
+	for i := 1; i <= 65; i++ {
+		tool := "selected"
+		if i%2 == 0 {
+			tool = "other"
+		}
+		r.EndTool(CallMeta{Tool: tool, StartedAt: now.Add(-time.Duration(i) * time.Second), Success: true})
+		// Put calls on either side of a completion time tie across the page boundary.
+		r.window[i-1].completedAt = now.Add(-time.Duration((65-i)/11) * time.Second)
+	}
+
+	query := CallAnalyticsQuery{Tool: "selected", Page: 1, To: now}
+	first := r.CallAnalytics(query)
+	if first.Page == nil || *first.Page != (CallAnalyticsPage{Page: 1, PageSize: 30}) || len(first.Calls) != 30 {
+		t.Fatalf("page one: pagination = %+v, rows = %d", first.Page, len(first.Calls))
+	}
+	for i, call := range first.Calls {
+		if want := uint64(65 - 2*i); call.ID != want {
+			t.Fatalf("page one row %d = %d, want %d", i, call.ID, want)
+		}
+	}
+	if !first.Window.To.Equal(now) || !first.Buckets[len(first.Buckets)-1].End.Equal(now) || first.Totals.Count != 33 {
+		t.Fatalf("page one window = %+v, totals = %+v", first.Window, first.Totals)
+	}
+
+	r.EndTool(CallMeta{Tool: "selected", Success: true})
+	r.EndTool(CallMeta{Tool: "new facet", Success: true})
+	query.Page = 2
+	second := r.CallAnalytics(query)
+	if second.Page == nil || *second.Page != (CallAnalyticsPage{Page: 2, PageSize: 30}) || len(second.Calls) != 3 {
+		t.Fatalf("page two: pagination = %+v, rows = %d", second.Page, len(second.Calls))
+	}
+	for i, call := range second.Calls {
+		if want := uint64(5 - 2*i); call.ID != want {
+			t.Fatalf("page two row %d = %d, want %d", i, call.ID, want)
+		}
+	}
+	if second.Window != first.Window || second.Totals != first.Totals || !reflect.DeepEqual(second.Buckets, first.Buckets) ||
+		!reflect.DeepEqual(second.ByTool, first.ByTool) || !reflect.DeepEqual(second.Facets, first.Facets) {
+		t.Fatal("paging and new records changed the frozen window's aggregates or facets")
+	}
+
+	query.Page = int(^uint(0) >> 1)
+	if page := r.CallAnalytics(query); page.Page == nil || page.Page.Page != query.Page || page.Calls == nil || len(page.Calls) != 0 || page.Totals != first.Totals {
+		t.Fatalf("out-of-range page: pagination = %+v, calls = %v, totals = %+v", page.Page, page.Calls, page.Totals)
+	}
+	if legacy := r.CallAnalytics(CallAnalyticsQuery{Tool: "selected"}); legacy.Page != nil || len(legacy.Calls) != 30 || legacy.Calls[0].ID != 66 || legacy.Totals.Count != 34 {
+		t.Fatalf("legacy: pagination = %+v, rows = %d, totals = %+v", legacy.Page, len(legacy.Calls), legacy.Totals)
+	}
+}
+
+func TestCallAnalyticsFrozenWindowStillPrunesAtRealTime(t *testing.T) {
+	r := NewRecorder(1, "")
+	now := time.Now()
+	r.startedAt = now.Add(-48 * time.Hour)
+	r.window = []windowStat{
+		{record: &ExecutionRecord{ID: 1, Tool: "expired"}, completedAt: now.Add(-24*time.Hour - 30*time.Minute)},
+		{record: &ExecutionRecord{ID: 2, Tool: "retained"}, completedAt: now.Add(-2 * time.Hour)},
+	}
+	to := now.Add(-time.Hour)
+	result := r.CallAnalytics(CallAnalyticsQuery{Range: "24h", Page: 1, To: to})
+	if len(r.window) != 1 || len(result.Calls) != 1 || result.Calls[0].ID != 2 || result.Totals.Count != 1 {
+		t.Fatalf("retained window = %v, calls = %v, totals = %+v", r.window, result.Calls, result.Totals)
+	}
+	if !result.Window.To.Equal(to) || !result.Window.From.Equal(to.Add(-24*time.Hour)) || result.Window.LimitedBy != "retention" ||
+		result.Window.CoveredFrom.Before(now.Add(-24*time.Hour)) || result.Window.CoveredFrom.After(time.Now().Add(-24*time.Hour)) {
+		t.Fatalf("window coverage = %+v", result.Window)
+	}
+
+	to = now.Add(-26 * time.Hour)
+	expired := r.CallAnalytics(CallAnalyticsQuery{Range: "24h", Page: 2, To: to})
+	if expired.Totals.Count != 0 || len(expired.Calls) != 0 || expired.Window.LimitedBy != "retention" || !expired.Window.CoveredFrom.Equal(to) {
+		t.Fatalf("fully expired window = %+v, totals = %+v, calls = %v", expired.Window, expired.Totals, expired.Calls)
+	}
+}
+
 func TestCallAnalyticsWindowCoverage(t *testing.T) {
 	r := NewRecorder(1, "")
 	initial := r.CallAnalytics(CallAnalyticsQuery{Range: "24h"})

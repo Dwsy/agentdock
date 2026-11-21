@@ -38,7 +38,6 @@ import {
   type Skills,
   type Status,
   type Tasks,
-  type Traces,
 } from './api';
 import OverviewPage from './pages/Overview';
 import AnalyticsPage from './pages/Analytics';
@@ -69,7 +68,6 @@ type Snapshot = {
   analytics: Analytics;
   alerts: Alerts;
   tasks: Tasks;
-  traces: Traces;
   fileChanges: FileChanges;
   artifacts: Artifacts;
   skills: Skills;
@@ -113,7 +111,7 @@ const PAGE_KEYS: Record<PageId, readonly SnapshotKey[]> = {
   overview: ['overview', 'analytics', 'tasks'],
   analytics: [],
   live: [],
-  traces: ['traces'],
+  traces: [],
   files: ['fileChanges', 'tasks'],
   tasks: ['tasks'],
   published: ['artifacts'],
@@ -129,9 +127,6 @@ const FETCHERS: { [K in SnapshotKey]: () => Promise<Snapshot[K]> } = {
   analytics: () => api.analytics(),
   alerts: () => api.alerts(),
   tasks: () => api.tasks(TASK_LIMIT),
-  // 首屏只拉摘要，并显式 before_id=0 走 ID 降序游标：磁盘回放可能按
-  // StartedAt 排序，旧顺序的首屏最小 ID 会让后续游标漏记录。
-  traces: () => api.traces({ limit: 80, view: 'summary', beforeId: 0 }),
   fileChanges: () => api.fileChanges(80),
   artifacts: () => api.artifacts(),
   skills: () => api.skills(),
@@ -184,9 +179,7 @@ function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
   pageRef.current = page;
   const inFlightRef = useRef(false);
   const pendingForceRef = useRef(false);
-  // 浏览更早记录时暂停 traces 轮询，避免新记录把列表和选中项顶掉；
-  // 返回最新时由页面显式刷新并恢复。
-  const tracesPausedRef = useRef(false);
+  const [tracesRefresh, setTracesRefresh] = useState(0);
   const [analyticsRefresh, setAnalyticsRefresh] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
@@ -205,16 +198,14 @@ function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
     }
     inFlightRef.current = true;
     if (pageRef.current === 'analytics') setAnalyticsRefresh((tick) => tick + 1);
+    if (pageRef.current === 'traces') setTracesRefresh((tick) => tick + 1);
     try {
       // 上游忙时个别接口会超时；按可见页按需拉取并用 allSettled 隔离单项超时。
-      const keys = Array.from(new Set<SnapshotKey>([...SHELL_KEYS, ...PAGE_KEYS[pageRef.current]]))
-        .filter((key) => !(key === 'traces' && tracesPausedRef.current));
+      const keys = Array.from(new Set<SnapshotKey>([...SHELL_KEYS, ...PAGE_KEYS[pageRef.current]]));
       const results = await Promise.allSettled(keys.map((key) => FETCHERS[key]()));
       const got: Partial<Snapshot> = {};
       const failed: string[] = [];
       results.forEach((r, i) => {
-        // 请求发出后用户可能已进入历史浏览：晚到的 traces 响应也要丢弃。
-        if (keys[i] === 'traces' && tracesPausedRef.current) return;
         if (r.status === 'fulfilled') (got as Record<string, unknown>)[keys[i]] = r.value;
         else failed.push(keys[i]);
       });
@@ -228,7 +219,6 @@ function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
           analytics: got.analytics ?? { ok: false, source: '', started_at: '', total_calls: 0, total_errors: 0, window_calls: 0, active_calls: 0, total_input_tokens: 0, total_output_tokens: 0, process: { goroutines: 0, heap_alloc_bytes: 0, heap_inuse_bytes: 0, heap_sys_bytes: 0, gc_cycles: 0, uptime_ms: 0 }, tool_stats: [], recent_calls: [], daily_tokens: [] },
           alerts: got.alerts ?? { ok: false, source: '', alerts: [], resolved_count: 0, rules: [] },
           tasks: got.tasks ?? { ok: false, source: '', action: '', count: 0, tasks: [] },
-          traces: got.traces ?? { ok: false, source: '', count: 0, status: '', view: '', tools: [], records: [] },
           fileChanges: got.fileChanges ?? { ok: false, source: '', count: 0, status: '', changes: [] },
           artifacts: got.artifacts ?? { ok: false, source: '', public_base_url: '', configured: false, artifacts: [], count: 0 },
           skills: got.skills ?? { ok: false, source: '', action: '', count: 0, skills: [] },
@@ -249,16 +239,6 @@ function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
       }
     }
   }, []);
-
-  const setTracesHistoryMode = useCallback((paused: boolean) => {
-    tracesPausedRef.current = paused;
-  }, []);
-
-  // 返回最新：清掉历史游标后立刻重拉，而不是等下一次 10s 轮询。
-  const refreshTraces = useCallback(() => {
-    tracesPausedRef.current = false;
-    void load(true);
-  }, [load]);
 
   useEffect(() => {
     void load(true);
@@ -377,7 +357,7 @@ function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
     );
   }
 
-  const { status, overview, analytics, alerts, tasks, traces, fileChanges, artifacts, skills, plugins, mcp, catalog, manualLLM } = data;
+  const { status, overview, analytics, alerts, tasks, fileChanges, artifacts, skills, plugins, mcp, catalog, manualLLM } = data;
   const activeAlerts = alerts.alerts.filter((a) => a.active).length;
   const activeManualCount = (manualLLM.stats?.queued_count ?? 0) + (manualLLM.stats?.active_count ?? 0);
 
@@ -398,7 +378,7 @@ function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
           />
         );
       case 'traces':
-        return <TracesPage data={traces} onHistoryModeChange={setTracesHistoryMode} onRefreshLatest={refreshTraces} />;
+        return <TracesPage refreshKey={tracesRefresh} />;
       case 'files':
         return <FileChangesPage data={fileChanges} tasks={tasks} />;
       case 'tasks':

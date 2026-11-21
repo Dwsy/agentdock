@@ -18,6 +18,14 @@ type Field = {
   max?: number;
 };
 
+const OBSERVABILITY_FIELDS: Field[] = [
+  { key: 'AGENTDOCK_USAGE_COUNT_MODE', label: 'Token 估算方式', kind: 'enum', options: [{ value: 'tiktoken', label: 'tiktoken (cl100k_base 默认)' }, { value: 'chars', label: 'chars (按字符数 / 4)' }], hint: '用于工具调用统计与手动推理的 Token 估算' },
+  { key: 'AGENTDOCK_TRACE_MODE', label: '调用追踪', kind: 'enum', options: [{ value: 'disk', label: '磁盘' }, { value: 'memory', label: '内存' }, { value: 'off', label: '关闭' }], hint: '磁盘模式额外保存追踪文件。内存模式只保留本次进程的记录。两种模式的列表都受索引条数上限约束' },
+  { key: 'AGENTDOCK_TRACE_RETENTION_DAYS', label: '磁盘追踪保留天数', kind: 'int', min: 1, max: 30, hint: '只影响磁盘追踪文件，范围 1–30 天' },
+  { key: 'AGENTDOCK_NETWORK_CAPTURE_ENABLED', label: '网络抓包', kind: 'bool', hint: '抓包记录在内存中按条数保留，Core 重启后清空' },
+  { key: 'AGENTDOCK_NETWORK_CAPTURE_MAX', label: '抓包记录上限', kind: 'int', min: 1, max: 2000, hint: '范围 1–2,000 条，达到上限后淘汰最早的记录' },
+];
+
 const FIELDS: { group: string; icon: any; fields: Field[] }[] = [
   {
     group: '服务', icon: Server, fields: [
@@ -55,17 +63,9 @@ const FIELDS: { group: string; icon: any; fields: Field[] }[] = [
       { key: 'AGENTDOCK_MANUAL_LLM_CACHE_TTL_SEC', label: '会话缓存保留 (s)', kind: 'int', min: 60, max: 86400, hint: '已完成请求与会话上下文缓存有效期（默认 1800 秒）' },
       { key: 'AGENTDOCK_MANUAL_LLM_KEEPALIVE_MS', label: 'SSE 心跳间隔 (ms)', kind: 'int', min: 1000, max: 60000, hint: '人工推理期间 /v1/responses 保活帧间隔（默认 15000）' },
       { key: 'AGENTDOCK_MANUAL_LLM_CACHE_MAX_IMAGE_MB', label: '历史图片内存上限 (MB)', kind: 'int', min: 1, max: 512, hint: '已完结轮次在内存中保留的图片二进制字节预算（默认 32 MB）' },
-      { key: 'AGENTDOCK_USAGE_COUNT_MODE', label: 'Token 计算方式', kind: 'enum', options: [{ value: 'tiktoken', label: 'tiktoken (cl100k_base 默认)' }, { value: 'chars', label: 'chars (按字符数 / 4)' }], hint: '控制可观测统计与手动推理 SSE usage 的 token 估算方式，默认 tiktoken' },
     ],
   },
-  {
-    group: '追踪与抓包', icon: FileClock, fields: [
-      { key: 'AGENTDOCK_TRACE_MODE', label: '追踪模式', kind: 'enum', options: [{ value: 'disk', label: '磁盘' }, { value: 'memory', label: '内存' }, { value: 'off', label: '关闭' }] },
-      { key: 'AGENTDOCK_TRACE_RETENTION_DAYS', label: '追踪保留天数', kind: 'int', min: 1, max: 3650 },
-      { key: 'AGENTDOCK_NETWORK_CAPTURE_ENABLED', label: '网络抓包', kind: 'bool' },
-      { key: 'AGENTDOCK_NETWORK_CAPTURE_MAX', label: '抓包记录上限', kind: 'int', min: 1, max: 100000 },
-    ],
-  },
+  { group: '可观测性', icon: FileClock, fields: OBSERVABILITY_FIELDS },
 ];
 
 function FieldRow({ field, value, onChange }: { field: Field; value: string; onChange: (v: string) => void }) {
@@ -129,6 +129,15 @@ export default function ConfigPage() {
 
   const save = async () => {
     if (!changed.length) return;
+    for (const { key, label, min, max } of OBSERVABILITY_FIELDS) {
+      if (min === undefined || max === undefined || !changed.includes(key)) continue;
+      const raw = draft[key].trim();
+      const value = Number(raw);
+      if (!/^\d+$/.test(raw) || value < min || value > max) {
+        setMsg({ type: 'err', text: `${label}须为 ${min}–${max} 的整数。` });
+        return;
+      }
+    }
     setSaving(true);
     setMsg(null);
     const updates: Record<string, string> = {};

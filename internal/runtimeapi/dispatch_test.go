@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/uvwt/agentdock/internal/app"
 	"github.com/uvwt/agentdock/internal/observability"
@@ -171,6 +172,45 @@ func TestDispatchAnalytics(t *testing.T) {
 	}
 	if result["total_calls"] != 7 {
 		t.Fatalf("analytics result = %#v", result)
+	}
+}
+
+func TestDispatchCallAnalyticsPagination(t *testing.T) {
+	runtime := &app.Runtime{}
+	request := Request{Method: "GET", Path: CallAnalyticsPath}
+	legacy, err := Dispatch(context.Background(), runtime, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := legacy["pagination"]; ok {
+		t.Fatalf("legacy response contains pagination: %#v", legacy["pagination"])
+	}
+
+	to := time.Now().Add(-time.Minute).UTC()
+	request.Query = url.Values{"range": {"5m"}, "page": {"2"}, "to": {to.Format(time.RFC3339Nano)}}
+	result, err := Dispatch(context.Background(), runtime, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, ok := result["pagination"].(*observability.CallAnalyticsPage)
+	if !ok || *page != (observability.CallAnalyticsPage{Page: 2, PageSize: 30}) {
+		t.Fatalf("pagination = %#v", result["pagination"])
+	}
+	window := result["window"].(observability.CallAnalyticsWindow)
+	if !window.To.Equal(to) || !window.From.Equal(to.Add(-5*time.Minute)) {
+		t.Fatalf("window = %+v", window)
+	}
+
+	for _, query := range []url.Values{
+		{"page": {""}}, {"page": {"0"}}, {"page": {"-1"}}, {"page": {"1.5"}}, {"page": {"99999999999999999999"}},
+		{"to": {""}}, {"to": {"2026-11-21"}},
+	} {
+		request.Query = query
+		_, err := Dispatch(context.Background(), runtime, request)
+		var toolErr *app.ToolError
+		if !errors.As(err, &toolErr) || toolErr.Code != "INVALID_ARGUMENT" {
+			t.Errorf("query %v: got %v, want INVALID_ARGUMENT", query, err)
+		}
 	}
 }
 

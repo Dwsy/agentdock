@@ -75,10 +75,10 @@ func (r *Runtime) RuntimeAnalytics() Result {
 	}
 }
 
-// RuntimeCallAnalytics returns the same metadata projection for all matching calls in the selected range.
+// RuntimeCallAnalytics returns call metrics and the requested page of matching calls.
 func (r *Runtime) RuntimeCallAnalytics(query observability.CallAnalyticsQuery) Result {
 	snapshot := r.observer.CallAnalytics(query)
-	return Result{
+	result := Result{
 		"ok":        true,
 		"source":    runtimeAPISource,
 		"window":    snapshot.Window,
@@ -93,6 +93,10 @@ func (r *Runtime) RuntimeCallAnalytics(query observability.CallAnalyticsQuery) R
 		"facets":    snapshot.Facets,
 		"calls":     snapshot.Calls,
 	}
+	if snapshot.Page != nil {
+		result["pagination"] = snapshot.Page
+	}
+	return result
 }
 
 // RuntimeDiagnostics 只暴露最近调用的零 Payload 投影，供 Nexus 按需远程排障。

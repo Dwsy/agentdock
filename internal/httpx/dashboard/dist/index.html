@@ -7,17 +7,24 @@
     <title>AgentDock · 远程控制台</title>
     <script>
       // 在首屏渲染前定好主题，避免闪一下白/黑。
-      // 优先级：localStorage 记忆 > 系统偏好 > 默认暗色。
+      // 存的是意图（system/light/dark），不是渲染结果：跟随系统时由系统偏好
+      // 决定深浅，不再把当次渲染结果写回去，否则日落后会被钉在深色。
       (function () {
-        var saved = null;
-        try { saved = localStorage.getItem('agentdock-theme'); } catch (e) {}
-        var dark = saved === 'dark' || (saved === null && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        var mode = 'system';
+        try {
+          var saved = localStorage.getItem('agentdock-theme-mode');
+          if (saved === 'light' || saved === 'dark' || saved === 'system') mode = saved;
+          // 旧布尔键只有渲染结果、没有意图：清掉，按跟随系统重新开始。
+          if (localStorage.getItem('agentdock-theme') !== null) localStorage.removeItem('agentdock-theme');
+        } catch (e) {}
+        var systemDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var dark = mode === 'dark' || (mode === 'system' && systemDark);
         document.documentElement.classList.toggle('dark', dark);
         document.querySelector('meta[name=color-scheme]').setAttribute('content', dark ? 'dark' : 'light');
       })();
     </script>
-    <script type="module" crossorigin src="/dashboard/assets/index-DlMpYFFi.js"></script>
-    <link rel="stylesheet" crossorigin href="/dashboard/assets/index-Aa8RGSzn.css">
+    <script type="module" crossorigin src="/dashboard/assets/index-DK1i_TKe.js"></script>
+    <link rel="stylesheet" crossorigin href="/dashboard/assets/index-Bky0trWQ.css">
   </head>
   <body>
     <div id="root"></div>

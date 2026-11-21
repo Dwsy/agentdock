@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSearchTextRGAcceptsFileAndLeadingHyphenQuery(t *testing.T) {
@@ -91,4 +92,37 @@ func TestSearchTextTruncatesEarlyForRGAndGoFallback(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
 		assertTruncatedSearch(t, "go_fallback")
 	})
+}
+
+func TestSearchTextRGStopsLiveStreamAfterOverflowContext(t *testing.T) {
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("test requires /bin/sh")
+	}
+	bin := t.TempDir()
+	script := `#!/bin/sh
+printf '%s\n' \
+  '{"type":"match","data":{"path":{"text":"sample.txt"},"lines":{"text":"needle\n"},"line_number":1}}' \
+  '{"type":"match","data":{"path":{"text":"sample.txt"},"lines":{"text":"needle\n"},"line_number":2}}' \
+  '{"type":"context","data":{"path":{"text":"sample.txt"},"lines":{"text":"tail\n"},"line_number":3}}'
+exec /bin/sleep 10
+`
+	if err := os.WriteFile(filepath.Join(bin, "rg"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	service, _ := newFileTestService(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	cap, contextLines := 1, 2
+	result, err := service.SearchText(ctx, SearchRequest{Query: "needle", MaxResults: &cap, ContextLines: &contextLines})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := result["matches"].([]map[string]any)
+	if result["engine"] != "rg" || result["truncated"] != true || len(matches) != 1 {
+		t.Fatalf("result = %#v, want one match from rg and truncated=true", result)
+	}
+	if after := matches[0]["after"].([]string); len(after) != 2 || after[0] != "needle" || after[1] != "tail" || matches[0]["context_end_line"] != 3 {
+		t.Fatalf("match = %#v, want after=[needle tail] and context_end_line=3", matches[0])
+	}
 }

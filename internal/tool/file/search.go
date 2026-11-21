@@ -169,23 +169,26 @@ func (svc *Service) searchTextRG(ctx context.Context, p workspace.Path, opts Sea
 		return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", err)
 	}
 	matches, truncated, ok := svc.parseRGJSONReader(stdout, p.Abs, opts)
-	if truncated && ok {
-		// Terminate ripgrep as soon as MaxResults is reached so huge repos stop scanning early.
+	if truncated || !ok {
+		// Once the overflow and its context are known, ripgrep can stop scanning.
 		streamCancel()
-		_ = cmd.Wait()
-		if timeoutCtx.Err() != nil {
-			return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", timeoutCtx.Err())
-		}
-		return Result{"query": opts.Query, "engine": "rg", "matches": matches, "total_matches": len(matches), "truncated": true}, true, nil
 	}
-	if waitErr := cmd.Wait(); waitErr != nil {
-		if exit, isExit := waitErr.(*exec.ExitError); isExit && exit.ExitCode() == 1 && timeoutCtx.Err() == nil {
+	waitErr := cmd.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, true, kernelExecutionError(ctx, "rg", "text search", err)
+	}
+	if err := timeoutCtx.Err(); err != nil {
+		if opts.MaxResults <= 0 || len(matches) < opts.MaxResults {
+			return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", err)
+		}
+		truncated = true
+	} else if !ok {
+		return nil, true, toolError("SEARCH_FAILED", "failed to parse ripgrep search results", "runtime")
+	} else if !truncated && waitErr != nil {
+		if exit, isExit := waitErr.(*exec.ExitError); isExit && exit.ExitCode() == 1 {
 			return Result{"query": opts.Query, "engine": "rg", "matches": []map[string]any{}, "total_matches": 0, "truncated": false}, true, nil
 		}
 		return nil, true, kernelExecutionError(timeoutCtx, "rg", "text search", waitErr)
-	}
-	if !ok {
-		return nil, true, toolError("SEARCH_FAILED", "failed to parse ripgrep search results", "runtime")
 	}
 	return Result{"query": opts.Query, "engine": "rg", "matches": matches, "total_matches": len(matches), "truncated": truncated}, true, nil
 }
@@ -199,6 +202,8 @@ func (svc *Service) parseRGJSONReader(reader io.Reader, searchRoot string, opts 
 	before := map[string][]string{}
 	var lastMatch map[string]any
 	var lastPath string
+	lastLine := 0
+	truncated := false
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
@@ -222,6 +227,9 @@ func (svc *Service) parseRGJSONReader(reader io.Reader, searchRoot string, opts 
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			return nil, false, false
+		}
+		if event.Type == "end" && truncated {
+			return matches, true, true
 		}
 		if event.Type != "context" && event.Type != "match" {
 			continue
@@ -248,6 +256,20 @@ func (svc *Service) parseRGJSONReader(reader io.Reader, searchRoot string, opts 
 			path = filepath.ToSlash(eventPath)
 		}
 		line := strings.TrimSuffix(event.Data.Lines.Text, "\n")
+		if opts.MaxResults > 0 && len(matches) >= opts.MaxResults {
+			contextEnd := lastLine + opts.ContextLines
+			if path == lastPath && event.Data.LineNumber > lastLine && event.Data.LineNumber <= contextEnd {
+				// An overflow match inside this window is also a line of trailing context.
+				after := lastMatch["after"].([]string)
+				lastMatch["after"] = append(after, line)
+				lastMatch["context_end_line"] = event.Data.LineNumber
+			}
+			truncated = truncated || event.Type == "match"
+			if truncated && (path != lastPath || event.Data.LineNumber >= contextEnd) {
+				return matches, true, true
+			}
+			continue
+		}
 		switch event.Type {
 		case "context":
 			if lastMatch != nil && lastPath == path {
@@ -273,15 +295,10 @@ func (svc *Service) parseRGJSONReader(reader io.Reader, searchRoot string, opts 
 			matches = append(matches, entry)
 			lastMatch = entry
 			lastPath = path
-			if opts.MaxResults > 0 && len(matches) >= opts.MaxResults {
-				return matches, true, true
-			}
+			lastLine = event.Data.LineNumber
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, false, false
-	}
-	return matches, false, true
+	return matches, truncated, scanner.Err() == nil
 }
 
 func (svc *Service) searchTextGo(ctx context.Context, p workspace.Path, opts SearchOptions) (Result, error) {
@@ -289,7 +306,7 @@ func (svc *Service) searchTextGo(ctx context.Context, p workspace.Path, opts Sea
 }
 
 func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path, opts SearchOptions, limits searchFallbackLimits) (Result, error) {
-	ctx, cancel := context.WithTimeout(ctx, limits.Timeout)
+	walkCtx, cancel := context.WithTimeout(ctx, limits.Timeout)
 	defer cancel()
 
 	var re *regexp.Regexp
@@ -320,8 +337,9 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 	bytesScanned := int64(0)
 	skippedLargeFiles := 0
 	limitResource := ""
+	truncated := false
 	walkErr := filepath.WalkDir(p.Abs, func(abs string, d os.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
+		if err := walkCtx.Err(); err != nil {
 			return err
 		}
 		if walkErr != nil {
@@ -415,6 +433,9 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 		}
 		lines := strings.Split(string(data), "\n")
 		for i, line := range lines {
+			if err := walkCtx.Err(); err != nil {
+				return err
+			}
 			ok := false
 			column := 0
 			matchText := ""
@@ -433,25 +454,38 @@ func (svc *Service) searchTextGoWithLimits(ctx context.Context, p workspace.Path
 			if !ok {
 				continue
 			}
-			before, after := contextAround(lines, i, opts.ContextLines)
-			matches = append(matches, map[string]any{"path": displayPath, "line": i + 1, "column": column, "preview": truncateString(line, 500), "match_text": truncateString(matchText, 500), "before": before, "after": after, "context_start_line": i + 1 - len(before), "context_end_line": i + 1 + len(after)})
 			if opts.MaxResults > 0 && len(matches) >= opts.MaxResults {
+				truncated = true
 				return filepath.SkipAll
 			}
+			before, after := contextAround(lines, i, opts.ContextLines)
+			matches = append(matches, map[string]any{"path": displayPath, "line": i + 1, "column": column, "preview": truncateString(line, 500), "match_text": truncateString(matchText, 500), "before": before, "after": after, "context_start_line": i + 1 - len(before), "context_end_line": i + 1 + len(after)})
 		}
 		return nil
 	})
+	if err := ctx.Err(); err != nil {
+		return nil, kernelExecutionError(ctx, "go_fallback", "text search", err)
+	}
+	if walkErr == nil && !truncated {
+		walkErr = walkCtx.Err()
+	}
 	if walkErr != nil {
-		if errors.Is(walkErr, errSearchResourceLimit) {
+		// Once the result is full, the remaining scan only checks for overflow.
+		capReached := opts.MaxResults > 0 && len(matches) >= opts.MaxResults
+		budgetExhausted := errors.Is(walkErr, errSearchResourceLimit) || errors.Is(walkErr, context.DeadlineExceeded)
+		if capReached && budgetExhausted {
+			truncated = true
+		} else if errors.Is(walkErr, errSearchResourceLimit) {
 			return nil, toolErrorCause("RESOURCE_LIMIT", "text search exceeded the Go fallback resource budget", "runtime", map[string]any{
 				"resource": limitResource, "entries_visited": entriesVisited, "files_scanned": filesScanned, "bytes_scanned": bytesScanned,
 			}, walkErr)
+		} else {
+			return nil, kernelExecutionError(walkCtx, "go_fallback", "text search", walkErr)
 		}
-		return nil, kernelExecutionError(ctx, "go_fallback", "text search", walkErr)
 	}
 	return Result{
 		"query": opts.Query, "engine": "go_fallback", "matches": matches, "total_matches": len(matches),
-		"truncated": opts.MaxResults > 0 && len(matches) >= opts.MaxResults,
+		"truncated": truncated,
 		"partial":   skippedLargeFiles > 0, "files_scanned": filesScanned, "bytes_scanned": bytesScanned, "skipped_large_files": skippedLargeFiles,
 	}, nil
 }

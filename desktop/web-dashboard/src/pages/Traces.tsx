@@ -381,7 +381,7 @@ export default function Traces({ data, onHistoryModeChange, onRefreshLatest }: {
         </div>
 
         {/* 右：详情 */}
-        <div className="scrollbar-thin max-h-[680px] min-w-0 overflow-y-auto rounded-xl border border-border/60 bg-muted/10 p-3.5">
+        <div className="bg-trace-reading scrollbar-thin max-h-[680px] min-w-0 overflow-y-auto rounded-xl border border-border/60 p-3.5">
           {selected ? (
             <TraceDetail record={selected} />
           ) : (

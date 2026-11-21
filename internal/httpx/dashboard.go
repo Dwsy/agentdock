@@ -36,7 +36,7 @@ const (
 var (
 	dashboardBearerRe = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{8,}`)
 	// Pierre Highlights compiles its bundled lexer with WebAssembly.Module.
-	dashboardCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'self' blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
+	dashboardCSP = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'self' blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
 )
 
 // registerDashboard 注册静态页与 API 代理。

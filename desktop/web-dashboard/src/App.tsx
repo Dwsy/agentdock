@@ -7,6 +7,7 @@ import {
   WifiOff,
   Sun,
   Moon,
+  Monitor,
   LayoutDashboard,
   ChartNoAxesCombined,
   ScrollText,
@@ -19,6 +20,7 @@ import {
   Terminal,
   Share2,
   Globe,
+  Image as ImageIcon,
 } from 'lucide-react';
 import {
   api,
@@ -49,8 +51,17 @@ import CapabilitiesPage from './pages/Capabilities';
 import ConfigPage from './pages/Config';
 import ManualLLMPage from './pages/ManualLLM';
 import RemoteAccessPage from './pages/RemoteAccess';
+import DashboardBackground from './components/DashboardBackground';
 import { Panel } from './ui';
 import { useHashRoute } from './lib/useHashRoute';
+import {
+  THEME_MODE_KEY,
+  nextThemeMode,
+  readThemeMode,
+  resolveDark,
+  themeModeLabel,
+  type ThemeMode,
+} from './lib/theme';
 
 type Snapshot = {
   status: Status;
@@ -70,6 +81,15 @@ type Snapshot = {
 
 /** 任务列表一次拉全量（接口硬上限 10000，实际任务量远小于此）。 */
 const TASK_LIMIT = 10000;
+
+/** 隐私模式下访问 localStorage 本身就可能抛错，取不到就当没有存储。 */
+function safeLocalStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 
 const NAV = [
   { id: 'overview', label: '概览', icon: LayoutDashboard, group: '监控' },
@@ -122,12 +142,42 @@ const FETCHERS: { [K in SnapshotKey]: () => Promise<Snapshot[K]> } = {
 };
 
 export default function App() {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  return (
+    <>
+      <DashboardBackground dialogRef={dialogRef} />
+      <Dashboard onOpenBackground={() => dialogRef.current?.showModal()} />
+    </>
+  );
+}
+
+function BackgroundButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="背景设置"
+      aria-haspopup="dialog"
+      title="背景设置"
+      className="background-trigger u-press glass-control inline-flex min-h-8 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-foreground"
+    >
+      <ImageIcon size={15} aria-hidden="true" /> 背景
+    </button>
+  );
+}
+
+function Dashboard({ onOpenBackground }: { onOpenBackground: () => void }) {
   const [data, setData] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
-  // 初始值对齐 index.html 预执行脚本定好的 class（记忆 > 系统偏好）
-  const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'));
+  // 外观模式：跟随系统 / 浅色 / 深色。存的是用户意图，不是当前渲染结果，
+  // 否则系统在日落后切深色会把「跟随系统」写成「深色」。
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode(safeLocalStorage()));
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false,
+  );
+  const dark = resolveDark(themeMode, systemDark);
   // 当前页写进 URL hash，刷新/前进后退都保持。
   const [page, setHashPage] = useHashRoute<PageId>(PAGE_IDS, 'overview');
   const pageRef = useRef<PageId>(page);
@@ -200,6 +250,16 @@ export default function App() {
     }
   }, []);
 
+  const setTracesHistoryMode = useCallback((paused: boolean) => {
+    tracesPausedRef.current = paused;
+  }, []);
+
+  // 返回最新：清掉历史游标后立刻重拉，而不是等下一次 10s 轮询。
+  const refreshTraces = useCallback(() => {
+    tracesPausedRef.current = false;
+    void load(true);
+  }, [load]);
+
   useEffect(() => {
     void load(true);
     const id = setInterval(() => {
@@ -231,25 +291,25 @@ export default function App() {
     return unsub;
   }, [load]);
 
-  const setTracesHistoryMode = useCallback((paused: boolean) => {
-    tracesPausedRef.current = paused;
+  // 系统偏好变化时只在「跟随系统」下才影响渲染，显式选的浅/深色不动。
+  useEffect(() => {
+    const query = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!query) return;
+    const onChange = (event: MediaQueryListEvent) => setSystemDark(event.matches);
+    setSystemDark(query.matches);
+    query.addEventListener('change', onChange);
+    return () => query.removeEventListener('change', onChange);
   }, []);
-
-  // 返回最新：清掉历史游标后立刻重拉，而不是等下一次 10s 轮询。
-  const refreshTraces = useCallback(() => {
-    tracesPausedRef.current = false;
-    void load(true);
-  }, [load]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark);
     document.querySelector('meta[name=color-scheme]')?.setAttribute('content', dark ? 'dark' : 'light');
     try {
-      localStorage.setItem('agentdock-theme', dark ? 'dark' : 'light');
+      localStorage.setItem(THEME_MODE_KEY, themeMode);
     } catch {
       // 隐私模式下 localStorage 可能不可写，忽略即可
     }
-  }, [dark]);
+  }, [dark, themeMode]);
 
   // 移动端抽屉：Esc 关闭、移焦到关闭按钮、关闭后把焦点还给触发按钮。
   useEffect(() => {
@@ -308,7 +368,10 @@ export default function App() {
           <WifiOff size={32} className="mx-auto text-red-500" />
           <h1 className="mt-4 text-lg font-semibold">连接失败</h1>
           <p className="mt-2 text-sm text-muted-foreground">{error}</p>
-          <button onClick={() => void load(true)} className="glass-primary mt-6 rounded-lg px-4 py-2 text-sm font-medium text-primary-foreground">重试</button>
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+            <button onClick={() => void load(true)} className="glass-primary rounded-lg px-4 py-2 text-sm font-medium text-primary-foreground">重试</button>
+            <BackgroundButton onClick={onOpenBackground} />
+          </div>
         </Panel>
       </div>
     );
@@ -465,13 +528,14 @@ export default function App() {
             >
               <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
             </button>
+            <BackgroundButton onClick={onOpenBackground} />
             <button
-              onClick={() => setDark((v) => !v)}
-              aria-label={dark ? '切换到浅色主题' : '切换到深色主题'}
-              title={dark ? '切换到浅色主题' : '切换到深色主题'}
+              onClick={() => setThemeMode((mode) => nextThemeMode(mode))}
+              aria-label={`外观：${themeModeLabel(themeMode)}，点击切换到${themeModeLabel(nextThemeMode(themeMode))}`}
+              title={`外观：${themeModeLabel(themeMode)}（点击切换到${themeModeLabel(nextThemeMode(themeMode))}）`}
               className="u-press glass-control flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2"
             >
-              {dark ? <Sun size={16} /> : <Moon size={16} />}
+              {themeMode === 'system' ? <Monitor size={16} /> : themeMode === 'light' ? <Sun size={16} /> : <Moon size={16} />}
             </button>
           </div>
         </header>

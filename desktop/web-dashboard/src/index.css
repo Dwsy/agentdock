@@ -11,6 +11,177 @@ body {
   margin: 0;
 }
 
+#root {
+  isolation: isolate;
+}
+
+/* Stronger foregrounds and denser reading surfaces over the wallpaper. */
+:root {
+  --background: #e9eef5;
+  --foreground: #172438;
+  --muted-foreground: #46566b;
+  --panel: #f8fafc;
+  --card: #fff;
+  --card-foreground: var(--foreground);
+  --popover: #fcfdff;
+  --popover-foreground: var(--foreground);
+  --input: #899aac;
+  --ring: #28578b;
+  --code-surface: #f2f6fa;
+  --glass-state: #e0ebf8;
+  --glass-state-edge: #91aaca;
+  --chrome-solid: #f4f8fc;
+  --chrome-strength: 72%;
+  --chrome-blur: blur(18px) saturate(135%);
+  --chrome-rim: #ffffffdd;
+  --chrome-inner: #ffffff48;
+  --chrome-shade: #132a493d;
+  --wallpaper-fallback: radial-gradient(ellipse at 12% 85%, #799d9e 0%, transparent 58%),
+    linear-gradient(155deg, #c8dcea, #a5bed7 56%, #d8e4e9);
+  --success: #126044;
+  --destructive: #921f35;
+  --status-interrupted: #754605;
+  --syntax-keyword: #865005;
+  --syntax-string: #116344;
+  --syntax-number: #943d0c;
+  --syntax-title: #255891;
+  --syntax-comment: #566578;
+  --syntax-variable: #663698;
+  --syntax-property: #145478;
+}
+
+:root.dark {
+  --background: #131a23;
+  --foreground: #edf3fa;
+  --muted-foreground: #c4cedc;
+  --panel: #1b2430;
+  --card: #232e3d;
+  --card-foreground: var(--foreground);
+  --popover: #202b3a;
+  --popover-foreground: var(--foreground);
+  --input: #63758c;
+  --ring: #a1c9f8;
+  --code-surface: #111922;
+  --glass-state: #30465f;
+  --glass-state-edge: #6786aa;
+  --chrome-solid: #172231;
+  --chrome-strength: 76%;
+  --chrome-blur: blur(18px) saturate(122%);
+  --chrome-rim: #e1efff56;
+  --chrome-inner: #bdd7f526;
+  --chrome-shade: #0009;
+  --wallpaper-fallback: radial-gradient(ellipse at 10% 90%, #254f55 0%, transparent 60%),
+    linear-gradient(150deg, #182434, #283d56 57%, #101925);
+  --success: #83e5bd;
+  --destructive: #ffa1a9;
+  --status-interrupted: #ffd38a;
+  --syntax-keyword: #f5b848;
+  --syntax-string: #6fdcaa;
+  --syntax-number: #ffa875;
+  --syntax-title: #92bfff;
+  --syntax-comment: #9daabc;
+  --syntax-variable: #d7adff;
+  --syntax-property: #7cd3f9;
+}
+
+:root:not(.dark) :is(.app-sidebar, .app-topbar) {
+  --muted-foreground: #314154;
+  --success: #084934;
+  --status-interrupted: #5e3401;
+}
+
+:root:not(.dark) .app-sidebar .text-sky-500 {
+  color: #0c3d59;
+}
+
+.dashboard-wallpaper {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--wallpaper-fallback);
+}
+
+.dashboard-wallpaper-image,
+.dashboard-wallpaper img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.dashboard-wallpaper img {
+  object-fit: cover;
+}
+
+.dark .dashboard-wallpaper img {
+  filter: brightness(0.65);
+}
+
+.glass-panel,
+.bg-card,
+.bg-popover {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.code-surface,
+pre:has(> code) {
+  background-color: var(--code-surface);
+}
+
+:root:not(.dark) :is(pre.code-surface, .code-surface .font-mono) {
+  font-size: 0.75rem;
+}
+
+/* Existing status utilities keep their colored fills and gain readable ink. */
+:where(.text-emerald-500, .text-emerald-400, .text-emerald-500\/50) { color: var(--success); }
+:where(.text-red-500, .text-red-400, .text-red-400\/90, .text-red-500\/50, .hover\:text-red-400:hover) { color: var(--destructive); }
+:where(.text-amber-500, .text-amber-400, .text-amber-400\/80, .text-amber-500\/90) { color: var(--status-interrupted); }
+:root:not(.dark) :where(.text-sky-500, .text-sky-400) { color: #145478; }
+:root:not(.dark) :where(.text-violet-500, .text-violet-400, .text-indigo-400) { color: #52388a; }
+:root:not(.dark) :where(.text-muted-foreground\/40, .text-muted-foreground\/45, .text-muted-foreground\/50,
+  .text-muted-foreground\/60, .text-muted-foreground\/70, .text-muted-foreground\/75,
+  .text-muted-foreground\/80) { color: var(--muted-foreground); }
+
+.glass-chosen,
+.glass-control[aria-pressed="true"] {
+  background-color: var(--glass-state);
+  box-shadow: inset 0 1px 0 var(--glass-state-rim), inset 0 0 0 1px var(--glass-state-edge);
+}
+
+.background-dialog {
+  position: fixed;
+  inset: 0;
+  width: min(30rem, calc(100% - 2rem));
+  max-height: calc(100dvh - max(1rem, env(safe-area-inset-top)) - max(1rem, env(safe-area-inset-bottom)));
+  margin: auto;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: 1.25rem;
+  padding: clamp(1rem, 4vw, 1.5rem);
+}
+
+.background-dialog[open] {
+  display: grid;
+  gap: 1rem;
+}
+
+.background-dialog::backdrop {
+  background: #0f192a99;
+}
+
+.background-dialog :is(input, button):focus-visible,
+.background-trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+html:has(.background-dialog[open]) {
+  overflow: hidden;
+}
+
 .tabular {
   font-variant-numeric: tabular-nums;
 }
@@ -33,8 +204,8 @@ body {
   visibility: hidden;
   transform: translateX(calc(-100% - var(--shell-gap) * 2));
   transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
-  /* 抽屉压着页面内容，比普通 panel 更实一点，保证导航文字可读。 */
-  background-color: color-mix(in oklch, var(--panel) 84%, transparent);
+  /* The drawer sits over scrolling content on small screens. */
+  background-color: var(--chrome-solid);
 }
 
 .app-sidebar.is-open {
@@ -55,23 +226,118 @@ body {
   border-radius: var(--shell-radius);
   min-height: 48px;
   padding-block: 6px;
-  /* background 本身不透明，混色后仍保留足够实的底色遮住滚动正文。 */
-  background-color: color-mix(in oklch, var(--background) 90%, transparent);
-  -webkit-backdrop-filter: var(--glass-blur);
-  backdrop-filter: var(--glass-blur);
+  background-color: var(--chrome-solid);
+}
+
+:is(.app-sidebar, .app-topbar) {
+  box-shadow:
+    inset 0 1px 0 var(--chrome-rim),
+    inset 0 0 0 1px var(--chrome-inner),
+    inset 0 -1px 0 var(--glass-edge),
+    0 0 0 1px var(--glass-edge),
+    0 12px 28px -10px var(--chrome-shade);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root:not([data-wallpaper-off]) {
+    --workspace-tint: #eef4f9;
+    --workspace-strength: 74%;
+    --workspace-detail-strength: 24%;
+    --workspace-blur: blur(22px) saturate(125%);
+  }
+
+  :root.dark:not([data-wallpaper-off]) {
+    --workspace-tint: #1b2430;
+    --workspace-strength: 78%;
+  }
+
+  :root:not([data-wallpaper-off]) .app-topbar {
+    background-color: color-mix(in srgb, var(--chrome-solid) var(--chrome-strength), transparent);
+    -webkit-backdrop-filter: var(--chrome-blur);
+    backdrop-filter: var(--chrome-blur);
+  }
+
+  @media (min-width: 1024px) {
+    :root:not([data-wallpaper-off]) .app-sidebar {
+      background-color: color-mix(in srgb, var(--chrome-solid) var(--chrome-strength), transparent);
+      -webkit-backdrop-filter: var(--chrome-blur);
+      backdrop-filter: var(--chrome-blur);
+    }
+  }
+}
+
+:root[data-wallpaper-off] {
+  --glass-blur: none;
+  --glass-blur-control: none;
+  --primary-solid: 100%;
+}
+
+[data-wallpaper-off] .dashboard-wallpaper {
+  display: none;
+}
+
+[data-wallpaper-off] .app-overlay {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root, :root.dark {
+    --chrome-strength: 100%;
+    --chrome-blur: none;
+    --glass-blur: none;
+    --glass-blur-control: none;
+  }
+
+  :root:not([data-wallpaper-off]), :root.dark:not([data-wallpaper-off]) {
+    --workspace-tint: var(--panel);
+    --workspace-strength: 100%;
+    --workspace-detail-strength: 100%;
+    --workspace-blur: none;
+  }
+
+  .dashboard-wallpaper {
+    display: none;
+  }
+
+  .app-overlay {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
 }
 
 /* 默认 32px 控件让桌面顶栏保持 48px；文字放大时允许控件和顶栏增长。 */
 .app-topbar button {
-  width: max(32px, 1.6rem);
-  height: max(32px, 1.6rem);
+  min-width: max(32px, 1.6rem);
+  min-height: max(32px, 1.6rem);
   flex-shrink: 0;
 }
 
-.task-workspace .glass-panel {
-  background-color: var(--background);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
+.background-trigger {
+  background-color: var(--glass-control);
+  white-space: nowrap;
+}
+
+.background-trigger:hover {
+  background-color: var(--glass-state);
+}
+
+/* Tint the outer pane once so nested detail sections share its backdrop. */
+.app-main main .glass-panel:not(:where(.glass-panel .glass-panel)) {
+  background-color: var(--panel);
+  background-color: color-mix(in srgb, var(--workspace-tint, var(--panel)) var(--workspace-strength, 100%), transparent);
+  -webkit-backdrop-filter: var(--workspace-blur, none);
+  backdrop-filter: var(--workspace-blur, none);
+}
+
+.bg-trace-reading {
+  background-color: var(--card);
+  background-color: color-mix(in srgb, var(--card) var(--workspace-detail-strength, 100%), transparent);
+}
+
+:root:not(.dark) .app-main main {
+  --muted-foreground: #334357;
+  --success: #084934;
 }
 
 /* 项目导航跟随顶栏停在下方，避免与悬浮顶栏重叠。 */
@@ -120,6 +386,8 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .app-sidebar,
   .app-overlay,
+  .app-shell .animate-spin,
+  .app-shell .transition-transform,
   .u-press {
     transition: none;
     animation: none;
@@ -139,15 +407,15 @@ body {
   color: var(--hls-dark, inherit);
 }
 
-/* highlight.js 精简主题（适配 Solid Glass 明暗双色） */
-.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type { color: #f59e0b; }
-.hljs-string, .hljs-attr, .hljs-addition, .hljs-regexp { color: #10b981; }
-.hljs-number, .hljs-symbol, .hljs-bullet { color: #f97316; }
-.hljs-title, .hljs-title.function_, .hljs-section { color: #60a5fa; }
-.hljs-comment, .hljs-quote, .hljs-meta { color: #6b7280; font-style: italic; }
-.hljs-built_in, .hljs-variable, .hljs-template-variable { color: #c084fc; }
-.hljs-attribute, .hljs-property, .hljs-params { color: #38bdf8; }
-.hljs-deletion { color: #ef4444; }
+/* highlight.js 精简主题（适配明暗双色） */
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-type { color: var(--syntax-keyword); }
+.hljs-string, .hljs-attr, .hljs-addition, .hljs-regexp { color: var(--syntax-string); }
+.hljs-number, .hljs-symbol, .hljs-bullet { color: var(--syntax-number); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--syntax-title); }
+.hljs-comment, .hljs-quote, .hljs-meta { color: var(--syntax-comment); font-style: italic; }
+.hljs-built_in, .hljs-variable, .hljs-template-variable { color: var(--syntax-variable); }
+.hljs-attribute, .hljs-property, .hljs-params { color: var(--syntax-property); }
+.hljs-deletion { color: var(--destructive); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 

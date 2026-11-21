@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates u
 
 ## [Unreleased]
 
+### Added / 新增
+
+- **Web 仪表盘外观改为「跟随系统 / 浅色 / 深色」三档**：主题按钮按 跟随系统 → 浅色 → 深色 循环，存的是用户意图（`agentdock-theme-mode`）而不是当次渲染结果。跟随系统时监听 `prefers-color-scheme` 实时跟随系统深浅色变化，显式选定后系统变化不再覆盖。旧布尔键 `agentdock-theme` 只有渲染结果、没有意图，读到即清除并回到跟随系统，避免用户被历史渲染状态钉死。首屏脚本同步改成按意图解析，无闪烁。新增 `src/lib/theme.ts` 与 7 个 `node:test` 用例。
+
 ## [2026-11-18] - Runtime Stability, Performance, Artifact Management & Manual LLM / 运行态稳定性、性能治理、文件发布管理与手动推理桥接
 
 ### Added / 新增

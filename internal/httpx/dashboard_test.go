@@ -13,6 +13,22 @@ import (
 	"github.com/uvwt/agentdock/internal/auth"
 )
 
+func TestDashboardWallpaperCSP(t *testing.T) {
+	mux := http.NewServeMux()
+	registerDashboard(mux, testConfig(t), nil, http.NotFoundHandler())
+	request := newLocalRuntimeRequest(http.MethodGet, "http://127.0.0.1:8765/dashboard/", nil)
+	recorder := httptest.NewRecorder()
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("dashboard status = %d, want 200", recorder.Code)
+	}
+
+	const want = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'self' blob:; font-src 'self' data:; connect-src 'self'; base-uri 'self'; frame-ancestors 'none'"
+	if got := recorder.Header().Get("Content-Security-Policy"); got != want {
+		t.Fatalf("dashboard CSP = %q, want %q", got, want)
+	}
+}
+
 func TestSanitizeDashboardJSON(t *testing.T) {
 	input := `{"ok":true,"records":[{"request":{"headers":[{"name":"Authorization","value":"Bearer abcdefghijklmnopqrst"},{"name":"Accept","value":"*/*"}]}},{"password":"plain-secret-value-alpha","detail":"Bearer zzzzzzzzzzzz tail"}]}`
 	got := sanitizeDashboardJSON([]byte(input))

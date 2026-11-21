@@ -1,6 +1,9 @@
 package textutil
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // DiffSection 是 unified diff 中一个文件分节的路径与增删行数。
 // Path 是去掉 a/、b/ 前缀后的展示路径，与工具返回的 affected_files 对齐。
@@ -81,12 +84,23 @@ func cutNextDiffLine(s string) (line, rest string, ok bool) {
 // DiffHeaderPath 提取 unified diff 文件头行（--- / +++ 之后）的路径：
 // 去掉 a/、b/ 前缀与制表时间戳；/dev/null（新增或删除文件的另一侧）返回空串。
 func DiffHeaderPath(field string) string {
-	if tab := strings.IndexByte(field, '\t'); tab >= 0 {
-		field = field[:tab]
-	}
-	field = strings.TrimSpace(field)
-	if field == "" || field == "/dev/null" {
+	field, _, _ = strings.Cut(strings.TrimSuffix(field, "\r"), "\t")
+	if field == "/dev/null" {
 		return ""
 	}
-	return strings.TrimPrefix(strings.TrimPrefix(field, "a/"), "b/")
+	path := UnquoteGitPath(field)
+	if oldPath, ok := strings.CutPrefix(path, "a/"); ok {
+		return oldPath
+	}
+	return strings.TrimPrefix(path, "b/")
+}
+
+// UnquoteGitPath decodes Git's C-style path quoting without trimming filename spaces.
+func UnquoteGitPath(field string) string {
+	if strings.HasPrefix(field, `"`) {
+		if decoded, err := strconv.Unquote(field); err == nil {
+			return decoded
+		}
+	}
+	return field
 }

@@ -37,31 +37,76 @@ func parseDiffFiles(diffText string) []gitDiffFile {
 func parseGitDiffFiles(diffText string) []gitDiffFile {
 	files := make([]gitDiffFile, 0)
 	current := -1
+	inHunk := false
 	for _, line := range strings.Split(diffText, "\n") {
-		if strings.HasPrefix(line, "diff --git ") {
-			parts := strings.Fields(line)
-			path := ""
-			if len(parts) >= 4 {
-				path = strings.TrimPrefix(parts[3], "b/")
-			}
-			files = append(files, gitDiffFile{Path: path, Status: "modified"})
+		line = strings.TrimSuffix(line, "\r")
+		if header, ok := strings.CutPrefix(line, "diff --git "); ok {
+			files = append(files, gitDiffFile{Path: gitDiffHeaderPath(header), Status: "modified"})
 			current = len(files) - 1
+			inHunk = false
 			continue
 		}
-		if current < 0 {
+		if strings.HasPrefix(line, "@@") {
+			inHunk = true
+		}
+		if current < 0 || inHunk {
 			continue
 		}
-		if strings.HasPrefix(line, "new file mode") {
-			files[current].Status = "added"
-		}
-		if strings.HasPrefix(line, "deleted file mode") {
-			files[current].Status = "deleted"
-		}
-		if strings.HasPrefix(line, "Binary files") {
-			files[current].Binary = true
+		file := &files[current]
+		switch {
+		case strings.HasPrefix(line, "--- "), strings.HasPrefix(line, "+++ "):
+			if path := textutil.DiffHeaderPath(line[4:]); path != "" {
+				file.Path = path
+			}
+		case strings.HasPrefix(line, "rename to "):
+			file.Path = textutil.UnquoteGitPath(line[len("rename to "):])
+		case strings.HasPrefix(line, "copy to "):
+			file.Path = textutil.UnquoteGitPath(line[len("copy to "):])
+		case strings.HasPrefix(line, "new file mode"):
+			file.Status = "added"
+		case strings.HasPrefix(line, "deleted file mode"):
+			file.Status = "deleted"
+		case strings.HasPrefix(line, "Binary files"), line == "GIT binary patch":
+			file.Binary = true
 		}
 	}
 	return files
+}
+
+func gitDiffHeaderPath(header string) string {
+	if strings.HasPrefix(header, `"`) {
+		for i := 1; i < len(header); i++ {
+			switch header[i] {
+			case '\\':
+				i++
+			case '"':
+				destination := strings.TrimPrefix(header[i+1:], " ")
+				return strings.TrimPrefix(textutil.UnquoteGitPath(destination), "b/")
+			}
+		}
+		return ""
+	}
+	if i := strings.Index(header, ` "b/`); i >= 0 {
+		return strings.TrimPrefix(textutil.UnquoteGitPath(header[i+1:]), "b/")
+	}
+	// Mode-only and binary modifications can omit ---/+++ and use the same path on both sides.
+	fallback := ""
+	for start := 0; start < len(header); {
+		i := strings.Index(header[start:], " b/")
+		if i < 0 {
+			break
+		}
+		i += start
+		destination := header[i+3:]
+		if strings.TrimPrefix(header[:i], "a/") == destination {
+			return destination
+		}
+		if start == 0 {
+			fallback = destination
+		}
+		start = i + 1
+	}
+	return fallback
 }
 
 // parseUnifiedDiffFiles 从 ---/+++ 文件头对提取纯 unified diff 的文件列表；

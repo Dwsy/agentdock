@@ -1,6 +1,12 @@
 package file
 
-import "testing"
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseDiffFilesGitStyle(t *testing.T) {
 	diff := "" +
@@ -61,6 +67,89 @@ func TestParseDiffFilesIgnoresHeaderLikeContent(t *testing.T) {
 	files := parseDiffFiles(diff)
 	if len(files) != 1 || files[0].Path != "a.txt" {
 		t.Fatalf("files = %#v", files)
+	}
+}
+
+func TestParseDiffFilesPreservesGitPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		patch string
+		want  gitDiffFile
+	}{
+		{
+			name:  "space with CRLF and timestamps",
+			patch: "diff --git a/my note.txt b/my note.txt\r\n--- a/my note.txt\tdate\r\n+++ b/my note.txt\tdate\r\n@@ -1 +1 @@\r\n--- a/not-a-header\r\n+++ b/not-a-header\r\n",
+			want:  gitDiffFile{Path: "my note.txt", Status: "modified", Insertions: 1, Deletions: 1},
+		},
+		{
+			name:  "quoted UTF-8 with nested b prefix",
+			patch: "diff --git \"a/b/\\344\\270\\255.txt\" \"b/b/\\344\\270\\255.txt\"\n--- \"a/b/\\344\\270\\255.txt\"\n+++ \"b/b/\\344\\270\\255.txt\"\n@@ -1 +1 @@\n-old\n+new\n",
+			want:  gitDiffFile{Path: "b/中.txt", Status: "modified", Insertions: 1, Deletions: 1},
+		},
+		{
+			name:  "mode-only path containing separator text",
+			patch: "diff --git a/dir b/note name.txt b/dir b/note name.txt\nold mode 100644\nnew mode 100755\n",
+			want:  gitDiffFile{Path: "dir b/note name.txt", Status: "modified"},
+		},
+		{
+			name:  "deleted name with trailing space",
+			patch: "diff --git a/an old.txt  b/an old.txt \ndeleted file mode 100644\n--- a/an old.txt \tdate\n+++ /dev/null\tdate\n@@ -1 +0,0 @@\n-old\n",
+			want:  gitDiffFile{Path: "an old.txt ", Status: "deleted", Deletions: 1},
+		},
+		{
+			name:  "quoted destination on rename",
+			patch: "diff --git a/old name.txt \"b/\\344\\270\\255.txt\"\nsimilarity index 100%\nrename from old name.txt\nrename to \"\\344\\270\\255.txt\"\n",
+			want:  gitDiffFile{Path: "中.txt", Status: "modified"},
+		},
+		{
+			name:  "copy destination with its own a prefix",
+			patch: "diff --git a/dir b/source note.txt b/a/copy name.txt\nsimilarity index 100%\ncopy from dir b/source note.txt\ncopy to a/copy name.txt\n",
+			want:  gitDiffFile{Path: "a/copy name.txt", Status: "modified"},
+		},
+		{
+			name:  "binary file with spaces",
+			patch: "diff --git a/a file.bin b/a file.bin\nnew file mode 100644\nBinary files /dev/null and b/a file.bin differ\n",
+			want:  gitDiffFile{Path: "a file.bin", Status: "added", Binary: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseDiffFiles(tc.patch); len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("parseDiffFiles() = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFileEditGitPatchKeepsQuotedPathInHistory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	svc, root := newCodeToolsRuntime(t)
+	const name = "中 note.txt"
+	path := filepath.Join(root, name)
+	if err := os.WriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const patch = "diff --git \"a/\\344\\270\\255 note.txt\" \"b/\\344\\270\\255 note.txt\"\n" +
+		"--- \"a/\\344\\270\\255 note.txt\"\n+++ \"b/\\344\\270\\255 note.txt\"\n" +
+		"@@ -1 +1 @@\n-old\n+new\n"
+	for _, dryRun := range []bool{true, false} {
+		result, err := svc.Edit(context.Background(), EditRequest{Action: "patch", Patch: patch, DryRun: dryRun})
+		if err != nil {
+			t.Fatalf("dry_run=%t: %v", dryRun, err)
+		}
+		history := result[FileEditHistoryKey].(Result)
+		want := gitDiffFile{Path: name, Status: "modified", Insertions: 1, Deletions: 1}
+		if got := history["affected_files"].([]gitDiffFile); len(got) != 1 || got[0] != want {
+			t.Fatalf("dry_run=%t affected_files = %#v, want %#v", dryRun, got, want)
+		}
+		wantContents := "new\n"
+		if dryRun {
+			wantContents = "old\n"
+		}
+		if contents, err := os.ReadFile(path); err != nil || string(contents) != wantContents {
+			t.Fatalf("dry_run=%t file = %q, %v, want %q", dryRun, contents, err, wantContents)
+		}
 	}
 }
 

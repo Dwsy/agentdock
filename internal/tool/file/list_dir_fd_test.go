@@ -50,6 +50,34 @@ func TestListDirFDEngineListsFilteredEntries(t *testing.T) {
 	}
 }
 
+func TestListDirFDHandlesDifferentlyCasedRoot(t *testing.T) {
+	if _, err := exec.LookPath("fd"); err != nil {
+		t.Skip("fd is not installed")
+	}
+	service, root := newFileTestService(t)
+	actual := filepath.Join(root, "MixedCase")
+	if err := os.Mkdir(actual, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "mixedcase")); os.IsNotExist(err) {
+		t.Skip("test requires a case-insensitive filesystem")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(actual, "visible.txt"), []byte("visible"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.ListDir(t.Context(), ListRequest{Path: "mixedcase"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := result["entries"].([]map[string]any)
+	if result["engine"] != "fd" || len(entries) != 1 || entries[0]["path"] != "visible.txt" {
+		t.Fatalf("list_dir returned engine %v and entries %v, want fd and visible.txt", result["engine"], entries)
+	}
+}
+
 func TestListDirGoReportsFallbackEngine(t *testing.T) {
 	service, root := newFileTestService(t)
 	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {

@@ -138,10 +138,9 @@ func (svc *Service) listDirFD(ctx context.Context, root workspace.Path, opts lis
 }
 
 func fdListArgs(opts listDirOptions) []string {
-	// `--` 之后第一个参数是 pattern：正则 `.` 匹配所有条目，真正的过滤在 Go 侧完成，
-	// 避免 fd 的 glob 语义差异影响契约（* 单段、** 跨目录）。
+	// 输出相对于 cmd.Dir 的路径，避免 fd 规范化的绝对路径与请求目录的大小写不同。
 	args := []string{
-		"--color=never", "--absolute-path", "--print0", "--no-ignore-parent",
+		"--color=never", "--print0", "--no-ignore-parent",
 		"--max-depth", strconv.Itoa(opts.MaxDepth),
 	}
 	if opts.IncludeHidden {
@@ -176,16 +175,17 @@ func (svc *Service) collectDirMatchesFD(r io.Reader, root workspace.Path, opts l
 		if raw == "" {
 			continue
 		}
-		// fd 给目录输出加尾部斜杠；文件名本身不可能包含斜杠，直接去掉再定位。
-		isDir := strings.HasSuffix(raw, "/")
-		abs := strings.TrimSuffix(raw, "/")
-		rel, relErr := relativePathFromRoot(root.Abs, abs)
-		if relErr != nil {
-			return nil, false, false, nil, fmt.Errorf("resolve directory entry %s: %w", abs, relErr)
-		}
-		if rel == "." {
+		// fd 给目录输出加尾部路径分隔符，得在清理路径之前识别。
+		isDir := os.IsPathSeparator(raw[len(raw)-1])
+		entryPath := filepath.Clean(raw)
+		if entryPath == "." {
 			continue
 		}
+		if !filepath.IsLocal(entryPath) {
+			return nil, false, false, nil, fmt.Errorf("fd returned a path outside the search root: %q", raw)
+		}
+		rel := filepath.ToSlash(entryPath)
+		abs := filepath.Join(root.Abs, entryPath)
 		if !opts.IncludeHidden && hiddenRelativePath(rel) {
 			continue
 		}

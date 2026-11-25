@@ -3,6 +3,7 @@ package observability
 import (
 	"bufio"
 	"cmp"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -815,42 +816,79 @@ func isASCII(s string) bool {
 // containsFold reports whether haystack contains lowercase needle case-insensitively
 // without allocating on ASCII inputs, falling back to strings.ToLower for non-ASCII UTF-8.
 func containsFold(haystack, needleLower string) bool {
-	n := len(needleLower)
-	if n == 0 {
+	if needleLower == "" {
 		return true
 	}
-	if len(haystack) < n {
+	if len(haystack) < len(needleLower) {
 		return false
 	}
-	if isASCII(haystack) && isASCII(needleLower) {
-		limit := len(haystack) - n
-		first := needleLower[0]
-		for i := 0; i <= limit; i++ {
-			c := haystack[i]
-			if c >= 'A' && c <= 'Z' {
-				c += 'a' - 'A'
-			}
-			if c != first {
-				continue
-			}
-			matched := true
-			for j := 1; j < n; j++ {
-				hc := haystack[i+j]
-				if hc >= 'A' && hc <= 'Z' {
-					hc += 'a' - 'A'
-				}
-				if hc != needleLower[j] {
-					matched = false
-					break
-				}
-			}
-			if matched {
-				return true
-			}
+	if isASCII(needleLower) {
+		prefix := lowercaseASCIIPrefix(haystack)
+		if prefix == len(haystack) {
+			return strings.Contains(haystack, needleLower)
 		}
-		return false
+		if haystack[prefix] < utf8.RuneSelf && isASCII(haystack[prefix+1:]) {
+			return containsASCIIFold(haystack, needleLower)
+		}
 	}
 	return strings.Contains(strings.ToLower(haystack), needleLower)
+}
+
+// lowercaseASCIIPrefix returns the number of leading bytes without A-Z or
+// non-ASCII characters. For ASCII bytes, adding 0x80 minus a threshold sets
+// the high bit at or above that threshold, without carrying into another byte.
+func lowercaseASCIIPrefix(text string) int {
+	const (
+		onePerByte = 0x0101010101010101
+		highBits   = 0x8080808080808080
+		atLeastA   = onePerByte * (0x80 - 'A')
+		pastZ      = onePerByte * (0x80 - ('Z' + 1))
+	)
+	scanned := 0
+	for len(text)-scanned >= 8 {
+		word := binary.LittleEndian.Uint64([]byte(text[scanned : scanned+8]))
+		if word&highBits != 0 || ((word+atLeastA)&^(word+pastZ))&highBits != 0 {
+			break
+		}
+		scanned += 8
+	}
+	for ; scanned < len(text); scanned++ {
+		c := text[scanned]
+		if c >= utf8.RuneSelf || 'A' <= c && c <= 'Z' {
+			break
+		}
+	}
+	return scanned
+}
+
+func containsASCIIFold(haystack, needleLower string) bool {
+	n := len(needleLower)
+	limit := len(haystack) - n
+	first := needleLower[0]
+	for i := 0; i <= limit; i++ {
+		c := haystack[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != first {
+			continue
+		}
+		matched := true
+		for j := 1; j < n; j++ {
+			hc := haystack[i+j]
+			if hc >= 'A' && hc <= 'Z' {
+				hc += 'a' - 'A'
+			}
+			if hc != needleLower[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
 }
 
 // TaskRecords 返回指定 task_id 的调用记录（新到旧），供任务活动聚合。

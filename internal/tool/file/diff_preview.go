@@ -16,7 +16,7 @@ type diffStats struct {
 	Deletions    int
 }
 
-func unifiedDiffPreview(path, oldContent, newContent string, maxBytes int) (string, bool, diffStats, error) {
+func unifiedDiffPreview(path, oldContent, newContent string, maxBytes int, capture func(string)) (string, bool, diffStats, error) {
 	output := anchoreddiff.Diff("a/"+path, []byte(oldContent), "b/"+path, []byte(newContent))
 	if len(output) > 0 {
 		// 该实现会额外输出 diff 命令头；工具契约只返回 unified diff。
@@ -27,9 +27,17 @@ func unifiedDiffPreview(path, oldContent, newContent string, maxBytes int) (stri
 	if len(output) > maxDiffOutputBytes {
 		return "", false, diffStats{}, fmt.Errorf("diff output exceeds %d bytes (observed %d bytes)", maxDiffOutputBytes, len(output))
 	}
-	stats := countDiffStats(string(output))
-	truncated := textutil.SafeTruncateBytes(output, maxBytes)
-	return truncated.Text, truncated.Truncated, stats, nil
+	diff := string(output)
+	stats := countDiffStats(diff)
+	preview := editDiffPreview(diff, maxBytes, capture)
+	return preview.Text, preview.Truncated, stats, nil
+}
+
+func editDiffPreview(diff string, maxBytes int, capture func(string)) textutil.Truncation {
+	if capture != nil && diff != "" {
+		capture(diff)
+	}
+	return textutil.SafeTruncateString(diff, maxBytes)
 }
 
 // countDiffStats 按分节统计整个 diff 文本的增删行数。用分节解析而不是

@@ -51,10 +51,8 @@ func traceFileChanges(tool string, args map[string]any, result *Result, success 
 	}
 	diff, _ := payload["diff_preview"].(string)
 	truncated, _ := payload["truncated"].(bool)
-	preview := textutil.SafeTruncateString(diff, traceFileDiffBytes)
-	if preview.Truncated {
-		truncated = true
-	}
+	preview, previewTruncated := observability.FileDiffPreview(diff, traceFileDiffBytes)
+	truncated = truncated || previewTruncated || len(diff) > traceFileDiffBytes
 
 	callAction, _ := payload["action"].(string)
 	if callAction == "" {
@@ -109,7 +107,7 @@ func traceFileChanges(tool string, args map[string]any, result *Result, success 
 			ProjectRoot: traceProjectRoot(file.path),
 			Insertions:  insertions,
 			Deletions:   deletions,
-			Diff:        preview.Text,
+			Diff:        preview,
 			Truncated:   truncated,
 		})
 	}

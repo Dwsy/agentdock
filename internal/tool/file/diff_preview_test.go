@@ -13,6 +13,7 @@ func TestUnifiedDiffPreviewWithoutExternalDiff(t *testing.T) {
 		"alpha\nkeep\n",
 		"beta\nkeep\n",
 		65536,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -39,7 +40,7 @@ func TestUnifiedDiffPreviewWithoutExternalDiff(t *testing.T) {
 }
 
 func TestUnifiedDiffPreviewPreservesMissingNewlineMarkers(t *testing.T) {
-	preview, _, _, err := unifiedDiffPreview("example.txt", "alpha", "beta", 65536)
+	preview, _, _, err := unifiedDiffPreview("example.txt", "alpha", "beta", 65536, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestUnifiedDiffPreviewUsesEmptyRanges(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			preview, _, _, err := unifiedDiffPreview("example.txt", test.old, test.new, 65536)
+			preview, _, _, err := unifiedDiffPreview("example.txt", test.old, test.new, 65536, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -72,7 +73,7 @@ func TestUnifiedDiffPreviewUsesEmptyRanges(t *testing.T) {
 }
 
 func TestUnifiedDiffPreviewTruncatesAfterCollectingStats(t *testing.T) {
-	preview, truncated, stats, err := unifiedDiffPreview("example.txt", "alpha\n", "beta\n", 16)
+	preview, truncated, stats, err := unifiedDiffPreview("example.txt", "alpha\n", "beta\n", 16, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,7 @@ func TestUnifiedDiffPreviewTruncatesAfterCollectingStats(t *testing.T) {
 }
 
 func TestUnifiedDiffPreviewReturnsEmptyForIdenticalContent(t *testing.T) {
-	preview, truncated, stats, err := unifiedDiffPreview("example.txt", "same\n", "same\n", 65536)
+	preview, truncated, stats, err := unifiedDiffPreview("example.txt", "same\n", "same\n", 65536, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -407,10 +407,14 @@ func (r *Runtime) Call(ctx context.Context, name string, args map[string]any) (r
 	ctx, span := r.tracing.StartTool(ctx, source)
 	defer span.End()
 	ctx = observability.WithExecution(ctx, startedAt)
+	var fileDiff string
+	if name == "file_edit" && r.traces.Mode() == observability.TraceModeDisk {
+		ctx = toolfile.WithEditDiffCapture(ctx, func(diff string) { fileDiff = diff })
+	}
 	// observeToolCall 先拿到完整结果（含 UI 文件历史需要的 diff），
 	// 再把 file_edit 精简为模型侧契约；defer 后进先出，顺序不能颠倒。
 	defer r.compactToolResult(name, &result)
-	defer r.observeToolCall(parentCtx, ctx, name, startedAt, args, &result, &err)
+	defer r.observeToolCall(parentCtx, ctx, name, startedAt, args, &result, &err, &fileDiff)
 
 	if err = r.validateToolArguments(name, args); err != nil {
 		return nil, err

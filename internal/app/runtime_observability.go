@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"time"
 
 	"github.com/uvwt/agentdock/internal/observability"
@@ -18,7 +19,7 @@ import (
 
 // observeToolCall 只记录固定白名单元数据。参数、结果、错误正文和 Details
 // 都不能进入运行分析，避免诊断能力反过来扩大敏感数据暴露面。
-func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, startedAt time.Time, args map[string]any, result *Result, callErr *error) {
+func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, startedAt time.Time, args map[string]any, result *Result, callErr *error, fileDiff *string) {
 	recovered := recover()
 	success := recovered == nil && (callErr == nil || *callErr == nil)
 	errorCode := ""
@@ -128,7 +129,12 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 		}
 		command := observability.CommandTraceFrom(toolName, args, resultMap)
 		imagePreviewData, imagePreviewMimeType := traceImagePreviewPayload(result)
-		r.traces.Record(observability.TraceRecord{
+		changes := traceFileChanges(toolName, args, result, success)
+		var sidecarDiff string
+		if len(changes) > 0 && changes[0].Truncated {
+			sidecarDiff = *fileDiff
+		}
+		r.traces.RecordWithFileDiff(observability.TraceRecord{
 			Tool:                 toolName,
 			Source:               string(source),
 			UserAgent:            userAgent,
@@ -144,10 +150,10 @@ func (r *Runtime) observeToolCall(parentCtx, ctx context.Context, name string, s
 			Result:               traceResultText(result, command),
 			Error:                traceErrorText(callErr),
 			Command:              command,
-			FileChanges:          traceFileChanges(toolName, args, result, success),
+			FileChanges:          changes,
 			ImagePreviewData:     imagePreviewData,
 			ImagePreviewMimeType: imagePreviewMimeType,
-		})
+		}, sidecarDiff)
 	}
 
 	attributes := make([]any, 0, 16)
@@ -208,6 +214,19 @@ func traceResultText(result *Result, command *observability.CommandTrace) string
 	if result != nil {
 		if payload, ok := traceImageResultText(*result); ok {
 			return payload
+		}
+		if diff, ok := (*result)["diff_preview"].(string); ok {
+			// Redact before JSON escaping so the legacy Result previews use the
+			// same rules as the structured preview and the file diff sidecar.
+			preview, _ := observability.FileDiffPreview(diff, observability.TraceFullBytes)
+			payload := maps.Clone(*result)
+			payload["diff_preview"] = preview
+			if history, ok := payload[toolfile.FileEditHistoryKey].(toolcore.Result); ok {
+				history = maps.Clone(history)
+				history["diff_preview"] = preview
+				payload[toolfile.FileEditHistoryKey] = history
+			}
+			return tracePayload(payload)
 		}
 	}
 	return tracePayload(result)

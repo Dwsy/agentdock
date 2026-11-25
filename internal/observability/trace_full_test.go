@@ -178,3 +178,43 @@ func TestDiskBytesIncludesFullCopies(t *testing.T) {
 		t.Fatalf("DiskBytes() = %d, want >= 4096", got)
 	}
 }
+
+func TestFileDiffSidecarPendingAndPersisted(t *testing.T) {
+	options := TraceOptions{Mode: TraceModeDisk, Root: t.TempDir(), BufferSize: 32, FlushInterval: time.Hour}
+	store, err := NewTraceStore(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// JSON escapes each '<' into six bytes. Multiple capped fields in one
+	// record must still scan successfully after the pending buffer is flushed.
+	text := strings.Repeat("<", TraceFullBytes)
+	id := store.RecordWithFileDiff(TraceRecord{
+		Tool:      "file_edit",
+		Success:   true,
+		StartedAt: time.Now(),
+		Arguments: text,
+		Command:   &CommandTrace{Command: text, Stdout: text},
+	}, text+"beyond the cap")
+	if store.Status().Buffered != 1 || store.pendingFullBytes != 4*TraceFullBytes {
+		t.Fatalf("pending previews = %d, full payload bytes = %d", store.Status().Buffered, store.pendingFullBytes)
+	}
+	assertFileDiff := func(store *TraceStore) {
+		t.Helper()
+		full, ok := store.FullRecord(id)
+		if !ok || !full.FileDiffTruncated || !full.FullTruncated || full.FileDiff != text {
+			t.Fatalf("file diff available=%v, truncated=%v, bytes=%d", ok, full.FileDiffTruncated, len(full.FileDiff))
+		}
+	}
+	assertFileDiff(store)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := NewTraceStore(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = persisted.Close() })
+	assertFileDiff(persisted)
+}

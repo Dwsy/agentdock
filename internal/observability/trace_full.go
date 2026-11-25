@@ -2,6 +2,7 @@ package observability
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -16,10 +17,11 @@ const (
 	// 256 KiB 是“够排障”和“脱敏成本”的折中：脱敏正则约 65 ms/MiB，
 	// 单侧截到 256 KiB 后 Record 路径的同步脱敏被钳在几十毫秒内。
 	TraceFullBytes = 256 << 10
-	// traceFullPendingBytes 是待刷盘全文的字节上限。正常情况下 pending
-	// 每秒被 flushLoop 清空，只有极端吞吐才会触顶；触顶后新记录不再写全文，
-	// 预览照常，UI 降级为“仅预览”而不是把内存打爆。
+	// Flush the pending full records before their payloads exceed this budget.
 	traceFullPendingBytes = 8 << 20
+	// A JSON line can have seven capped text fields, with up to six bytes
+	// of JSON escaping per input byte, plus the envelope and truncation markers.
+	traceFullScanBytes = 7*6*(TraceFullBytes+len(traceTruncatedMarker)) + 1024
 )
 
 // TraceFullCommand 是命令类工具全文副本的三个自由文本字段。
@@ -34,12 +36,14 @@ type TraceFullCommand struct {
 // 只有预览会被截断的记录才写全文：小 payload 的预览本身就是全文，
 // 重复落盘只浪费磁盘。与预览同为按天 JSONL，存于 <root>/full/。
 type TraceFullRecord struct {
-	ID            uint64            `json:"id"`
-	Arguments     string            `json:"arguments,omitempty"`
-	Result        string            `json:"result,omitempty"`
-	Error         string            `json:"error,omitempty"`
-	Command       *TraceFullCommand `json:"command,omitempty"`
-	FullTruncated bool              `json:"full_truncated,omitempty"`
+	ID                uint64            `json:"id"`
+	Arguments         string            `json:"arguments,omitempty"`
+	Result            string            `json:"result,omitempty"`
+	Error             string            `json:"error,omitempty"`
+	Command           *TraceFullCommand `json:"command,omitempty"`
+	FullTruncated     bool              `json:"full_truncated,omitempty"`
+	FileDiff          string            `json:"file_diff,omitempty"`
+	FileDiffTruncated bool              `json:"file_diff_truncated,omitempty"`
 }
 
 // fullDir 返回全文旁路目录；与预览文件同级，清理逻辑各自按天删除。
@@ -61,7 +65,7 @@ func traceNeedsFullCopy(record TraceRecord) bool {
 // buildTraceFull 在预览截断之前捕获全文副本。脱敏与截断语义复用预览路径
 // （tracePreviewWith），只是上限更大：全文同样不允许出现未脱敏字节落盘，
 // 截断处同样补 “…(truncated)” 标记。
-func buildTraceFull(record TraceRecord) TraceFullRecord {
+func buildTraceFull(record TraceRecord, fileDiff string) TraceFullRecord {
 	full := TraceFullRecord{ID: record.ID}
 
 	arguments, argsTruncated := tracePreviewWith(record.Arguments, TraceFullBytes, redactTracePayload)
@@ -79,16 +83,49 @@ func buildTraceFull(record TraceRecord) TraceFullRecord {
 		full.Command = &command
 		truncated = truncated || commandTruncated || stdoutTruncated || stderrTruncated
 	}
-	full.FullTruncated = truncated
+	full.FileDiff, full.FileDiffTruncated = FileDiffPreview(fileDiff, TraceFullBytes)
+	full.FullTruncated = truncated || full.FileDiffTruncated
 	return full
 }
 
-// FullRecord 按 ID 从旁路文件读取全文副本（新到旧扫描，命中即停）。
-// 旁路只服务 detail 按需读取，不做内存索引：全文正是为了不占内存才落盘。
+// FileDiffPreview applies the existing trace redaction to a bounded diff. The
+// caller stores truncation separately so the diff retains its unified format.
+func FileDiffPreview(diff string, limit int) (string, bool) {
+	text, truncated := tracePreviewWith(diff, limit, redactCommandPayload)
+	if truncated {
+		text = strings.TrimSuffix(text, traceTruncatedMarker)
+	}
+	return strings.Clone(text), truncated
+}
+
+func (full TraceFullRecord) payloadBytes() int {
+	size := len(full.Arguments) + len(full.Result) + len(full.Error) + len(full.FileDiff)
+	if full.Command != nil {
+		size += len(full.Command.Command) + len(full.Command.Stdout) + len(full.Command.Stderr)
+	}
+	return size
+}
+
+// FullRecord serves detail from the pending disk-write buffer or the sidecar
+// files. It checks pending under the same lock that flushes those files.
 func (s *TraceStore) FullRecord(id uint64) (TraceFullRecord, bool) {
 	if s == nil || s.mode != TraceModeDisk || s.root == "" || id == 0 {
 		return TraceFullRecord{}, false
 	}
+	s.mu.RLock()
+	for i := len(s.pendingFull) - 1; i >= 0; i-- {
+		record := s.pendingFull[i]
+		if record.ID == id {
+			s.mu.RUnlock()
+			if record.Command != nil {
+				command := *record.Command
+				record.Command = &command
+			}
+			return record, true
+		}
+	}
+	s.mu.RUnlock()
+
 	entries, err := os.ReadDir(s.fullDir())
 	if err != nil {
 		return TraceFullRecord{}, false
@@ -119,12 +156,12 @@ func scanFullFile(path string, id uint64) (TraceFullRecord, bool) {
 		return TraceFullRecord{}, false
 	}
 	defer file.Close()
-	needle := `"id":` + strconv.FormatUint(id, 10)
+	needle := []byte(`"id":` + strconv.FormatUint(id, 10))
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64<<10), TraceFullBytes*8)
+	scanner.Buffer(make([]byte, 0, 64<<10), traceFullScanBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		if !strings.Contains(string(line), needle) {
+		if !bytes.Contains(line, needle) {
 			continue
 		}
 		var record TraceFullRecord

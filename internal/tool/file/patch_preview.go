@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string, bool, diffStats, map[string]diffStats, error) {
+func stagedDiff(staged map[string]stagedPatchFile) (string, diffStats, map[string]diffStats, error) {
 	paths := make([]string, 0, len(staged))
 	for path := range staged {
 		paths = append(paths, path)
@@ -21,9 +21,9 @@ func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string,
 		if file.Content != nil {
 			newContent = *file.Content
 		}
-		diff, _, stats, err := unifiedDiffPreview(file.Display, oldContent, newContent, 0)
+		diff, _, stats, err := unifiedDiffPreview(file.Display, oldContent, newContent, 0, nil)
 		if err != nil {
-			return "", false, diffStats{}, nil, err
+			return "", diffStats{}, nil, err
 		}
 		byPath[file.Display] = stats
 		builder.WriteString(diff)
@@ -36,9 +36,7 @@ func stagedDiffPreview(staged map[string]stagedPatchFile, maxBytes int) (string,
 		total.Insertions += stats.Insertions
 		total.Deletions += stats.Deletions
 	}
-	text := builder.String()
-	truncated := truncateString(text, maxBytes)
-	return truncated, maxBytes > 0 && len([]byte(text)) > maxBytes, total, byPath, nil
+	return builder.String(), total, byPath, nil
 }
 
 // addAffectedFileStats 在预览截断前保留逐文件计数，move 同时包含源与目标；

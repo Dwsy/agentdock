@@ -313,7 +313,7 @@ func (svc *Service) fileEditPatchWSL(ctx context.Context, request EditRequest, s
 		if stage.NewContent != nil {
 			newContent = *stage.NewContent
 		}
-		diff, _, stats, err := unifiedDiffPreview(path, stage.OldContent, newContent, 0)
+		diff, _, stats, err := unifiedDiffPreview(path, stage.OldContent, newContent, 0, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -332,9 +332,7 @@ func (svc *Service) fileEditPatchWSL(ctx context.Context, request EditRequest, s
 		byPath[path] = stats
 	}
 	addAffectedFileStats(affected, byPath)
-	preview := diffBuilder.String()
-	previewResult := truncateString(preview, maxDiffBytes)
-	truncated := len(previewResult) < len(preview)
+	preview := editDiffPreview(diffBuilder.String(), maxDiffBytes, request.captureDiff)
 	dryRun := request.DryRun
 	if !dryRun {
 		changes := make([]map[string]any, 0, len(paths))
@@ -373,7 +371,7 @@ func (svc *Service) fileEditPatchWSL(ctx context.Context, request EditRequest, s
 	result := Result{
 		"action": "patch", "dry_run": dryRun, "workdir": workdir,
 		"affected_files": affected, "summary": strings.Join(summaries, "\n"),
-		"diff_preview": previewResult, "truncated": truncated,
+		"diff_preview": preview.Text, "truncated": preview.Truncated,
 		"files_changed": totalStats.FilesChanged, "insertions": totalStats.Insertions, "deletions": totalStats.Deletions,
 	}
 	return addFileRuntimeResult(result, selection), nil

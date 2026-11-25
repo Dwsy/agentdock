@@ -471,10 +471,14 @@ struct RuntimeTraceFullRecord: Decodable {
     let error: String?
     let command: RuntimeTraceFullCommand?
     let fullTruncated: Bool?
+    let fileDiff: String?
+    let fileDiffTruncated: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case id, arguments, result, error, command
         case fullTruncated = "full_truncated"
+        case fileDiff = "file_diff"
+        case fileDiffTruncated = "file_diff_truncated"
     }
 }
 

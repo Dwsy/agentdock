@@ -35,7 +35,7 @@ func prepareTextReplacement(path, content string, request EditRequest) (Result, 
 		updated = strings.Replace(content, oldText, newText, 1)
 	}
 	maxDiffBytes := boundedInt(intValue(request.MaxDiffBytes, 65536), 65536, 1, maxTextOutputBytes)
-	diffPreview, diffTruncated, stats, err := unifiedDiffPreview(path, content, updated, maxDiffBytes)
+	diffPreview, diffTruncated, stats, err := unifiedDiffPreview(path, content, updated, maxDiffBytes, request.captureDiff)
 	if err != nil {
 		return nil, "", err
 	}
@@ -51,7 +51,7 @@ func prepareTextReplacement(path, content string, request EditRequest) (Result, 
 
 func prepareTextAddition(path, oldContent, content string, existed bool, request EditRequest) (Result, bool, error) {
 	maxDiffBytes := boundedInt(intValue(request.MaxDiffBytes, 65536), 65536, 1, maxTextOutputBytes)
-	diffPreview, diffTruncated, stats, err := unifiedDiffPreview(path, oldContent, content, maxDiffBytes)
+	diffPreview, diffTruncated, stats, err := unifiedDiffPreview(path, oldContent, content, maxDiffBytes, request.captureDiff)
 	if err != nil {
 		return nil, false, err
 	}

@@ -88,17 +88,25 @@ func TestWSLFileEditPatchMultiFileIntegration(t *testing.T) {
 -move me
 +move changed
 *** End Patch`
-	result, err := service.Edit(context.Background(), EditRequest{
+	var diff string
+	ctx := WithEditDiffCapture(context.Background(), func(text string) { diff = text })
+	maxDiffBytes := 16
+	result, err := service.Edit(ctx, EditRequest{
 		RuntimeOptions: RuntimeOptions{Runtime: "wsl"},
 		Action:         "patch",
 		Workdir:        root,
 		Patch:          patch,
+		MaxDiffBytes:   &maxDiffBytes,
 	})
 	if err != nil {
 		t.Fatalf("multi-file WSL patch failed: %v", err)
 	}
 	if result["action"] != "patch" || result["runtime"] != "wsl" || result["dry_run"] != false {
 		t.Fatalf("unexpected patch result: %#v", result)
+	}
+	preview, _ := result["diff_preview"].(string)
+	if result["truncated"] != true || len(preview) != maxDiffBytes || !strings.HasPrefix(diff, preview) || !strings.HasSuffix(diff, "-old update\n+new update\n") {
+		t.Fatalf("WSL diff capture lost the original patch: preview=%q diff=%q", preview, diff)
 	}
 
 	for name, want := range map[string]string{

@@ -359,14 +359,20 @@ func (s *TraceStore) Status() TraceStatus {
 // Record 只保存预览：两侧各最多 TracePreviewBytes，超限立即截断并标记。
 // 任何序列化/脱敏失败都不影响真实工具调用结果。
 func (s *TraceStore) Record(record TraceRecord) uint64 {
+	return s.RecordWithFileDiff(record, "")
+}
+
+// RecordWithFileDiff records the preview and optionally stores a file diff in
+// the disk sidecar. The original diff stays outside the trace record itself.
+func (s *TraceStore) RecordWithFileDiff(record TraceRecord, fileDiff string) uint64 {
 	if s == nil {
 		return 0
 	}
 	// 全文副本必须在预览截断之前捕获；只给会被截断的记录写旁路，
 	// 小 payload 的预览本身就是全文。
 	var full *TraceFullRecord
-	if s.mode == TraceModeDisk && traceNeedsFullCopy(record) {
-		built := buildTraceFull(record)
+	if s.mode == TraceModeDisk && (fileDiff != "" || traceNeedsFullCopy(record)) {
+		built := buildTraceFull(record, fileDiff)
 		full = &built
 	}
 	record.Arguments, record.Truncated = tracePreview(record.Arguments)
@@ -419,13 +425,17 @@ func (s *TraceStore) Record(record TraceRecord) uint64 {
 		s.mu.Unlock()
 		return id
 	}
-	s.pending = append(s.pending, record)
-	if full != nil && s.pendingFullBytes < traceFullPendingBytes {
+	if full != nil {
+		size := full.payloadBytes()
+		if s.pendingFullBytes+size > traceFullPendingBytes {
+			s.flushLocked()
+		}
 		// ID 在锁内分配，全文旁路必须用同一条记录的 ID 才能按 detail 回读。
 		full.ID = record.ID
 		s.pendingFull = append(s.pendingFull, *full)
-		s.pendingFullBytes += len(full.Arguments) + len(full.Result) + len(full.Error)
+		s.pendingFullBytes += size
 	}
+	s.pending = append(s.pending, record)
 	if len(s.pending) >= s.bufferSize || s.pendingFullBytes >= traceFullPendingBytes {
 		s.flushLocked()
 	}

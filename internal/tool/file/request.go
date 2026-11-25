@@ -62,6 +62,8 @@ type EditRequest struct {
 	Workdir         string `json:"workdir,omitempty"`
 	DryRun          bool   `json:"dry_run,omitempty"`
 	MaxDiffBytes    *int   `json:"max_diff_bytes,omitempty"`
+
+	captureDiff func(string)
 }
 
 func intValue(value *int, fallback int) int {

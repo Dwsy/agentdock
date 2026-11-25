@@ -58,7 +58,7 @@ func TestRuntimePatchTraceSummaries(t *testing.T) {
 func TestRuntimePatchTraceCountsSurviveToolTruncation(t *testing.T) {
 	for name, patch := range patchTraceFixtures() {
 		t.Run(name, func(t *testing.T) {
-			rt := newTraceTestRuntime(t, config.TraceModeMemory)
+			rt := newTraceTestRuntime(t, config.TraceModeDisk)
 			root := t.TempDir()
 			for _, name := range []string{"a.txt", "b.txt"} {
 				if err := os.WriteFile(filepath.Join(root, name), []byte("old\n"), 0o600); err != nil {
@@ -66,9 +66,11 @@ func TestRuntimePatchTraceCountsSurviveToolTruncation(t *testing.T) {
 				}
 			}
 			patch = strings.Replace(patch, "+one\n", "+"+strings.Repeat("x", 70<<10)+"\n", 1)
-			result, err := rt.Call(context.Background(), "file_edit", map[string]any{
-				"action": "patch", "workdir": root, "patch": patch,
-			})
+			args := map[string]any{"action": "patch", "workdir": root, "patch": patch}
+			if name != "envelope" {
+				args["max_diff_bytes"] = 16
+			}
+			result, err := rt.Call(context.Background(), "file_edit", args)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -88,9 +90,20 @@ func TestRuntimePatchTraceCountsSurviveToolTruncation(t *testing.T) {
 				if filepath.Base(change.Path) == "a.txt" {
 					want = 2
 				}
-				if change.Insertions != want || change.Deletions != 1 {
-					t.Fatalf("%s counts = +%d/-%d, want +%d/-1", change.Path, change.Insertions, change.Deletions, want)
+				if change.Insertions != want || change.Deletions != 1 || change.Diff != "" {
+					t.Fatalf("%s summary = %#v, want +%d/-1 with no diff", change.Path, change, want)
 				}
+			}
+			detail, err := rt.RuntimeTraceDetail(records[0].ID, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			full, ok := detail["full"].(observability.TraceFullRecord)
+			if !ok || full.FileDiffTruncated || len(full.FileDiff) <= 64<<10 || !strings.HasSuffix(full.FileDiff, "-old\n+new\n") {
+				t.Fatalf("full file diff available=%v, bytes=%d, truncated=%v, last change=%v", ok, len(full.FileDiff), full.FileDiffTruncated, strings.HasSuffix(full.FileDiff, "-old\n+new\n"))
+			}
+			if name != "envelope" && full.FileDiff != patch {
+				t.Fatal("full file diff differs from the applied patch")
 			}
 		})
 	}

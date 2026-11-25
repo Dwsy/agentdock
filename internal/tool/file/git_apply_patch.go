@@ -8,7 +8,6 @@ import (
 	"time"
 
 	processcontrol "github.com/uvwt/agentdock/internal/process"
-	"github.com/uvwt/agentdock/internal/textutil"
 	workspacepkg "github.com/uvwt/agentdock/internal/workspace"
 )
 
@@ -22,10 +21,10 @@ func (svc *Service) applyPatch(ctx context.Context, request EditRequest) (Result
 		return nil, err
 	}
 	if strings.HasPrefix(strings.TrimSpace(patch), "*** Begin Patch") {
-		return svc.applyEnvelopePatch(patch, request.DryRun, workdir.Display)
+		return svc.applyEnvelopePatch(patch, request.DryRun, workdir.Display, request.captureDiff)
 	}
 	maxDiffBytes := boundedInt(intValue(request.MaxDiffBytes, 65536), 65536, 1, maxTextOutputBytes)
-	preview := textutil.SafeTruncateString(patch, maxDiffBytes)
+	preview := editDiffPreview(patch, maxDiffBytes, request.captureDiff)
 	stats := countDiffStats(patch)
 	affected := parseDiffFiles(patch)
 	cmdCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

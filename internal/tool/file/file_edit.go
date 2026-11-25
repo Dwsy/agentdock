@@ -11,7 +11,16 @@ import (
 	"unicode/utf8"
 )
 
+type editDiffCaptureKey struct{}
+
+// WithEditDiffCapture lets the runtime collect the pre-preview unified diff for
+// one invocation without adding trace-only data to the tool result.
+func WithEditDiffCapture(ctx context.Context, capture func(string)) context.Context {
+	return context.WithValue(ctx, editDiffCaptureKey{}, capture)
+}
+
 func (svc *Service) Edit(ctx context.Context, request EditRequest) (Result, error) {
+	request.captureDiff, _ = ctx.Value(editDiffCaptureKey{}).(func(string))
 	selection, err := selectFileRuntime(request.RuntimeOptions)
 	if err != nil {
 		return nil, err

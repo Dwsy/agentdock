@@ -132,6 +132,8 @@ export type Analytics = {
   started_at: string;
   /** 本快照的计算时间；与窗口起点、页面刷新时间都不同。 */
   generated_at?: string;
+  /** 本快照对应的 Core 本机自然日，和按日 Token 桶使用相同时区。 */
+  local_date?: string;
   total_calls: number;
   total_errors: number;
   window_calls: number;

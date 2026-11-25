@@ -49,6 +49,7 @@ func (r *Runtime) RuntimeAnalytics() Result {
 		"source":                     runtimeAPISource,
 		"started_at":                 snapshot.StartedAt,
 		"generated_at":               snapshot.GeneratedAt,
+		"local_date":                 snapshot.GeneratedAt.Local().Format(time.DateOnly),
 		"recent_capacity":            snapshot.RecentCapacity,
 		"window_minutes":             snapshot.WindowMinutes,
 		"window_history_minutes":     snapshot.WindowHistoryMinutes,

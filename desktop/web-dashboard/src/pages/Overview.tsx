@@ -1,4 +1,4 @@
-import { useMemo, type ElementType, type ReactNode } from 'react';
+import { useMemo, useState, type ElementType, type ReactNode } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -8,7 +8,6 @@ import {
   Boxes,
   CircleSlash,
   Clock3,
-  Database,
   Gauge,
   Info,
   ListChecks,
@@ -18,8 +17,10 @@ import {
   Wifi,
   Zap,
 } from 'lucide-react';
-import type { AlertRule, Alerts, Analytics, DailyToken, Overview as OverviewData, Status, Tasks } from '../api';
+import type { AlertRule, Alerts, Analytics, Overview as OverviewData, Status, Tasks } from '../api';
 import { Badge, EmptyState, Panel, compact, duration, bytes, fmt, relTime } from '../ui';
+import HistoryChart from '../components/HistoryChart';
+import { DEFAULT_HISTORY_SELECTION, historyBounds, historyDateLabel, localHistoryDate } from '../lib/historyStats';
 
 type Props = {
   status: Status;
@@ -33,9 +34,6 @@ type Props = {
 type Tone = 'default' | 'green' | 'amber' | 'red' | 'violet' | 'sky';
 
 const DASH = '—';
-/** 图表最多画多少个「有记录的自然日」；这是展示上限，不是统计窗口。 */
-const TOKEN_CHART_DAYS = 14;
-
 /** iOS 小组件式的彩色图标块 + 同色数值，靠色彩建立层级而非加大字号。 */
 const tileTone: Record<Tone, { icon: string; value: string }> = {
   default: { icon: 'bg-primary/10 text-primary', value: 'text-foreground' },
@@ -218,51 +216,6 @@ function ruleValue(rule: AlertRule): string {
   }
 }
 
-function ChartNotice({ text }: { text: string }) {
-  return <div className="flex h-[180px] items-center justify-center text-sm text-muted-foreground">{text}</div>;
-}
-
-export function TokenChart({ rows, state }: { rows: DailyToken[]; state: 'ok' | 'unavailable' | 'missing' }) {
-  if (state === 'unavailable') return <ChartNotice text="调用统计暂不可用" />;
-  if (state === 'missing') return <ChartNotice text="Token 日桶字段未提供" />;
-  if (rows.length === 0) return <ChartNotice text="暂无 Token 记录" />;
-  const w = 720;
-  const h = 190;
-  const pad = { l: 8, r: 8, t: 12, b: 22 };
-  const max = Math.max(1, ...rows.map((d) => d.input_tokens + d.output_tokens));
-  const step = (w - pad.l - pad.r) / Math.max(1, rows.length);
-  const bw = Math.max(4, step * 0.58);
-  return (
-    <div className="w-full overflow-hidden">
-      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height: 180 }} role="img" aria-label="每日 Token 用量">
-        {[0.25, 0.5, 0.75, 1].map((p) => (
-          <line key={p} x1={pad.l} x2={w - pad.r} y1={pad.t + (h - pad.t - pad.b) * (1 - p)} y2={pad.t + (h - pad.t - pad.b) * (1 - p)} className="stroke-border" strokeWidth={1} strokeDasharray="3 4" opacity={0.6} />
-        ))}
-        {rows.map((d, i) => {
-          const total = d.input_tokens + d.output_tokens;
-          const bh = ((h - pad.t - pad.b) * total) / max;
-          const oh = ((h - pad.t - pad.b) * d.output_tokens) / max;
-          const ih = bh - oh;
-          const x = pad.l + i * step + (step - bw) / 2;
-          const y = h - pad.b - bh;
-          return (
-            <g key={d.date}>
-              <title>{`${d.date}\n输入 ${fmt.format(d.input_tokens)} · 输出 ${fmt.format(d.output_tokens)}`}</title>
-              <rect x={x} y={y} width={bw} height={ih} rx={2} className="fill-chart-4" opacity={0.85} />
-              <rect x={x} y={y + ih} width={bw} height={oh} rx={2} className="fill-chart-1" opacity={0.9} />
-              {i % 2 === 0 && <text x={x + bw / 2} y={h - 6} textAnchor="middle" className="fill-muted-foreground" fontSize={10}>{d.date.slice(5)}</text>}
-            </g>
-          );
-        })}
-      </svg>
-      <div className="mt-1 flex gap-5 text-[11px] text-muted-foreground">
-        <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-sm bg-chart-1" /> 输出 Token</span>
-        <span className="flex items-center gap-1.5"><i className="inline-block h-2 w-2 rounded-sm bg-chart-4" /> 输入 Token</span>
-      </div>
-    </div>
-  );
-}
-
 export function ToolBars({
   stats,
   state,
@@ -375,23 +328,16 @@ export default function Overview({ status, overview, analytics, alerts, tasks, o
       ? '任务列表字段未提供'
       : `${countText(loadedTaskCount)} 条已载入${isNumber(tasks.limit) && loadedTaskCount === tasks.limit ? ' · 已达单次载入上限' : ''}`;
 
-  const dailyTokens = Array.isArray(analytics.daily_tokens) ? analytics.daily_tokens : undefined;
-  const tokenRows = useMemo(
-    () => (dailyTokens ? [...dailyTokens].reverse().slice(-TOKEN_CHART_DAYS) : []),
-    [dailyTokens],
-  );
-  const tokenState: 'ok' | 'unavailable' | 'missing' = !analyticsAvailable
-    ? 'unavailable'
-    : dailyTokens
-      ? 'ok'
-      : 'missing';
+  const [tokenSelection, setTokenSelection] = useState(DEFAULT_HISTORY_SELECTION);
+  const dailyTokens = analyticsAvailable && Array.isArray(analytics.daily_tokens) ? analytics.daily_tokens : undefined;
+  const tokenPoints = useMemo(() => (dailyTokens ?? [])
+    .filter(({ date }) => /^\d{4}-\d{2}-\d{2}$/.test(date) && Number.isFinite(Date.parse(date)))
+    .map((day) => ({ date: day.date, first: day.input_tokens, second: day.output_tokens, count: 1 })), [dailyTokens]);
+  const tokenDates = useMemo(() => tokenPoints.map(({ date }) => date), [tokenPoints]);
+  const today = analytics.local_date || localHistoryDate();
+  const tokenBounds = useMemo(() => historyBounds(tokenSelection.range, today, tokenDates), [tokenSelection.range, today, tokenDates]);
+  const tokenCoverage = useMemo(() => historyBounds('all', today, tokenDates), [today, tokenDates]);
   const retentionDays = analytics.daily_token_retention_days;
-  const tokenDateRange = tokenRows.length > 1
-    ? `${tokenRows[0].date} 至 ${tokenRows[tokenRows.length - 1].date}`
-    : tokenRows[0]?.date;
-  const tokenHint = tokenDateRange
-    ? `${tokenDateRange} · ${tokenRows.length} 个有记录日 · Core 本机时区${isNumber(retentionDays) ? ` · 保留 ${retentionDays} 天` : ''}`
-    : undefined;
 
   const toolStats = Array.isArray(analytics.tool_stats) ? analytics.tool_stats : undefined;
   const toolState: 'ok' | 'unavailable' | 'missing' = !analyticsAvailable
@@ -500,7 +446,7 @@ export default function Overview({ status, overview, analytics, alerts, tasks, o
         />
         <MetricTile
           icon={Zap}
-          label="输出 Token"
+          label="累计输出 Token"
           value={outputTokens}
           sub={tokenSub}
           tone="violet"
@@ -519,9 +465,11 @@ export default function Overview({ status, overview, analytics, alerts, tasks, o
       {/* 图表 + 排行：主次 8:4，紧凑内边距 */}
       <div className="grid gap-3 lg:grid-cols-12">
         <Panel className="p-4 lg:col-span-8">
-          <WidgetTitle icon={Database} title="每日 Token 用量" />
-          {tokenState === 'ok' && tokenHint && <p className="mb-2 text-xs text-muted-foreground">{tokenHint}</p>}
-          <TokenChart rows={tokenRows} state={tokenState} />
+          <HistoryChart title="Token 用量" points={tokenPoints} bounds={tokenBounds}
+            selection={tokenSelection} onSelection={setTokenSelection}
+            series={[{ label: '输入 Token', color: 'bg-indigo-500' }, { label: '输出 Token', color: 'bg-sky-500' }]}
+            note={tokenCoverage && `Core 自然日记录 ${historyDateLabel(tokenCoverage)} · 估算 Token${analytics.local_date || tokenSelection.range === 'all' ? '' : ' · 快捷范围按浏览器日期'}`}
+            empty={!analyticsAvailable ? "调用统计暂不可用" : !dailyTokens ? "当前 Core 未返回按日数据" : "该时段没有 Token 日记录"} />
         </Panel>
         <Panel className="p-4 lg:col-span-4">
           <WidgetTitle
@@ -546,7 +494,7 @@ export default function Overview({ status, overview, analytics, alerts, tasks, o
 
       {/* 任务 + 告警：7:5 */}
       <div className="grid gap-3 lg:grid-cols-12">
-        <Panel className="p-4 lg:col-span-7">
+        <Panel className="min-w-0 p-4 lg:col-span-7">
           <WidgetTitle
             icon={ScrollText}
             title="最近任务"

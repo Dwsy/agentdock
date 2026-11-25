@@ -3,7 +3,6 @@ import { Upload, X } from 'lucide-react';
 import { loadWallpaper, parseWallpaperURL, readWallpaper, writeWallpaper, type LoadedWallpaper, type Wallpaper } from '../lib/wallpaper';
 
 const ENABLED_KEY = 'agentdock-dashboard-background';
-const DEFAULT_WALLPAPER = `${import.meta.env.BASE_URL}wallpapers/alpine-lake.webp`;
 const secondaryButton = 'glass-control rounded-lg px-3 py-2 text-sm font-medium disabled:opacity-50';
 
 function readEnabled() {
@@ -16,7 +15,6 @@ function readEnabled() {
 
 export default function DashboardBackground({ dialogRef }: { dialogRef: RefObject<HTMLDialogElement | null> }) {
   const [enabled, setEnabled] = useState(readEnabled);
-  const [defaultLoaded, setDefaultLoaded] = useState(false);
   const [url, setURL] = useState('');
   const [pending, setPending] = useState('正在读取背景设置…');
   const [error, setError] = useState('');
@@ -118,14 +116,6 @@ export default function DashboardBackground({ dialogRef }: { dialogRef: RefObjec
   return (
     <>
       <div className="dashboard-wallpaper" aria-hidden="true">
-        <img
-          src={DEFAULT_WALLPAPER}
-          alt=""
-          referrerPolicy="no-referrer"
-          hidden={!defaultLoaded}
-          onLoad={() => setDefaultLoaded(true)}
-          onError={() => setDefaultLoaded(false)}
-        />
         <div ref={wallpaperRef} className="dashboard-wallpaper-image" />
       </div>
       <dialog

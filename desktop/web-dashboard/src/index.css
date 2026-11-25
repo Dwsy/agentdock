@@ -15,29 +15,29 @@ body {
   isolation: isolate;
 }
 
-/* Stronger foregrounds and denser reading surfaces over the wallpaper. */
+/* Shared surfaces for the dashboard and its glass panels. */
 :root {
-  --background: #e9eef5;
-  --foreground: #172438;
-  --muted-foreground: #46566b;
-  --panel: #f8fafc;
+  --background: #f0f0f0;
+  --foreground: #202020;
+  --muted-foreground: #505050;
+  --panel: #fafafa;
   --card: #fff;
   --card-foreground: var(--foreground);
-  --popover: #fcfdff;
+  --popover: #fff;
   --popover-foreground: var(--foreground);
-  --input: #899aac;
-  --ring: #28578b;
-  --code-surface: #f2f6fa;
-  --glass-state: #e0ebf8;
-  --glass-state-edge: #91aaca;
-  --chrome-solid: #f4f8fc;
+  --input: #929292;
+  --ring: #5e5e5e;
+  --code-surface: #f4f4f4;
+  --glass-state: #e6e6e6;
+  --glass-state-edge: #ababab;
+  --chrome-solid: var(--panel);
   --chrome-strength: 72%;
   --chrome-blur: blur(18px) saturate(135%);
   --chrome-rim: #ffffffdd;
   --chrome-inner: #ffffff48;
-  --chrome-shade: #132a493d;
-  --wallpaper-fallback: radial-gradient(ellipse at 12% 85%, #799d9e 0%, transparent 58%),
-    linear-gradient(155deg, #c8dcea, #a5bed7 56%, #d8e4e9);
+  --chrome-shade: #00000029;
+  --dialog-backdrop: #0009;
+  --wallpaper-fallback: var(--background);
   --success: #126044;
   --destructive: #921f35;
   --status-interrupted: #754605;
@@ -45,7 +45,7 @@ body {
   --syntax-string: #116344;
   --syntax-number: #943d0c;
   --syntax-title: #255891;
-  --syntax-comment: #566578;
+  --syntax-comment: #595959;
   --syntax-variable: #663698;
   --syntax-property: #145478;
 }
@@ -70,6 +70,7 @@ body {
   --chrome-rim: #e1efff56;
   --chrome-inner: #bdd7f526;
   --chrome-shade: #0009;
+  --dialog-backdrop: #0f192a99;
   --wallpaper-fallback: radial-gradient(ellipse at 10% 90%, #254f55 0%, transparent 60%),
     linear-gradient(150deg, #182434, #283d56 57%, #101925);
   --success: #83e5bd;
@@ -85,7 +86,7 @@ body {
 }
 
 :root:not(.dark) :is(.app-sidebar, .app-topbar) {
-  --muted-foreground: #314154;
+  --muted-foreground: #3f3f3f;
   --success: #084934;
   --status-interrupted: #5e3401;
 }
@@ -115,6 +116,14 @@ body {
   object-fit: cover;
 }
 
+.dark .dashboard-wallpaper::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: center / cover no-repeat url("/wallpapers/alpine-lake.webp");
+}
+
+.dark .dashboard-wallpaper::before,
 .dark .dashboard-wallpaper img {
   filter: brightness(0.65);
 }
@@ -169,7 +178,7 @@ pre:has(> code) {
 }
 
 .background-dialog::backdrop {
-  background: #0f192a99;
+  background: var(--dialog-backdrop);
 }
 
 .background-dialog :is(input, button):focus-visible,
@@ -240,14 +249,13 @@ html:has(.background-dialog[open]) {
 
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root:not([data-wallpaper-off]) {
-    --workspace-tint: #eef4f9;
+    --workspace-tint: var(--panel);
     --workspace-strength: 74%;
     --workspace-detail-strength: 24%;
     --workspace-blur: blur(22px) saturate(125%);
   }
 
   :root.dark:not([data-wallpaper-off]) {
-    --workspace-tint: #1b2430;
     --workspace-strength: 78%;
   }
 
@@ -336,7 +344,7 @@ html:has(.background-dialog[open]) {
 }
 
 :root:not(.dark) .app-main main {
-  --muted-foreground: #334357;
+  --muted-foreground: #424242;
   --success: #084934;
 }
 

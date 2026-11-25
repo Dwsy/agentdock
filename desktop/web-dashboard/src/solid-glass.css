@@ -101,29 +101,29 @@
   /* What a control is rounded by: a step down from a pane. */
   --radius-control: 0.7rem;
 
-  /* The page is opaque, a cool grey deep enough for a pane to stand out on;
+  /* The page is opaque, a neutral grey deep enough for a pane to stand out on;
      the panes on it are smoked white glass, not paper. */
-  --background: oklch(0.925 0.007 265);
+  --background: oklch(0.925 0 0);
   --foreground: oklch(0.16 0 0);
 
   /* Thickness: panel < card < popover. */
-  --panel: oklch(0.975 0.004 265 / 44%);
-  --card: oklch(0.98 0.004 265 / 60%);
+  --panel: oklch(0.975 0 0 / 44%);
+  --card: oklch(0.98 0 0 / 60%);
   --card-foreground: oklch(0.16 0 0);
-  --popover: oklch(0.985 0.003 265 / 96%);
+  --popover: oklch(0.985 0 0 / 96%);
   --popover-foreground: oklch(0.16 0 0);
 
   --primary: oklch(0.2 0 0);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.3 0.02 265 / 9%);
+  --secondary: oklch(0.3 0 0 / 9%);
   --secondary-foreground: oklch(0.2 0 0);
-  --muted: oklch(0.3 0.02 265 / 7%);
+  --muted: oklch(0.3 0 0 / 7%);
   --muted-foreground: oklch(0.47 0 0);
-  --accent: oklch(0.3 0.02 265 / 9%);
+  --accent: oklch(0.3 0 0 / 9%);
   --accent-foreground: oklch(0.2 0 0);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.3 0.02 265 / 13%);
-  --input: oklch(0.3 0.02 265 / 15%);
+  --border: oklch(0.3 0 0 / 13%);
+  --input: oklch(0.3 0 0 / 15%);
   --ring: oklch(0.7 0 0);
 
   /* The finish. Rim: the line of light on a pane's top edge. Inner: a faint
@@ -131,28 +131,28 @@
      shadow underneath. */
   --glass-rim: oklch(1 0 0 / 90%);
   --glass-inner: oklch(1 0 0 / 35%);
-  --glass-edge: oklch(0.38 0.03 265 / 10%);
+  --glass-edge: oklch(0.38 0 0 / 10%);
   /* The thickest pane, nearly white on a pale page, would lose its edge in
      the light: it keeps it by a firmer hairline and a shade along its foot. */
-  --popover-edge: oklch(0.38 0.03 265 / 22%);
-  --popover-under: oklch(0.38 0.03 265 / 16%);
-  --glass-shade: oklch(0.3 0.06 265 / 28%);
-  --glass-contact: oklch(0.25 0.03 265 / 6%);
-  --glass-lift: oklch(0.25 0.03 265 / 14%);
+  --popover-edge: oklch(0.38 0 0 / 22%);
+  --popover-under: oklch(0.38 0 0 / 16%);
+  --glass-shade: oklch(0.3 0 0 / 28%);
+  --glass-contact: oklch(0.25 0 0 / 6%);
+  --glass-lift: oklch(0.25 0 0 / 14%);
   /* Clear glass, for small things and for the one state. */
   --glass-control: oklch(1 0 0 / 55%);
   --glass-control-rim: oklch(1 0 0 / 80%);
   /* The one state. On white panes a pane of clear glass would be white on
      white, so here it is the smoked kind: a grey tint, still lit along its
      top edge, with a hairline dark enough to find. */
-  --glass-state: oklch(0.3 0.02 265 / 9%);
+  --glass-state: oklch(0.3 0 0 / 9%);
   --glass-state-rim: oklch(1 0 0 / 85%);
-  --glass-state-edge: oklch(0.3 0.02 265 / 13%);
-  --glass-state-armed: oklch(0.3 0.02 265 / 26%);
+  --glass-state-edge: oklch(0.3 0 0 / 13%);
+  --glass-state-armed: oklch(0.3 0 0 / 26%);
   /* Under the pointer. The greys shadcn/ui hovers with are tuned for a dark
      page, where 7% of white shows; on white panes the same step vanishes. */
-  --hover: oklch(0.3 0.02 265 / 10%);
-  --hover-faint: oklch(0.3 0.02 265 / 5.5%);
+  --hover: oklch(0.3 0 0 / 10%);
+  --hover-faint: oklch(0.3 0 0 / 5.5%);
   /* The primary button is a solid pane the colour of the ink: lit along its
      top edge, shaded along its bottom one, a hairline round it. */
   --primary-solid: 88%;
@@ -164,30 +164,29 @@
      light along its top edge. */
   --field: oklch(1 0 0 / 60%);
   --field-rim: oklch(1 0 0);
-  --field-edge: oklch(0.3 0.02 265 / 14%);
+  --field-edge: oklch(0.3 0 0 / 14%);
   /* A track a knob runs in is a groove: shaded under its upper lip, lit along
      its lower one. */
-  --well-shade: oklch(0.3 0.06 265 / 14%);
+  --well-shade: oklch(0.3 0 0 / 14%);
   --well-rim: oklch(1 0 0 / 85%);
   /* The line a field is drawn in while it is being typed into. */
   --focus-line: oklch(0.2 0 0 / 50%);
   /* A knob — a switch's thumb, a slider's — is the brightest pane there is. */
   --knob: oklch(1 0 0);
-  --knob-shade: oklch(0.3 0.06 265 / 30%);
+  --knob-shade: oklch(0.3 0 0 / 30%);
   /* A mark in a chart is a pane standing on its edge. */
   --mark-solid: 84%;
   --mark-rim: oklch(1 0 0);
-  --mark-edge: oklch(0.3 0.02 265 / 22%);
+  --mark-edge: oklch(0.3 0 0 / 22%);
   /* The same hairline where it is a stroke in a chart: half of a stroke falls outside the shape. */
-  --mark-line: oklch(0.3 0.02 265 / 30%);
+  --mark-line: oklch(0.3 0 0 / 30%);
   --glass-blur: blur(26px) saturate(180%);
   --glass-blur-control: blur(14px);
 
-  /* Three sources of light under the glass, kept faint enough that the page
-     still reads as one even surface. Dark has none. */
-  --light-1: oklch(0.68 0.13 165 / 7%);
-  --light-2: oklch(0.75 0.08 240 / 11%);
-  --light-3: oklch(0.68 0.13 165 / 4%);
+  /* Subtle neutral shading under the glass when the page has no wallpaper. */
+  --light-1: oklch(1 0 0 / 7%);
+  --light-2: oklch(1 0 0 / 11%);
+  --light-3: oklch(1 0 0 / 4%);
 
   --brand: oklch(0.68 0.13 165);
   --brand-foreground: oklch(0.99 0 0);
@@ -216,13 +215,13 @@
   --chart-4: oklch(0.35 0 0);
   --chart-5: oklch(0.27 0 0);
 
-  --sidebar: oklch(0.975 0.004 265 / 44%);
+  --sidebar: oklch(0.975 0 0 / 44%);
   --sidebar-foreground: oklch(0.25 0 0);
   --sidebar-primary: oklch(0.2 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.3 0.02 265 / 9%);
+  --sidebar-accent: oklch(0.3 0 0 / 9%);
   --sidebar-accent-foreground: oklch(0.16 0 0);
-  --sidebar-border: oklch(0.3 0.02 265 / 12%);
+  --sidebar-border: oklch(0.3 0 0 / 12%);
   --sidebar-ring: oklch(0.7 0 0);
 }
 

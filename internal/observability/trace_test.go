@@ -208,6 +208,32 @@ func TestTraceStoreOffReturnsNil(t *testing.T) {
 
 // summary 视图必须把 FileChanges 的 Diff 当正文清掉：列表页只用得上路径与
 // 增删计数，保留 diff 会让 100 条 file_edit 记录多传数百 KB。
+func TestFileChangeSummariesLeaveDiffsForDetail(t *testing.T) {
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	changes := make([]FileChange, 10000)
+	for i := range changes {
+		changes[i] = FileChange{Path: "a.go", Action: "edit", Insertions: 3, Deletions: 2, Diff: "+private detail"}
+	}
+	store.Record(TraceRecord{Tool: "file_edit", StartedAt: time.Now(), FileChanges: changes})
+	got, more := store.FileChangeSummaries("")
+	if len(got) != 10000 || more || got[0].Insertions != 3 || got[0].Deletions != 2 || got[0].Diff != "" {
+		t.Fatalf("summary count=%d, hasMore=%t, first=%#v", len(got), more, got[0])
+	}
+	store.Record(TraceRecord{Tool: "file_edit", StartedAt: time.Now(), FileChanges: []FileChange{{Path: "b.go"}}})
+	got, more = store.FileChangeSummaries("")
+	if len(got) != 10000 || !more || got[0].Path != "b.go" {
+		t.Fatalf("over-cap summary count=%d, hasMore=%t, first=%#v", len(got), more, got[0])
+	}
+	legacy := store.FileChanges("a.go", 10000)
+	if len(legacy) != traceQueryLimit || legacy[0].Diff != "+private detail" {
+		t.Fatalf("legacy count=%d, first=%#v", len(legacy), legacy[0])
+	}
+}
+
 func TestTraceStoreSummaryDropsFileChangeDiff(t *testing.T) {
 	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})
 	if err != nil {

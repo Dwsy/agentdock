@@ -127,7 +127,7 @@ const FETCHERS: { [K in SnapshotKey]: () => Promise<Snapshot[K]> } = {
   analytics: () => api.analytics(),
   alerts: () => api.alerts(),
   tasks: () => api.tasks(TASK_LIMIT),
-  fileChanges: () => api.fileChanges(80),
+  fileChanges: () => api.fileChanges(),
   artifacts: () => api.artifacts(),
   skills: () => api.skills(),
   plugins: () => api.plugins(),

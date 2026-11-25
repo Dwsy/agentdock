@@ -81,6 +81,11 @@ type FileChangeRuntime interface {
 	RuntimeFileChanges(query string, limit int) (app.Result, error)
 }
 
+// FileChangeSummaryRuntime is the optional file-change metadata view for the Web dashboard.
+type FileChangeSummaryRuntime interface {
+	RuntimeFileChangeSummaries(query string) (app.Result, error)
+}
+
 // CaptureSource 是网络抓包环的持有者。采集器（HTTP 中间件、Nexus 桥接）与
 // 查询 API 必须共用同一实例，否则面板看到的不是自己抓到的流量。
 type CaptureSource interface {

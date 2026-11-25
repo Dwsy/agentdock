@@ -67,7 +67,9 @@
 
 `exec_command`、`session_observe`、`session_act` 额外写入结构化的 `command` 字段（命令、cwd、运行时、超时、stdout/stderr、退出码）。所有正文在写入保留窗口前统一截断：通用 `arguments`/`result` 与命令/stdout/stderr 均为单侧 8 KiB，超过时追加 `…(truncated)` 并置位 `truncated`（结构化字段另有 `*_preview_truncated`）。脱敏正则只扫描保留窗口两倍的文本，避免 MB 级命令输出把工具返回路径拖慢到几十毫秒。
 
-`file_edit` 的 patch 结果在 `affected_files[]` 内提供逐文件 `insertions`/`deletions`，在预览截断前计算；move 合并源文件和目标文件的计数。追踪层统一读取进程内与 JSON 传输后的文件列表，优先采用这些计数；旧结果缺少计数时才按 diff 分节回退。macOS 列表与详情使用相同的调用合计。此修复对新记录生效，已丢失文件摘要的旧记录不会自动补写。
+`file_edit` 在预览截断前计算增删行数，批量 patch 在 `affected_files[]` 内提供逐文件计数，move 合并源和目标。追踪摘要保留这些计数，Web 调用列表按条汇总。旧记录缺少计数时，已保存的计数可能只覆盖可见分节。
+
+磁盘追踪从原始编辑调用保留统一格式的 diff。预览被截断时，`?full=1` 可返回脱敏后的 `full.file_diff`，超过 256 KiB 时带 `full.file_diff_truncated`。Web 调用详情与文件变更详情会自动请求该副本，并按选中文件展示分节。内存模式与没有可恢复全文的旧记录继续显示可用片段。
 
 ## 动态 MCP 连接与授权
 

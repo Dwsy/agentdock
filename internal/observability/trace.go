@@ -971,19 +971,28 @@ func (s *TraceStore) TaskRecords(taskID string) []TraceRecord {
 // FileChanges 返回当前保留窗口内的文件变更条目（新到旧）。
 // 过滤基于路径子串，大小写不敏感；limit<=0 使用默认值。
 func (s *TraceStore) FileChanges(query string, limit int) []FileChangeEntry {
+	return s.fileChanges(query, traceQueryLimitOf(limit), false)
+}
+
+// FileChangeSummaries 返回文件变更的计数与路径，供 Web 汇总使用。多读取一条
+// 区分恰好到达上限与确实还有历史，避免把样本误报为全部。
+func (s *TraceStore) FileChangeSummaries(query string) ([]FileChangeEntry, bool) {
+	const limit = 10000
+	changes := s.fileChanges(query, limit+1, true)
+	if len(changes) > limit {
+		return changes[:limit], true
+	}
+	return changes, false
+}
+
+func (s *TraceStore) fileChanges(query string, limit int, summary bool) []FileChangeEntry {
 	if s == nil {
 		return nil
-	}
-	if limit <= 0 {
-		limit = traceDefaultLimit
-	}
-	if limit > traceQueryLimit {
-		limit = traceQueryLimit
 	}
 	needle := strings.ToLower(strings.TrimSpace(query))
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]FileChangeEntry, 0, limit)
+	out := make([]FileChangeEntry, 0, min(limit, len(s.records)))
 	for i := len(s.records) - 1; i >= 0; i-- {
 		record := s.records[i]
 		for j := len(record.FileChanges) - 1; j >= 0; j-- {
@@ -997,13 +1006,17 @@ func (s *TraceStore) FileChanges(query string, limit int) []FileChangeEntry {
 					continue
 				}
 			}
+			diff := change.Diff
+			if summary {
+				diff = ""
+			}
 			out = append(out, FileChangeEntry{
 				ID: record.ID, TraceID: record.TraceID, Tool: record.Tool, Source: record.Source,
 				StartedAt: record.StartedAt, Success: record.Success,
 				Path: change.Path, Action: change.Action,
 				MoveTo: change.MoveTo, ProjectRoot: change.ProjectRoot,
 				Insertions: change.Insertions, Deletions: change.Deletions,
-				Diff: change.Diff, Truncated: change.Truncated,
+				Diff: diff, Truncated: change.Truncated,
 			})
 			if len(out) >= limit {
 				return out

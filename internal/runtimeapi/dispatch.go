@@ -473,6 +473,12 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 		result, err := manage.RuntimeArtifactRevoke(artifactID)
 		return map[string]any(result), err
 	case path == "/internal/runtime/file-changes":
+		if strings.EqualFold(strings.TrimSpace(request.queryValue("view")), "summary") {
+			if reader, ok := runtime.(FileChangeSummaryRuntime); ok {
+				result, err := reader.RuntimeFileChangeSummaries(request.queryValue("q"))
+				return map[string]any(result), err
+			}
+		}
 		fileChanges, ok := runtime.(FileChangeRuntime)
 		if !ok {
 			return nil, &app.ToolError{

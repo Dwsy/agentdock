@@ -107,18 +107,33 @@ func (r *Runtime) RuntimeTraceImage(id uint64) (Result, error) {
 // RuntimeFileChanges 返回 trace 窗口内的文件创建/编辑历史。
 // trace 关闭时返回空集合并标记 mode=off，让 UI 区分“没开历史”和“没有变更”。
 func (r *Runtime) RuntimeFileChanges(query string, limit int) (Result, error) {
+	return r.runtimeFileChanges(query, limit, false), nil
+}
+
+// RuntimeFileChangeSummaries returns file-change metadata without diff previews.
+func (r *Runtime) RuntimeFileChangeSummaries(query string) (Result, error) {
+	return r.runtimeFileChanges(query, 0, true), nil
+}
+
+func (r *Runtime) runtimeFileChanges(query string, limit int, summary bool) Result {
+	changes := []observability.FileChangeEntry{}
+	result := Result{"ok": true, "source": runtimeAPISource}
 	if r.traces == nil {
-		return Result{
-			"ok": true, "source": runtimeAPISource, "mode": string(observability.TraceModeOff),
-			"changes": []observability.FileChangeEntry{}, "count": 0,
-		}, nil
+		result["mode"] = string(observability.TraceModeOff)
+	} else {
+		result["status"] = r.traces.Status()
 	}
-	changes := r.traces.FileChanges(query, limit)
-	return Result{
-		"ok":      true,
-		"source":  runtimeAPISource,
-		"status":  r.traces.Status(),
-		"changes": changes,
-		"count":   len(changes),
-	}, nil
+	if summary {
+		hasMore := false
+		if r.traces != nil {
+			changes, hasMore = r.traces.FileChangeSummaries(query)
+		}
+		result["view"] = "summary"
+		result["has_more"] = hasMore
+	} else if r.traces != nil {
+		changes = r.traces.FileChanges(query, limit)
+	}
+	result["changes"] = changes
+	result["count"] = len(changes)
+	return result
 }

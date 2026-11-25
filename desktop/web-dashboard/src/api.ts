@@ -400,7 +400,16 @@ export type FileChange = {
   truncated?: boolean;
 };
 
-export type FileChanges = { ok: boolean; source: string; count: number; status: string; changes: FileChange[] };
+export type FileChanges = {
+  ok: boolean;
+  source: string;
+  count: number;
+  status?: TraceStatus | string;
+  mode?: string;
+  view?: 'summary';
+  has_more?: boolean;
+  changes: FileChange[];
+};
 
 export type ArtifactItem = {
   artifact_id: string;
@@ -708,7 +717,7 @@ export const api = {
   },
   traceDetail: (id: number, full = false, signal?: AbortSignal) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`, signal),
   traceImage: (id: number) => get<TraceImage>(`/traces/image?id=${id}`),
-  fileChanges: (limit = 50) => get<FileChanges>(`/file-changes?limit=${limit}`),
+  fileChanges: () => get<FileChanges>('/file-changes?view=summary'),
   artifacts: () => get<Artifacts>('/artifacts'),
   artifactPublish: (payload: ArtifactPublishPayload) => post<ArtifactMutationResult>('/artifacts', payload),
   artifactExtend: (id: string, hours: number) => post<ArtifactMutationResult>(`/artifacts/${encodeURIComponent(id)}/extend`, { hours }),

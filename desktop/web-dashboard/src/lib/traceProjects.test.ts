@@ -47,6 +47,20 @@ test('没有路径信号的调用落未分类并排最后', () => {
   assert.equal(groups[1].count, 2);
 });
 
+test('Web 摘要按 ID 给多种工具分组，缺少路径的图片仍未分类', () => {
+  const records = [
+    rec({ id: 1, tool: 'view_image' }),
+    rec({ id: 2, tool: 'read_file' }),
+    rec({ id: 3, tool: 'list_dir' }),
+    rec({ id: 4, tool: 'view_image' }),
+    rec({ id: 5, command: { workdir: '/w/repo/sub' } }),
+  ];
+  const groups = groupTracesByProject(records, { 1: '/w/repo/', 2: '/w/repo', 3: '/w/repo-extra', 5: '/w/repo' });
+  assert.deepEqual(groups.map(({ full, records }) => [full, records.map(({ id }) => id)]), [
+    ['/w/repo', [1, 2, 5]], ['/w/repo-extra', [3]], ['', [4]],
+  ]);
+});
+
 test('同一路径归一组并统计次数、失败数、平均耗时', () => {
   const groups = groupTracesByProject([
     rec({ id: 1, command: { workdir: '/w/proj' }, duration_ms: 100 }),
@@ -56,6 +70,18 @@ test('同一路径归一组并统计次数、失败数、平均耗时', () => {
   assert.equal(groups[0].count, 2);
   assert.equal(groups[0].errors, 1);
   assert.equal(groups[0].avgMs, 200);
+});
+
+test('项目失败数计入命令失败和超时，排除运行中的命令', () => {
+  const records = [
+    rec({ id: 1, command: { command_ok: false } }),
+    rec({ id: 2, command: { timed_out: true } }),
+    rec({ id: 3, command: { status: 'running' } }),
+    rec({ id: 4, command: { status: 'running', exit_code: 0 } }),
+  ];
+  const [group] = groupTracesByProject(records, { 1: '/w/proj', 2: '/w/proj', 3: '/w/proj', 4: '/w/proj' });
+  assert.equal(group.count, 4);
+  assert.equal(group.errors, 2);
 });
 
 test('同名路径用多段后缀区分，不同名保持末段', () => {

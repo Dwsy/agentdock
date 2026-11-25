@@ -452,12 +452,12 @@ func TestDispatchCatalogAndTraces(t *testing.T) {
 		_, err := Dispatch(context.Background(), stub, Request{
 			Method: "GET",
 			Path:   "/internal/runtime/traces",
-			Query:  url.Values{"before_id": {"42"}, "limit": {"25"}, "view": {"summary"}},
+			Query:  url.Values{"before_id": {"42"}, "limit": {"25"}, "view": {"summary"}, "projects": {"1"}},
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !stub.traceQuery.Cursor || stub.traceQuery.BeforeID != 42 || !stub.traceQuery.Summary || stub.traceQuery.Limit != 25 {
+		if !stub.traceQuery.Cursor || stub.traceQuery.BeforeID != 42 || !stub.traceQuery.Summary || !stub.traceQuery.Projects || stub.traceQuery.Limit != 25 {
 			t.Fatalf("trace args = %#v", stub.traceQuery)
 		}
 	})

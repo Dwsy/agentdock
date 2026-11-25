@@ -416,8 +416,10 @@ func Dispatch(ctx context.Context, runtime Runtime, request Request) (map[string
 			Tool:     request.queryValue("tool"),
 			Source:   request.queryValue("source"),
 			Status:   request.queryValue("status"),
+			Outcome:  request.queryValue("outcome"),
 			Limit:    limit,
 			Summary:  summary,
+			Projects: summary && request.queryValue("projects") == "1",
 			Cursor:   cursor,
 			BeforeID: beforeID,
 		})

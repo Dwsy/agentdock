@@ -61,10 +61,9 @@ type DiffViewerProps = {
   filePath?: string;
   /** move 的目标路径：只有源分节时也能把目标分节一起并入预览。 */
   moveTo?: string;
-  /** 后端按完整 diff 统计的逐文件增删数；与可见片段计数分开展示。 */
+  /** 记录保存的逐文件计数，在只能看到片段时作为参考。 */
   insertions?: number;
   deletions?: number;
-  /** 调用级截断标记：同一次调用的所有文件共享同一个 diff 预览上限。 */
   truncated?: boolean;
 };
 
@@ -94,10 +93,10 @@ export default function DiffViewer({ diff, filePath, moveTo, insertions, deletio
 
   if (lines.length === 0) {
     const hint = !diff.trim()
-      ? '暂无此文件的 diff 预览'
+      ? '暂无此文件的 diff'
       : filePath && !matched
-        ? truncated ? 'diff 预览已截断，未包含该文件的分节' : '未能从 diff 预览中定位该文件的分节'
-        : '该文件在预览中没有可显示的行';
+        ? truncated ? '已取得的 diff 片段没有这个文件的分节' : '未能从 diff 中定位该文件的分节'
+        : '该文件在 diff 中没有可显示的行';
     return <div className="px-2 py-3 text-[11px] text-muted-foreground" title={filePath}>{hint}</div>;
   }
 
@@ -118,12 +117,12 @@ export default function DiffViewer({ diff, filePath, moveTo, insertions, deletio
   return (
     <div>
       <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="text-[11px] text-muted-foreground" title="当前可见 diff 片段的增删行">
-          可见 <span className="text-emerald-500">+{visibleAdds}</span> <span className="text-red-500">-{visibleDels}</span>
+        <span className="tabular text-[11px] text-muted-foreground">
+          {truncated ? '片段' : '增删'} <span className="text-emerald-500">+{visibleAdds}</span> <span className="text-red-500">−{visibleDels}</span>
         </span>
-        {hasTotals && (
-          <span className="text-[11px] text-muted-foreground" title="后端按完整 diff 统计的该文件增删行">
-            全部 <span className="text-emerald-500">+{insertions ?? 0}</span> <span className="text-red-500">-{deletions ?? 0}</span>
+        {truncated && hasTotals && (
+          <span className="tabular text-[11px] text-muted-foreground" title="此记录保存的增删行数">
+            记录 <span className="text-emerald-500">+{insertions ?? 0}</span> <span className="text-red-500">−{deletions ?? 0}</span>
           </span>
         )}
         <div className="ml-auto flex gap-1">
@@ -139,11 +138,7 @@ export default function DiffViewer({ diff, filePath, moveTo, insertions, deletio
         </div>
       </div>
 
-      {truncated && (
-        <div className="mb-2 text-[10px] leading-relaxed text-amber-500">
-          本次调用的 diff 预览已截断，下方只是可见片段；旧记录的全部计数可能只统计到可见部分。
-        </div>
-      )}
+      {truncated && <p className="mb-2 text-[11px] text-amber-500">当前只取得部分 diff。</p>}
 
       <div className="code-surface scrollbar-thin max-h-[520px] overflow-auto rounded-lg border border-border/60">
         {mode === 'unified' ? (

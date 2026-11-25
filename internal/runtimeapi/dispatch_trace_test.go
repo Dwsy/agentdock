@@ -196,12 +196,12 @@ func TestTraceQuerySummaryIsIndependentOfFilters(t *testing.T) {
 	_, err := Dispatch(context.Background(), stub, Request{
 		Method: http.MethodGet,
 		Path:   "/internal/runtime/traces",
-		Query:  url.Values{"view": {"summary"}, "tool": {"exec_command"}, "limit": {"10"}},
+		Query:  url.Values{"view": {"summary"}, "tool": {"exec_command"}, "limit": {"10"}, "outcome": {"error"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !stub.traceQuery.Summary || stub.traceQuery.Tool != "exec_command" || stub.traceQuery.Limit != 10 {
+	if !stub.traceQuery.Summary || stub.traceQuery.Tool != "exec_command" || stub.traceQuery.Limit != 10 || stub.traceQuery.Outcome != "error" {
 		t.Fatalf("query = %#v", stub.traceQuery)
 	}
 	if got := (observability.TraceQuery{}).Summary; got {

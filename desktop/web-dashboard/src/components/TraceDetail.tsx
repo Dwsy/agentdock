@@ -1,50 +1,17 @@
-import { useEffect, useId, useState } from 'react';
-import { FileJson, FileText, Code2, RefreshCw, AlertCircle, FilePenLine, Tag, ChevronDown, Copy, Check } from 'lucide-react';
+import { useEffect, useId, useMemo, useState } from 'react';
+import { FileJson, FileText, Code2, RefreshCw, AlertCircle, FilePenLine, Info, ChevronDown, Copy, Check } from 'lucide-react';
 import { api, type TraceRecord } from '../api';
 import { ms, shortPath } from '../ui';
 import { usePersistedState } from '../lib/usePersistedState';
-import { hasTruncatedPreview, isTraceTextTruncated, loadTraceDetail } from '../lib/traceDetail';
+import { traceOutcome } from '../lib/traceOutcome';
+import { hasTruncatedPayload, hasTruncatedPreview, isTraceTextTruncated, loadTraceDetail, parseTraceResult, traceChangeDiff, traceFileDiff } from '../lib/traceDetail';
 import { CodeSource } from './CodeSource';
 import CommandBlock from './CommandBlock';
 import MarkdownView from './MarkdownView';
 import DiffViewer from './DiffViewer';
-import { ReadFileCard, ViewImageCard, parseTraceResult, type ReadFileResult, type ViewImageResult } from './TraceResultCards';
+import { ReadFileCard, ViewImageCard, type ReadFileResult, type ViewImageResult } from './TraceResultCards';
 
 const sourceClass = 'code-surface scrollbar-thin overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed';
-
-function RawArguments({ text, expanded, notice, empty }: { text?: string; expanded: boolean; notice?: string; empty: string }) {
-  const id = useId();
-  const [openOverride, setOpenOverride] = useState<boolean>();
-  const [copiedText, setCopiedText] = useState<string>();
-  const open = openOverride ?? expanded;
-
-  return (
-    <div className="rounded-xl border border-border/60 bg-card/40">
-      <div className="flex items-center gap-2 px-3 py-2">
-        <button type="button" aria-expanded={open} aria-controls={id} onClick={() => setOpenOverride(!open)}
-          className="flex min-w-0 flex-1 items-center gap-1.5 text-left text-xs font-medium hover:text-foreground">
-          <ChevronDown size={12} className={open ? '' : '-rotate-90'} />
-          <Code2 size={13} /> 原始参数
-        </button>
-        {text && <button type="button" onClick={async () => {
-          try {
-            await navigator.clipboard.writeText(text);
-            setCopiedText(text);
-          } catch { setCopiedText(undefined); }
-        }} className="glass-control rounded px-1.5 py-1 text-muted-foreground hover:text-foreground"
-          title={copiedText === text ? '已复制' : '复制原始参数'} aria-label={copiedText === text ? '已复制' : '复制原始参数'}>
-          {copiedText === text ? <Check size={12} /> : <Copy size={12} />}
-        </button>}
-      </div>
-      {notice && <p role="status" className="px-3 pb-2 text-[11px] text-muted-foreground">{notice}</p>}
-      <div id={id} hidden={!open}>
-        {open && (text
-          ? <CodeSource text={text} language="json" className={`${sourceClass} mx-3 mb-3 max-h-64 rounded-lg bg-muted/30 p-2.5`} />
-          : <p className="px-3 pb-3 text-[11px] text-muted-foreground">{empty}</p>)}
-      </div>
-    </div>
-  );
-}
 
 function formatResult(text: string): string {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
@@ -70,6 +37,9 @@ function TraceDetailBody({ record }: { record: TraceRecord }) {
   const [view, setView] = usePersistedState<'auto' | 'source'>('trace-detail-view', 'auto');
   const [openFile, setOpenFile] = useState<number>(0);
   const [showRawResult, setShowRawResult] = useState(false);
+  const argumentsId = useId();
+  const [openArguments, setOpenArguments] = useState<boolean>();
+  const [copiedArguments, setCopiedArguments] = useState<string>();
   const { id, tool } = record;
   const wantFull = tool === 'read_file' || hasTruncatedPreview(record);
 
@@ -89,7 +59,12 @@ function TraceDetailBody({ record }: { record: TraceRecord }) {
   const argumentsText = full?.arguments ?? r.arguments;
   const resultText = full?.result ?? r.result;
   const mdFromResult = extractMarkdown(resultText) || extractMarkdown(r.result);
-  const truncatedPreview = hasTruncatedPreview(r) || hasTruncatedPreview(record);
+  // 兼容详情接口缺少 file_changes 的旧 Core。
+  const fileChanges = r.file_changes ?? record.file_changes;
+  const fileDiff = useMemo(() => {
+    if (detail && fileChanges?.some((change) => change.truncated || !change.diff)) return traceFileDiff(detail);
+  }, [detail, fileChanges]);
+  const truncatedPreview = hasTruncatedPayload(r) || hasTruncatedPayload(record);
   let notice: string | undefined;
   if (request === 'failed') {
     notice = '调用详情读取失败，显示列表中可用的信息。';
@@ -104,78 +79,96 @@ function TraceDetailBody({ record }: { record: TraceRecord }) {
   } else if (detail?.full_available && !full) {
     notice = '未取得全文，显示已取得的预览。';
   }
-  // 详情接口的 record 未必带 file_changes，列表记录才是它的来源。
-  const fileChanges = r.file_changes || record.file_changes || [];
   // 上游客户端头（Nexus 转发）与本地连接头无关，单独展示来源信息。
-  const upstreamHeaders = Object.entries(r.upstream_headers || {});
+  const upstreamHeaders = Object.entries(r.upstream_headers ?? record.upstream_headers ?? {});
   // 已知工具的专用卡片：read_file 渲染带行号的正文，view_image 走图片 sidecar。
   // 解析失败（预览被截断成非法 JSON）时退回通用渲染，不展示半个对象。
   const readFileResult = r.tool === 'read_file' ? parseTraceResult<ReadFileResult>(resultText) : null;
   const viewImageResult = r.tool === 'view_image' ? parseTraceResult<ViewImageResult>(resultText) : null;
   const hasTypedCard = Boolean(readFileResult || viewImageResult);
+  const outcome = traceOutcome(r);
+  const outcomeLabel = outcome === 'error' ? '失败' : outcome === 'running' ? '运行中' : '成功';
+  const outcomeTone = outcome === 'error' ? 'text-red-500' : outcome === 'running' ? 'text-amber-500' : 'text-emerald-500';
+  const hasCommandOutput = cmd?.command || cmd?.stdout || cmd?.stderr || cmd?.summary;
+  const hasPrimaryContent = Boolean(fileChanges?.length || hasCommandOutput || resultText);
+  const argumentsOpen = openArguments ?? (!loading && !hasPrimaryContent);
+  const copyLabel = copiedArguments === argumentsText ? '已复制' : '复制原始参数';
 
   return (
-    <div className="animate-fade-in space-y-3">
-      {/* 头部元信息 */}
-      <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border/60 bg-card/40 p-3.5">
-        <span className={`h-2 w-2 rounded-full ${r.success ? 'bg-emerald-500' : 'bg-red-500'}`} />
-        <span className="font-mono text-sm font-medium">{r.tool}</span>
-        <span className="rounded bg-muted/20 px-1.5 py-0.5 text-[11px] text-muted-foreground">{r.source}</span>
-        <span className="text-[11px] text-muted-foreground">ID {r.id}</span>
-        {r.error_code && <span className="ml-auto flex items-center gap-1 text-[11px] text-red-500"><AlertCircle size={12} /> {r.error_code} {r.error_category && `(${r.error_category})`}</span>}
-        <div className="ml-auto flex items-center gap-3 text-[11px] text-muted-foreground">
-          <span>{new Date(r.started_at).toLocaleString('zh-CN')}</span>
-          <span>耗时 {ms(r.duration_ms)}</span>
-          {loading && <RefreshCw size={12} className="animate-spin" />}
+    <div className="animate-fade-in space-y-2.5">
+      <div className="border-b border-border/60 pb-2">
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate font-mono text-xs font-medium text-foreground" title={r.tool}>{r.tool}</span>
+            <span className={`shrink-0 font-medium ${outcomeTone}`}>{outcomeLabel}</span>
+            <span className="shrink-0 font-mono">#{r.id}</span>
+            {loading && <span role="status" title="正在读取调用详情"><RefreshCw size={12} aria-hidden="true" className="animate-spin" /><span className="sr-only">正在读取调用详情</span></span>}
+          </div>
+          <button type="button" aria-expanded={argumentsOpen} aria-controls={argumentsId} onClick={() => setOpenArguments(!argumentsOpen)}
+            className="glass-control ml-auto flex shrink-0 items-center gap-1 rounded-md px-2 py-1 hover:text-foreground">
+            <Code2 size={12} aria-hidden="true" /> 原始参数
+            <ChevronDown size={11} aria-hidden="true" className={argumentsOpen ? 'rotate-180' : ''} />
+          </button>
+        </div>
+        {r.error_code && <p className="mt-1 flex items-center gap-1 break-all text-[11px] text-red-500"><AlertCircle size={12} aria-hidden="true" className="shrink-0" /> <span>{r.error_code} {r.error_category && `(${r.error_category})`}</span></p>}
+        {notice && <p role="status" className="mt-1 text-[11px] text-muted-foreground">{notice}</p>}
+        <div id={argumentsId} hidden={!argumentsOpen} className="relative">
+          {argumentsOpen && (argumentsText ? (
+            <>
+              <CodeSource text={argumentsText} language="json" className={`${sourceClass} mt-2 max-h-64 rounded-lg bg-muted/30 py-2.5 ps-2.5 pe-10`} />
+              <button type="button" onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(argumentsText);
+                  setCopiedArguments(argumentsText);
+                } catch { setCopiedArguments(undefined); }
+              }} className="glass-control absolute top-2 right-2 rounded-md px-1.5 py-1 text-muted-foreground hover:text-foreground" title={copyLabel} aria-label={copyLabel}>
+                {copiedArguments === argumentsText ? <Check size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />}
+              </button>
+            </>
+          ) : <p className="mt-2 text-[11px] text-muted-foreground">{loading ? '正在读取原始参数…' : request === 'failed' ? '未能读取原始参数。' : '此调用未返回原始参数。'}</p>)}
         </div>
       </div>
 
-      {upstreamHeaders.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-border/60 bg-card/40 p-2.5">
-          <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Tag size={11} /> 上游请求头</span>
-          {upstreamHeaders.map(([name, value]) => (
-            <span key={name} className="rounded bg-muted/20 px-1.5 py-0.5 font-mono text-[11px]" title={`${name}: ${value}`}>
-              <span className="text-muted-foreground">{name}</span>=<span className="break-all">{value}</span>
-            </span>
-          ))}
-        </div>
-      )}
-
-      <RawArguments
-        text={argumentsText}
-        expanded={!fileChanges.length && !cmd && !hasTypedCard && !(loading && (r.tool === 'read_file' || r.tool === 'view_image'))}
-        notice={notice}
-        empty={loading ? '正在读取原始参数…' : request === 'failed' ? '未能读取原始参数。' : '此调用未返回原始参数。'}
-      />
-
-      {fileChanges.length > 0 ? (
+      {fileChanges?.length ? (
         // file_edit / file_write：直接渲染结构化 diff，不做 JSON 平铺。
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground"><FilePenLine size={13} /> 文件变更（{fileChanges.length}）</div>
-          {fileChanges.map((fc, i) => (
-            <div key={i} className="rounded-xl border border-border/60 bg-card/40">
-              <button onClick={() => setOpenFile(openFile === i ? -1 : i)} className="flex w-full items-center gap-2 p-3 text-left text-xs hover:bg-card/60">
-                <span className={`rounded px-1.5 py-0.5 text-[10px] ${fc.action === 'create' ? 'bg-sky-500/10 text-sky-500' : 'bg-violet-500/10 text-violet-500'}`}>{fc.action}</span>
-                <span className="min-w-0 flex-1 truncate font-mono" title={fc.path}>{shortPath(fc.path)}</span>
-                <span className="shrink-0 text-[10px] text-emerald-500">+{fc.insertions || 0}</span>
-                {fc.deletions != null && <span className="shrink-0 text-[10px] text-red-500">-{fc.deletions}</span>}
-              </button>
-              {openFile === i && (
-                <div className="border-t border-border/60 p-3">
-                  <DiffViewer
-                    diff={fc.diff || ''}
-                    filePath={fc.path}
-                    moveTo={fc.move_to}
-                    insertions={fc.insertions}
-                    deletions={fc.deletions}
-                    truncated={fc.truncated}
-                  />
-                </div>
-              )}
-            </div>
-          ))}
+          {fileChanges.map((fc, i) => {
+            const diff = traceChangeDiff(fc, fileDiff);
+            return (
+              <div key={i} className="rounded-xl border border-border/60 bg-card/40">
+                <button onClick={() => setOpenFile(openFile === i ? -1 : i)} aria-expanded={openFile === i}
+                  className="flex w-full items-center gap-2 p-3 text-left text-xs hover:bg-card/60">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${fc.action === 'create' ? 'bg-sky-500/10 text-sky-500' : 'bg-violet-500/10 text-violet-500'}`}>{fc.action}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono" title={fc.path}>{shortPath(fc.path)}</span>
+                  {(fc.insertions != null || fc.deletions != null) && (
+                    <span className="flex shrink-0 gap-1.5 tabular text-[11px]" title="记录的增删行数">
+                      <span className="text-emerald-500">+{fc.insertions ?? 0}</span>
+                      <span className="text-red-500">−{fc.deletions ?? 0}</span>
+                    </span>
+                  )}
+                </button>
+                {openFile === i && (
+                  <div className="border-t border-border/60 p-3">
+                    {loading ? (
+                      <p role="status" className="text-xs text-muted-foreground">{fc.truncated ? '正在读取完整 diff…' : '正在读取 diff…'}</p>
+                    ) : (
+                      <DiffViewer
+                        diff={diff.text}
+                        filePath={fc.path}
+                        moveTo={fc.move_to}
+                        insertions={fc.insertions}
+                        deletions={fc.deletions}
+                        truncated={diff.truncated}
+                      />
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
-      ) : cmd ? (
+      ) : cmd && (hasCommandOutput || !resultText) ? (
         <CommandBlock record={{ ...r, command: cmd }} />
       ) : (
         <>
@@ -207,6 +200,27 @@ function TraceDetailBody({ record }: { record: TraceRecord }) {
           )}
         </>
       )}
+
+      <details className="text-[11px] text-muted-foreground">
+        <summary className="w-fit cursor-pointer rounded-md px-1 py-1 hover:text-foreground">
+          <Info size={11} aria-hidden="true" className="mr-1 inline" />调用信息
+        </summary>
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+          {r.source && <span>来源 {r.source}</span>}
+          <span>开始时间 <time dateTime={r.started_at}>{new Date(r.started_at).toLocaleString('zh-CN')}</time></span>
+          <span>调用耗时 {ms(r.duration_ms)}</span>
+        </div>
+        {upstreamHeaders.length > 0 && (
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 px-1">
+            <span>上游请求头</span>
+            {upstreamHeaders.map(([name, value]) => (
+              <span key={name} className="min-w-0 break-all rounded bg-muted/20 px-1.5 py-0.5 font-mono" title={`${name}: ${value}`}>
+                {name}=<span className="text-foreground">{value}</span>
+              </span>
+            ))}
+          </div>
+        )}
+      </details>
     </div>
   );
 }

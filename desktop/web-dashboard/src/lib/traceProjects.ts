@@ -1,16 +1,16 @@
 import type { TraceRecord } from '../api';
 // 带 .ts 扩展名是为了 node --test 直跑源码（Node ESM 不做扩展名补全）。
 import { normalizeProject, projectBasename, UNCLASSIFIED_LABEL } from './taskProjects.ts';
+import { traceOutcome } from './traceOutcome.ts';
 
 /** 没有路径信号的调用归到这一组：不猜项目，也不让记录从列表里消失。 */
 export const NO_PROJECT_PATH = '';
 
-/**
- * 一条调用的项目路径信号：优先命令的工作目录（exec_command 类），
- * 其次是文件变更探测到的项目根（file_edit 类）。两者都没有就是空。
- * 只看路径，不看任务 ID —— 没有任务的自由调用也要能进分组。
- */
-export function traceProjectPath(record: TraceRecord): string {
+type TraceProjectPaths = Record<string, string>;
+
+/** 旧 Core 的摘要只有命令和变更路径。 */
+export function traceProjectPath(record: TraceRecord, paths?: TraceProjectPaths): string {
+  if (paths) return normalizeProject(paths[String(record.id)]);
   const workdir = normalizeProject(record.command?.workdir);
   if (workdir) return workdir;
   for (const change of record.file_changes ?? []) {
@@ -63,16 +63,17 @@ function disambiguate(groups: TraceProjectGroup[]): void {
  * 按项目路径给调用分组。同一路径的调用归一组，统计次数、失败数、平均耗时；
  * 按次数降序，未分类固定排最后。分组只做展示投影，不改动记录本身。
  */
-export function groupTracesByProject(records: TraceRecord[]): TraceProjectGroup[] {
+export function groupTracesByProject(records: TraceRecord[], paths?: TraceProjectPaths): TraceProjectGroup[] {
   const buckets = new Map<string, TraceProjectGroup>();
   for (const record of records) {
-    const full = traceProjectPath(record);
+    const full = traceProjectPath(record, paths);
     const key = full || NO_PROJECT_PATH;
+    const errors = traceOutcome(record) === 'error' ? 1 : 0;
     const existing = buckets.get(key);
     if (existing) {
       existing.records.push(record);
       existing.count += 1;
-      if (!record.success) existing.errors += 1;
+      existing.errors += errors;
       existing.avgMs += record.duration_ms;
       continue;
     }
@@ -82,7 +83,7 @@ export function groupTracesByProject(records: TraceRecord[]): TraceProjectGroup[
       full,
       unclassified: !full,
       count: 1,
-      errors: record.success ? 0 : 1,
+      errors,
       avgMs: record.duration_ms,
       records: [record],
     });

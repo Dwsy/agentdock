@@ -401,6 +401,46 @@ func TestTraceStoreQueryPageCursorSortsByID(t *testing.T) {
 	}
 }
 
+func TestTraceStoreQueryPageFiltersOutcomeBeforePagination(t *testing.T) {
+	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, record := range []TraceRecord{
+		{Success: true, Command: &CommandTrace{Status: "running", ExitCode: new(2)}},
+		{Success: true, Command: &CommandTrace{Status: "running"}},
+		{Success: true, Command: &CommandTrace{Status: "running", TimedOut: true, CommandOK: new(true)}},
+		{Success: true, Command: &CommandTrace{Status: "running", CommandOK: new(true), ExitCode: new(2)}},
+		{Success: false, Command: &CommandTrace{CommandOK: new(true)}},
+		{Success: true, Command: &CommandTrace{Status: "running", ExitCode: new(0)}},
+	} {
+		record.Tool = "exec_command"
+		record.StartedAt = time.Now()
+		store.Record(record)
+	}
+	check := func(query TraceQuery, wantIDs []uint64, wantMore bool) {
+		t.Helper()
+		records, hasMore := store.QueryPage(query)
+		var ids []uint64
+		for _, record := range records {
+			ids = append(ids, record.ID)
+		}
+		if !slices.Equal(ids, wantIDs) || hasMore != wantMore {
+			t.Fatalf("query %+v: ids = %v, has_more = %t, want %v, %t", query, ids, hasMore, wantIDs, wantMore)
+		}
+	}
+	for _, cursor := range []bool{false, true} {
+		check(TraceQuery{Outcome: " ERROR ", Limit: 2, Cursor: cursor, Summary: true}, []uint64{5, 3}, true)
+		check(TraceQuery{Outcome: "success", Limit: 2, Cursor: cursor}, []uint64{6, 4}, false)
+		check(TraceQuery{Status: "error", Limit: 2, Cursor: cursor}, []uint64{5}, false)
+		if page, hasMore := store.QueryPage(TraceQuery{Outcome: "running", Cursor: cursor}); page != nil || hasMore {
+			t.Fatalf("cursor=%t: invalid outcome returned %d records, has_more=%t", cursor, len(page), hasMore)
+		}
+	}
+	check(TraceQuery{Outcome: "error", Limit: 2, Cursor: true, BeforeID: 3}, []uint64{1}, false)
+}
+
 // 无游标请求也要能报告 has_more，供首屏判断是否显示“加载更早”。
 func TestTraceStoreQueryPageWithoutCursorReportsHasMore(t *testing.T) {
 	store, err := NewTraceStore(TraceOptions{Mode: TraceModeMemory, MaxRecords: 100})

@@ -12,14 +12,23 @@ func (r *Runtime) RuntimeTraces(query observability.TraceQuery) (Result, error) 
 		view = "summary"
 	}
 	if r.traces == nil {
-		return Result{
+		result := Result{
 			"ok": true, "source": runtimeAPISource, "mode": string(observability.TraceModeOff),
 			"view": view, "records": []observability.TraceRecord{}, "count": 0, "tools": []string{},
 			"has_more": false,
-		}, nil
+		}
+		if query.Summary && query.Projects {
+			result["project_paths"] = map[uint64]string{}
+			result["file_names"] = map[uint64][]string{}
+		}
+		return result, nil
+	}
+	withProjects := query.Summary && query.Projects
+	if withProjects {
+		query.Summary = false // The list projections need the redacted previews for this page.
 	}
 	records, hasMore := r.traces.QueryPage(query)
-	return Result{
+	result := Result{
 		"ok":       true,
 		"source":   runtimeAPISource,
 		"view":     view,
@@ -28,7 +37,23 @@ func (r *Runtime) RuntimeTraces(query observability.TraceQuery) (Result, error) 
 		"count":    len(records),
 		"tools":    r.traces.ToolNames(),
 		"has_more": hasMore,
-	}, nil
+	}
+	if withProjects {
+		paths := make(map[uint64]string)
+		fileNames := make(map[uint64][]string)
+		for i, record := range records {
+			if path := r.traceProjectPath(record); path != "" {
+				paths[record.ID] = path
+			}
+			if names := traceFileNames(record); len(names) > 0 {
+				fileNames[record.ID] = names
+			}
+			records[i] = record.Summary()
+		}
+		result["project_paths"] = paths
+		result["file_names"] = fileNames
+	}
+	return result, nil
 }
 
 // RuntimeTraceDetail 按 ID 返回单条完整记录，详情页只在选中记录时调用。

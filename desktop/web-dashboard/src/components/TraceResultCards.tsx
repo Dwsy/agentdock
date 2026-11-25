@@ -29,17 +29,6 @@ export type ViewImageResult = {
   image_bytes_omitted?: number;
 };
 
-/** 预览被截断时 JSON 不再合法，解析失败即回退通用渲染，不猜半个对象。 */
-export function parseTraceResult<T>(text?: string): T | null {
-  if (!text) return null;
-  try {
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? (parsed as T) : null;
-  } catch {
-    return null;
-  }
-}
-
 function MetaBadge({ children }: { children: ReactNode }) {
   return <span className="rounded bg-muted/20 px-1.5 py-0.5 text-[10px] text-muted-foreground">{children}</span>;
 }

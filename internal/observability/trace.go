@@ -182,10 +182,14 @@ type TraceQuery struct {
 	Tool   string
 	Source string
 	Status string
-	Limit  int
+	// Outcome includes command results. Status filters only tool-call success.
+	Outcome string
+	Limit   int
 	// Summary 只返回列表摘要：去掉 Arguments/Result 与命令输出正文，
 	// 让“100 条记录”的控制面板请求保持在几十 KB 而不是几 MB。
 	Summary bool
+	// Projects 请求为摘要页附带按记录 ID 索引的项目路径。
+	Projects bool
 	// Cursor 表示调用方显式请求 ID 游标分页；未置位时完全保持旧列表行为。
 	// 磁盘回放可能按 StartedAt 而不是 ID 排序，游标路径必须自己按 ID 排序，
 	// 否则翻页会跳记录。
@@ -588,15 +592,16 @@ func (s *TraceStore) ExportRecords(query TraceQuery) []TraceRecord {
 	return s.filterRecords(query, limit, false)
 }
 
-// filterRecords 承载 Query/ExportRecords 共用的过滤循环。invalidStatusNil
-// 保持 Query 的既有语义：非法 status 过滤返回 nil；导出返回空数组。
-func (s *TraceStore) filterRecords(query TraceQuery, limit int, invalidStatusNil bool) []TraceRecord {
+// filterRecords 承载 Query/ExportRecords 共用的过滤循环。非法状态或结果
+// 过滤在 Query 中返回 nil，在导出中返回空数组。
+func (s *TraceStore) filterRecords(query TraceQuery, limit int, invalidFilterNil bool) []TraceRecord {
 	needle := strings.ToLower(strings.TrimSpace(query.Query))
 	toolFilter := strings.TrimSpace(query.Tool)
 	sourceFilter := strings.TrimSpace(query.Source)
 	statusFilter := strings.ToLower(strings.TrimSpace(query.Status))
-	if !validTraceStatusFilter(statusFilter) {
-		if invalidStatusNil {
+	outcomeFilter := strings.ToLower(strings.TrimSpace(query.Outcome))
+	if !validTraceStatusFilter(statusFilter) || !validTraceOutcomeFilter(outcomeFilter) {
+		if invalidFilterNil {
 			return nil
 		}
 		return []TraceRecord{}
@@ -607,11 +612,11 @@ func (s *TraceStore) filterRecords(query TraceQuery, limit int, invalidStatusNil
 	out := make([]TraceRecord, 0, min(limit, len(s.records)))
 	for i := len(s.records) - 1; i >= 0; i-- {
 		record := s.records[i]
-		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter) {
+		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter, outcomeFilter) {
 			continue
 		}
 		if query.Summary {
-			record = traceSummaryRecord(record)
+			record = record.Summary()
 		}
 		out = append(out, record)
 		if len(out) >= limit {
@@ -630,6 +635,10 @@ func validTraceStatusFilter(statusFilter string) bool {
 	}
 }
 
+func validTraceOutcomeFilter(outcomeFilter string) bool {
+	return outcomeFilter == "" || outcomeFilter == "success" || outcomeFilter == "error"
+}
+
 // filterRecordsBeforeID 是游标分页路径。保留窗口默认最多 2000 条，整批收集
 // 再按 ID 排序的代价可忽略；这样能修正磁盘回放的 StartedAt 顺序，并让
 // has_more 对本页过滤后的匹配集合同样准确。
@@ -638,7 +647,8 @@ func (s *TraceStore) filterRecordsBeforeID(query TraceQuery, limit int) ([]Trace
 	toolFilter := strings.TrimSpace(query.Tool)
 	sourceFilter := strings.TrimSpace(query.Source)
 	statusFilter := strings.ToLower(strings.TrimSpace(query.Status))
-	if !validTraceStatusFilter(statusFilter) {
+	outcomeFilter := strings.ToLower(strings.TrimSpace(query.Outcome))
+	if !validTraceStatusFilter(statusFilter) || !validTraceOutcomeFilter(outcomeFilter) {
 		return nil, false
 	}
 
@@ -653,7 +663,7 @@ func (s *TraceStore) filterRecordsBeforeID(query TraceQuery, limit int) ([]Trace
 		if query.BeforeID != 0 && record.ID >= query.BeforeID {
 			continue
 		}
-		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter) {
+		if !traceRecordMatches(record, needle, toolFilter, sourceFilter, statusFilter, outcomeFilter) {
 			continue
 		}
 		matches = append(matches, record)
@@ -665,13 +675,13 @@ func (s *TraceStore) filterRecordsBeforeID(query TraceQuery, limit int) ([]Trace
 	}
 	if query.Summary {
 		for i := range matches {
-			matches[i] = traceSummaryRecord(matches[i])
+			matches[i] = matches[i].Summary()
 		}
 	}
 	return matches, hasMore
 }
 
-func traceRecordMatches(record TraceRecord, needle, toolFilter, sourceFilter, statusFilter string) bool {
+func traceRecordMatches(record TraceRecord, needle, toolFilter, sourceFilter, statusFilter, outcomeFilter string) bool {
 	if toolFilter != "" && record.Tool != toolFilter {
 		return false
 	}
@@ -688,7 +698,40 @@ func traceRecordMatches(record TraceRecord, needle, toolFilter, sourceFilter, st
 			return false
 		}
 	}
+	if outcomeFilter != "" && traceRecordOutcome(record) != outcomeFilter {
+		return false
+	}
 	return needle == "" || traceMatches(record, needle)
+}
+
+func traceRecordOutcome(record TraceRecord) string {
+	if !record.Success {
+		return "error"
+	}
+	command := record.Command
+	if command == nil {
+		return "success"
+	}
+	if command.TimedOut || command.Status == "timeout" || command.Status == "killed" {
+		return "error"
+	}
+	// Async snapshots can still say running after terminal evidence is available.
+	if command.CommandOK != nil {
+		if *command.CommandOK {
+			return "success"
+		}
+		return "error"
+	}
+	if command.ExitCode != nil {
+		if *command.ExitCode == 0 {
+			return "success"
+		}
+		return "error"
+	}
+	if command.Status == "running" {
+		return "running"
+	}
+	return "success"
 }
 
 // Clear 清空保留窗口：memory 只清内存索引；disk 再删除全部保留 JSONL 文件
@@ -757,9 +800,9 @@ func (s *TraceStore) Clear() (int, error) {
 	return cleared, errors.Join(clearErrs...)
 }
 
-// traceSummaryRecord 去掉正文只保留摘要。这里复制 Command 与 FileChanges
+// Summary 去掉正文只保留摘要。这里复制 Command 与 FileChanges
 // 而不是原地修改：记录本身仍在保留窗口里，摘要投影不能破坏后续详情读取。
-func traceSummaryRecord(record TraceRecord) TraceRecord {
+func (record TraceRecord) Summary() TraceRecord {
 	record.Arguments = ""
 	record.Result = ""
 	if record.Command != nil {

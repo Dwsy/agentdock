@@ -230,7 +230,11 @@ var traceProjectMarkers = []string{
 // traceProjectRoot 从文件路径向上找项目标记，找不到回退父目录。
 // 只做文件系统元数据探测，任何失败都不影响历史记录本身。
 func traceProjectRoot(path string) string {
-	dir := filepath.Dir(path)
+	return traceDirectoryProjectRoot(filepath.Dir(path))
+}
+
+func traceDirectoryProjectRoot(start string) string {
+	dir := start
 	for range 24 {
 		for _, marker := range traceProjectMarkers {
 			if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
@@ -243,7 +247,7 @@ func traceProjectRoot(path string) string {
 		}
 		dir = parent
 	}
-	return filepath.Dir(path)
+	return start
 }
 
 func traceIntValue(value any) int {

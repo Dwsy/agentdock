@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, ScrollText, CheckCircle2, XCircle, Clock3, Terminal, ListFilter, CheckCircle, Circle, Wrench, FilePenLine, Tag, X, FolderGit2, ChevronDown, ChevronRight } from 'lucide-react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { Search, ScrollText, CheckCircle2, XCircle, Clock3, Terminal, ListFilter, CheckCircle, Info, Wrench, FilePenLine, Tag, X, FolderGit2, ChevronDown, ChevronRight } from 'lucide-react';
 import { api, type Traces as TracesData, type TraceRecord } from '../api';
 import { Panel, SectionTitle, fmt, ms, relTime } from '../ui';
 import TraceDetail from '../components/TraceDetail';
@@ -7,6 +7,8 @@ import ListPagination from '../components/ListPagination';
 import { recordDateTime } from '../lib/recordTime';
 import { groupTracesByProject, type TraceProjectGroup } from '../lib/traceProjects';
 import { TRACE_PAGE_SIZE, pageTimeRange, nextBeforeId } from '../lib/tracePaging';
+import { traceFileChangeCounts } from '../lib/traceDetail';
+import { traceOutcome } from '../lib/traceOutcome';
 import { usePersistedState } from '../lib/usePersistedState';
 
 type StatusFilter = 'all' | 'ok' | 'fail';
@@ -31,22 +33,34 @@ const LOCAL_UA_DIMENSION = '__local_ua';
 type ListMode = 'time' | 'project';
 
 /** 一条调用在左侧列表里的行：两种视图共用，避免两处渲染漂移。 */
-function TraceRow({ record, project, selected, onSelect }: {
+function TraceRow({ record, project, fileNames, selected, onSelect }: {
   record: TraceRecord;
   project?: Pick<TraceProjectGroup, 'name' | 'full'>;
+  fileNames?: string[];
   selected: boolean;
   onSelect: () => void;
 }) {
+  const outcome = traceOutcome(record);
+  const edits = traceFileChangeCounts(record.file_changes);
+  const fileLabel = fileNames?.join(', ');
   return (
     <button
       onClick={onSelect}
       aria-current={selected ? true : undefined}
       className={`flex w-full items-center gap-2 rounded-lg p-2 text-left transition-colors ${selected ? 'glass-chosen' : 'hover:bg-card/60'}`}
     >
-      {record.success ? <CheckCircle2 size={14} className="shrink-0 text-emerald-500" /> : <XCircle size={14} className="shrink-0 text-red-500" />}
+      {outcome === 'error' ? <XCircle size={14} aria-hidden="true" className="shrink-0 text-red-500" />
+        : outcome === 'running' ? <Clock3 size={14} aria-hidden="true" className="shrink-0 text-amber-500" />
+        : <CheckCircle2 size={14} aria-hidden="true" className="shrink-0 text-emerald-500" />}
+      {outcome === 'success' && <span className="sr-only">成功</span>}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <span className="truncate font-mono text-xs">{record.tool}</span>
+          <span className="min-w-0 truncate font-mono text-xs" title={fileLabel}>
+            {record.tool}
+            {fileLabel && <span className="text-muted-foreground">{' '}{fileLabel}</span>}
+          </span>
+          {outcome === 'error' && <span className="shrink-0 rounded bg-red-500/10 px-1 text-[11px] font-medium text-red-500">失败</span>}
+          {outcome === 'running' && <span className="shrink-0 text-[11px] font-medium text-amber-500">运行中</span>}
           {record.command && <span title="命令"><Terminal size={11} className="shrink-0 text-amber-500" /></span>}
           {record.file_changes && record.file_changes.length > 0 && <span title="文件变更"><FilePenLine size={11} className="shrink-0 text-violet-500" /></span>}
         </div>
@@ -59,9 +73,18 @@ function TraceRow({ record, project, selected, onSelect }: {
               <span className="truncate">{project.name}</span>
             </span>
           )}
+          <span className="ml-auto flex shrink-0 items-center gap-2">
+            {edits && (
+              <span className="flex gap-1.5 tabular" title="记录的增删行数">
+                <span className="sr-only">记录新增 {fmt.format(edits.insertions)} 行，删除 {fmt.format(edits.deletions)} 行</span>
+                <span aria-hidden="true" className="text-emerald-500">+{fmt.format(edits.insertions)}</span>
+                <span aria-hidden="true" className="text-red-500">−{fmt.format(edits.deletions)}</span>
+              </span>
+            )}
+            <span className="font-mono text-muted-foreground/60">#{record.id}</span>
+          </span>
         </div>
       </div>
-      <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">#{record.id}</span>
     </button>
   );
 }
@@ -69,10 +92,12 @@ function TraceRow({ record, project, selected, onSelect }: {
 /** 一个项目分组：头可折叠，下面是该项目下的调用。 */
 function ProjectBlock({
   group,
+  fileNames,
   selectedId,
   onSelect,
 }: {
   group: TraceProjectGroup;
+  fileNames?: TracesData['file_names'];
   selectedId: number | null;
   onSelect: (record: TraceRecord) => void;
 }) {
@@ -81,6 +106,7 @@ function ProjectBlock({
     <div className="mb-1">
       <button
         onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
         className="flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/40"
         title={group.full || group.name}
       >
@@ -94,7 +120,7 @@ function ProjectBlock({
         </span>
       </button>
       {open && group.records.map((record) => (
-        <TraceRow key={record.id} record={record} selected={selectedId === record.id} onSelect={() => onSelect(record)} />
+        <TraceRow key={record.id} record={record} fileNames={fileNames?.[record.id]} selected={selectedId === record.id} onSelect={() => onSelect(record)} />
       ))}
     </div>
   );
@@ -114,6 +140,9 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
   // 请求头分组是第三条筛选轴，和工具/状态/搜索共用同一条 rows 管道。
   const [dimKey, setDimKey] = usePersistedState<string | null>('traces-dim', null);
   const [headerValue, setHeaderValue] = usePersistedState<string | null>('traces-header-value', null);
+  const [openFilter, setOpenFilter] = useState<'window' | 'headers'>();
+  const windowId = useId();
+  const headersId = useId();
   const [latest, setLatest] = useState<LatestPage>();
   const [history, setHistory] = useState<History>();
   const [paging, setPaging] = useState(false);
@@ -121,10 +150,11 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
   const [retry, setRetry] = useState(0);
   const pageRequest = useRef<AbortController>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const headersToggle = useRef<HTMLButtonElement>(null);
 
   const traceTool = tool === 'all' ? undefined : tool;
-  const traceStatus = status === 'ok' ? 'success' : status === 'fail' ? 'error' : undefined;
-  const scope = JSON.stringify([traceTool, traceStatus]);
+  const outcome = status === 'ok' ? 'success' : status === 'fail' ? 'error' : undefined;
+  const scope = JSON.stringify([traceTool, outcome]);
   const browsing = history !== undefined;
   const refresh = browsing ? 0 : refreshKey;
 
@@ -141,7 +171,7 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
     if (browsing) return;
     if (!latestRequest.current) {
       const controller = new AbortController();
-      const promise = api.traces({ limit: TRACE_PAGE_SIZE, beforeId: 0, tool: traceTool, status: traceStatus }, controller.signal)
+      const promise = api.traces({ limit: TRACE_PAGE_SIZE, beforeId: 0, tool: traceTool, outcome, projects: true }, controller.signal)
         .finally(() => {
           if (latestRequest.current?.controller === controller) latestRequest.current = null;
         });
@@ -157,7 +187,7 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
       },
     );
     return () => { active = false; };
-  }, [browsing, refresh, retry, scope, traceTool, traceStatus]);
+  }, [browsing, refresh, retry, scope, traceTool, outcome]);
 
   const index = history?.index ?? 0;
   const data = history?.pages[index] ?? (latest?.scope === scope ? latest.data : undefined);
@@ -194,7 +224,7 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
       const value = dim.read(r) || MISSING_VALUE;
       const bucket = buckets.get(value) || { count: 0, errors: 0, totalMs: 0 };
       bucket.count += 1;
-      if (!r.success) bucket.errors += 1;
+      if (traceOutcome(r) === 'error') bucket.errors += 1;
       bucket.totalMs += r.duration_ms;
       buckets.set(value, bucket);
     });
@@ -208,17 +238,17 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
     () =>
       pageRecords.filter((r) => {
         if (tool !== 'all' && r.tool !== tool) return false;
-        if (status === 'ok' && !r.success) return false;
-        if (status === 'fail' && r.success) return false;
+        if (outcome && traceOutcome(r) !== outcome) return false;
         if (dim && headerValue !== null && (dim.read(r) || MISSING_VALUE) !== headerValue) return false;
         // 摘要视图没有 result 正文，搜索只承诺工具与 ID，不假装能搜结果。
         return !needle || r.tool.toLowerCase().includes(needle) || String(r.id).includes(needle);
       }),
-    [pageRecords, tool, status, needle, dim, headerValue],
+    [pageRecords, tool, outcome, needle, dim, headerValue],
   );
 
   // 项目分组只对已筛选的行做投影：先走工具/状态/搜索/头值，再分项目。
-  const projectGroups = useMemo(() => groupTracesByProject(rows), [rows]);
+  const projectPaths = data?.project_paths;
+  const projectGroups = useMemo(() => groupTracesByProject(rows, projectPaths), [rows, projectPaths]);
   const projectByTraceId = useMemo(() => {
     const projects = new Map<number, TraceProjectGroup>();
     for (const group of projectGroups) {
@@ -228,7 +258,7 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
   }, [projectGroups]);
 
   const selected = rows.find((r) => r.id === selectedId) || rows[0];
-  const errCount = rows.filter((r) => !r.success).length;
+  const errCount = rows.filter((r) => traceOutcome(r) === 'error').length;
 
   const resetSelection = () => {
     setSelectedId(null);
@@ -252,7 +282,7 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
     setPaging(true);
     setPageError(undefined);
     try {
-      const response = await api.traces({ limit: TRACE_PAGE_SIZE, beforeId, tool: traceTool, status: traceStatus }, controller.signal);
+      const response = await api.traces({ limit: TRACE_PAGE_SIZE, beforeId, tool: traceTool, outcome, projects: true }, controller.signal);
       if (controller.signal.aborted) return;
       const records = response.records ?? emptyRecords;
       const repeated = records.some((record) => record.id >= beforeId);
@@ -301,18 +331,18 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
   };
 
   return (
-    <Panel className="p-5">
+    <Panel className="p-3 sm:p-5">
       <SectionTitle
         icon={ScrollText}
         title="调用追踪"
         hint={`本页匹配 ${fmt.format(rows.length)} 条 · ${fmt.format(errCount)} 条失败`}
         action={
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="glass-control flex items-center gap-2 rounded-lg px-3 py-1.5">
-              <Search size={14} className="text-muted-foreground" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} aria-label="搜索本页工具或 ID" placeholder="搜索本页工具或 ID…" className="w-40 bg-transparent text-xs outline-none placeholder:text-muted-foreground" />
+          <div className="flex min-w-0 items-center gap-1.5">
+            <div className="glass-control flex min-w-0 items-center gap-1.5 rounded-lg px-2 py-1">
+              <Search size={13} className="shrink-0 text-muted-foreground" />
+              <input value={q} onChange={(e) => setQ(e.target.value)} aria-label="搜索本页工具或 ID" placeholder="搜索本页工具或 ID…" className="w-28 min-w-0 bg-transparent text-xs outline-none placeholder:text-muted-foreground sm:w-32" />
             </div>
-            <div className="flex gap-1">
+            <div className="flex shrink-0 gap-1">
               {([['all', '全部', ListFilter], ['ok', '成功', CheckCircle], ['fail', '失败', XCircle]] as const).map(([k, label, Icon]) => (
                 <button key={k} onClick={() => changeStatus(k)} aria-pressed={status === k} className={`glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${status === k ? 'text-foreground' : 'text-muted-foreground'}`}>
                   <Icon size={12} /> {label}
@@ -323,34 +353,69 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
         }
       />
 
-      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 bg-muted/10 px-3 py-2 text-xs text-muted-foreground">
-        {mode && <span>追踪模式 <b className="text-foreground">{traceModeLabel(mode)}</b></span>}
-        {retained !== undefined && <span>可查询索引 <b className="tabular text-foreground">{fmt.format(retained)}{maxRecords ? ` / ${fmt.format(maxRecords)}` : ''} 条</b></span>}
-        {mode === 'disk' && retentionDays ? <span>磁盘保留 {retentionDays} 天</span> : null}
-        {!!maxRecords && retained === maxRecords && <span>索引已达条数上限</span>}
-        {pageTime && <span>本页开始时间 {recordDateTime(pageTime.from)} 至 {recordDateTime(pageTime.to)}</span>}
-        {mode === 'off' && <span>可在配置页开启调用追踪</span>}
-        {browsing && <span>历史浏览中 · 暂停自动刷新</span>}
-        {paging && <span role="status">正在查询第 {index + 2} 页…</span>}
-        {!data && !loadError && <span role="status">正在查询调用追踪…</span>}
-        {loadError && <span role="alert">查询失败。{loadError} <button type="button" className="text-primary" onClick={returnLatest}>重试</button></span>}
-      </div>
-
-      <div className="mb-3 flex flex-wrap gap-1.5">
-        <button type="button" onClick={() => changeTool('all')} aria-pressed={tool === 'all'} className={`glass-control rounded-md px-2.5 py-1 text-[11px] ${tool === 'all' ? 'text-foreground' : 'text-muted-foreground'}`}>
+      <div className="mb-2 flex flex-wrap items-center gap-1.5" role="group" aria-label="工具与请求头筛选">
+        <select aria-label="按工具筛选" value={tool} onChange={(event) => changeTool(event.target.value)}
+          className="glass-control min-w-28 flex-1 rounded-md px-2 py-1.5 text-xs sm:hidden">
+          <option value="all">全部工具</option>
+          {tools.map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+        <button type="button" onClick={() => changeTool('all')} aria-pressed={tool === 'all'} className={`glass-control hidden rounded-md px-2.5 py-1 text-[11px] sm:inline-flex ${tool === 'all' ? 'text-foreground' : 'text-muted-foreground'}`}>
           全部工具
         </button>
         {tools.map((name) => (
-          <button type="button" key={name} onClick={() => changeTool(name)} aria-pressed={tool === name} className={`glass-control flex items-center gap-1 rounded-md px-2.5 py-1 font-mono text-[11px] ${tool === name ? 'text-foreground' : 'text-muted-foreground'}`}>
-            <Wrench size={11} /> {name}
+          <button type="button" key={name} onClick={() => changeTool(name)} aria-pressed={tool === name} className={`glass-control hidden items-center gap-1 rounded-md px-2.5 py-1 font-mono text-[11px] sm:flex ${tool === name ? 'text-foreground' : 'text-muted-foreground'}`}>
+            <Wrench size={11} aria-hidden="true" /> {name}
           </button>
         ))}
+        <div className="ml-auto flex min-w-0 flex-wrap items-center gap-1.5">
+          <button type="button" aria-expanded={openFilter === 'window'} aria-controls={windowId}
+            onClick={() => setOpenFilter(openFilter === 'window' ? undefined : 'window')}
+            className="glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground">
+            <Info size={12} aria-hidden="true" />{mode === 'off' ? '追踪未开启' : '追踪信息'}
+            <ChevronDown size={11} aria-hidden="true" className={openFilter === 'window' ? 'rotate-180' : ''} />
+          </button>
+          <div className={`flex min-w-0 items-center rounded-md ${dim && headerValue !== null ? 'glass-chosen' : 'glass-control'}`}>
+            <button ref={headersToggle} type="button" aria-expanded={openFilter === 'headers'} aria-controls={headersId}
+              onClick={() => setOpenFilter(openFilter === 'headers' ? undefined : 'headers')}
+              className="flex min-w-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:text-foreground">
+              <Tag size={12} aria-hidden="true" className="shrink-0" />
+              <span className="shrink-0">请求头分组</span>
+              {dim && headerValue !== null && (
+                <span className="max-w-14 truncate sm:max-w-28 font-mono text-foreground" title={`${dim.label} · ${headerValue}`}>
+                  <span className="sr-only">{dim.label} · </span>{headerValue}
+                </span>
+              )}
+              <ChevronDown size={11} aria-hidden="true" className={`shrink-0 ${openFilter === 'headers' ? 'rotate-180' : ''}`} />
+            </button>
+            {dim && headerValue !== null && (
+              <button type="button" onClick={() => {
+                setHeaderValue(null);
+                headersToggle.current?.focus();
+              }} className="shrink-0 rounded-md px-1.5 py-1 text-muted-foreground hover:text-foreground"
+                aria-label="清除请求头值筛选" title="清除请求头值筛选">
+                <X size={12} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div id={windowId} hidden={openFilter !== 'window'}>
+        <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/50 bg-muted/10 px-3 py-2 text-xs text-muted-foreground">
+          {mode && <span>追踪模式 <b className="text-foreground">{traceModeLabel(mode)}</b></span>}
+          {retained !== undefined && <span>可查询索引 <b className="tabular text-foreground">{fmt.format(retained)}{maxRecords ? ` / ${fmt.format(maxRecords)}` : ''} 条</b></span>}
+          {mode === 'disk' && retentionDays ? <span>磁盘保留 {retentionDays} 天</span> : null}
+          {!!maxRecords && retained === maxRecords && <span>索引已达条数上限</span>}
+          {pageTime && <span>本页开始时间 {recordDateTime(pageTime.from)} 至 {recordDateTime(pageTime.to)}</span>}
+          {mode === 'off' && <span>可在配置页开启调用追踪</span>}
+          {!mode && !pageTime && <span>暂无追踪信息</span>}
+        </div>
       </div>
 
       {/* 请求头分组：选一个维度看聚合数字，点某组按该值筛选 */}
-      <div className="mb-3 space-y-1.5">
+      <div id={headersId} hidden={openFilter !== 'headers'} className="mb-3 space-y-1.5">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Tag size={11} /> 按本页请求头分组</span>
+          <span className="text-[11px] text-muted-foreground">本页请求头</span>
           {headerDims.map((d) => (
             <button
               key={d.key}
@@ -364,11 +429,6 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
               {d.label}
             </button>
           ))}
-          {dim && headerValue !== null && (
-            <button onClick={() => setHeaderValue(null)} className="glass-control flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-foreground" title="清除头值筛选">
-              <X size={10} /> {headerValue}
-            </button>
-          )}
         </div>
         {dim && (
           <div className="scrollbar-thin max-h-44 overflow-y-auto rounded-xl border border-border/60 bg-muted/10 p-1.5">
@@ -395,44 +455,58 @@ export default function Traces({ refreshKey }: { refreshKey: number }) {
         )}
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(15rem,32%)_minmax(0,1fr)]">
+      <div className="grid gap-3 lg:grid-cols-[minmax(15rem,32%)_minmax(0,1fr)]">
         {/* 左：列表（时间平铺 / 按项目分组） */}
         <div className="min-w-0 rounded-xl border border-border/60 bg-muted/10 p-1.5">
-          <div className="mb-1 flex items-center gap-1 px-1">
-            {([['time', '按时间', Clock3], ['project', '按项目', FolderGit2]] as const).map(([key, label, Icon]) => (
-              <button
-                key={key}
-                onClick={() => setListMode(key)}
-                aria-pressed={listMode === key}
-                className={`glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${listMode === key ? 'text-foreground' : 'text-muted-foreground'}`}
-              >
-                <Icon size={12} /> {label}
-              </button>
-            ))}
-            <span className="ml-auto tabular text-[11px] text-muted-foreground/60">{rows.length}</span>
-          </div>
-          {/* 翻页入口在滚动区上方：首屏可见，不用先滚到底。 */}
-          <div className="mb-1.5 border-b border-border/50 px-1 pb-2">
+          <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border/50 px-1 pb-1.5">
+            <div className="flex items-center gap-1" role="group" aria-label="列表排序">
+              {([['time', '按时间', Clock3], ['project', '按项目', FolderGit2]] as const).map(([key, label, Icon]) => (
+                <button
+                  key={key}
+                  onClick={() => setListMode(key)}
+                  aria-pressed={listMode === key}
+                  className={`glass-control flex items-center gap-1 rounded-md px-2 py-1 text-[11px] ${listMode === key ? 'text-foreground' : 'text-muted-foreground'}`}
+                >
+                  <Icon size={12} /> {label}
+                </button>
+              ))}
+            </div>
             <ListPagination label="调用追踪分页" page={index + 1}
               pageCount={history && history.pages.at(-1)?.has_more === false ? history.pages.length : undefined}
               canNext={canNext} disabled={paging} onPrevious={loadPrevious} onNext={() => void loadNext()}>
               {browsing && (
-                <button type="button" onClick={returnLatest} className="glass-control inline-flex min-h-9 items-center rounded-lg px-2 text-xs font-medium text-foreground hover:bg-accent">
+                <button type="button" onClick={returnLatest} title="返回最新并恢复自动刷新"
+                  className="glass-control inline-flex min-h-9 shrink-0 items-center rounded-lg px-2 text-xs font-medium text-foreground hover:bg-accent">
                   返回最新
                 </button>
               )}
             </ListPagination>
-            {pageError && <div role="alert" className="mt-1 text-xs text-muted-foreground">{pageError}</div>}
+            {paging && <div role="status" className="basis-full text-xs text-muted-foreground">正在查询第 {index + 2} 页…</div>}
+            {pageError && (
+              <div role="alert" className="basis-full break-words text-xs text-muted-foreground">
+                {pageError}{canNext && <button type="button" className="ml-1 text-primary underline" onClick={() => void loadNext()}>重试</button>}
+              </div>
+            )}
+            {loadError && (
+              <div role="alert" className="basis-full break-words text-xs text-muted-foreground">
+                查询失败。{loadError} <button type="button" className="text-primary underline" onClick={returnLatest}>重试</button>
+              </div>
+            )}
           </div>
-          <div ref={listRef} className="scrollbar-thin max-h-[645px] space-y-1 overflow-y-auto pr-1">
+          <div ref={listRef} className="scrollbar-thin max-h-80 space-y-1 overflow-y-auto pr-1 sm:max-h-[645px]">
             {listMode === 'time'
               ? rows.map((r) => (
-                <TraceRow key={r.id} record={r} project={projectByTraceId.get(r.id)} selected={selected?.id === r.id} onSelect={() => setSelectedId(r.id)} />
+                <TraceRow key={r.id} record={r} project={projectByTraceId.get(r.id)} fileNames={data?.file_names?.[r.id]} selected={selected?.id === r.id} onSelect={() => setSelectedId(r.id)} />
               ))
               : projectGroups.map((group) => (
-                <ProjectBlock key={group.key || '__no_project__'} group={group} selectedId={selected?.id ?? null} onSelect={(record) => setSelectedId(record.id)} />
+                <ProjectBlock key={group.key || '__no_project__'} group={group} fileNames={data?.file_names} selectedId={selected?.id ?? null} onSelect={(record) => setSelectedId(record.id)} />
               ))}
-            {rows.length === 0 && <div className="py-16 text-center text-sm text-muted-foreground">没有匹配的调用</div>}
+            {!data && !loadError && <div role="status" className="py-8 text-center text-sm text-muted-foreground">正在查询调用追踪…</div>}
+            {data && rows.length === 0 && (
+              <div className="py-8 text-center text-sm text-muted-foreground">
+                {mode === 'off' ? '可在配置页开启调用追踪' : '没有匹配的调用'}
+              </div>
+            )}
           </div>
         </div>
 

@@ -279,6 +279,9 @@ export type TraceDetail = {
     result?: string;
     error?: string;
     command?: { command?: string; stdout?: string; stderr?: string };
+    /** 整次文件编辑的 diff，文件详情再按路径选出对应分节。 */
+    file_diff?: string;
+    file_diff_truncated?: boolean;
     /** 全文旁路本身也到 256 KiB/侧上限时置位。 */
     full_truncated?: boolean;
   } | null;
@@ -333,6 +336,7 @@ export type TraceRecord = {
     stderr_bytes?: number;
     exit_code?: number;
     command_ok?: boolean;
+    timed_out?: boolean;
     stdout_truncated?: boolean;
     stderr_truncated?: boolean;
     command_preview_truncated?: boolean;
@@ -353,6 +357,10 @@ export type Traces = {
   view: string;
   tools: string[];
   records: TraceRecord[];
+  /** Web 摘要附带的目录归属，按追踪 ID 索引。 */
+  project_paths?: Record<string, string>;
+  /** 读写文件调用的文件名，按追踪 ID 索引。 */
+  file_names?: Record<string, string[]>;
   /** 是否还有更早的匹配记录；旧 Core 不提供时为 undefined。 */
   has_more?: boolean;
 };
@@ -361,6 +369,8 @@ export type TraceQueryOptions = {
   limit?: number;
   tool?: string;
   status?: 'success' | 'error';
+  outcome?: 'success' | 'error';
+  projects?: boolean;
   /**
    * opt-in ID 游标：0 表示游标第一页（无上界，仍按 ID 降序），正数表示
    * 只取更早记录；缺省（undefined）保持旧列表行为。
@@ -692,6 +702,8 @@ export const api = {
     if (options.beforeId !== undefined) params.set('before_id', String(options.beforeId));
     if (options.tool) params.set('tool', options.tool);
     if (options.status) params.set('status', options.status);
+    if (options.outcome) params.set('outcome', options.outcome);
+    if (options.projects) params.set('projects', '1');
     return get<Traces>(`/traces?${params.toString()}`, signal);
   },
   traceDetail: (id: number, full = false, signal?: AbortSignal) => get<TraceDetail>(`/traces/detail?id=${id}&full=${full ? 1 : 0}`, signal),

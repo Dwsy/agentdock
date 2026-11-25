@@ -16,6 +16,9 @@ import (
 
 const maxManualResponsesBodyBytes = 16 << 20 // 16 MiB handles multi-turn Codex transcripts and screenshots.
 
+// manualModelsOwner marks every /v1/models 条目来源为人工桥接，而不是真实供应商目录。
+const manualModelsOwner = "manual-bridge"
+
 func manualLLMBroker(runtime runtimeapi.Runtime) *manualllm.Broker {
 	if source, ok := runtime.(runtimeapi.ManualLLMSource); ok {
 		return source.ManualLLM()
@@ -28,6 +31,7 @@ func registerManualLLM(mux *http.ServeMux, runtime runtimeapi.Runtime, cfg confi
 		return
 	}
 	mux.HandleFunc("/v1/responses", manualResponsesHandler(runtime, cfg, oauthStore))
+	mux.HandleFunc("/v1/models", manualModelsHandler(runtime, cfg, oauthStore))
 	mcpHandler := manualMCPEndpointHandler(runtime, cfg, oauthStore)
 	mux.HandleFunc("/mcp/manual", mcpHandler)
 	mux.HandleFunc("/mcp/manual/", mcpHandler)
@@ -82,6 +86,48 @@ func manualResponsesHandler(runtime runtimeapi.Runtime, cfg config.Config, oauth
 			return
 		}
 		broker.ServeResponses(r.Context(), w, body)
+	}
+}
+
+// manualModelsHandler 暴露实际观测到的模型名（OpenAI 兼容 /v1/models 形状）。
+// 手工推理桥接没有供应商目录：data 完全由真实 /v1/responses 流量推导，无观测时返回空数组。
+func manualModelsHandler(runtime runtimeapi.Runtime, cfg config.Config, oauthStore *auth.OAuthStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		broker := manualLLMBroker(runtime)
+		if broker == nil {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !authorizeManualLLMRequest(w, r, cfg, oauthStore) {
+			return
+		}
+		observed := broker.Models()
+		// Models() 已保证非 nil 空切片，这里保持 OpenAI 的 "data": [] 形状。
+		data := make([]map[string]any, 0, len(observed))
+		for _, model := range observed {
+			data = append(data, map[string]any{
+				"id":        model.ID,
+				"object":    "model",
+				"created":   model.Created,
+				"owned_by":  manualModelsOwner,
+				"requests":  model.Requests,
+				"last_seen": model.LastSeen,
+			})
+		}
+		if r.Method == http.MethodHead {
+			w.Header().Set("content-type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		writeJSON(w, map[string]any{
+			"object": "list",
+			"data":   data,
+		})
 	}
 }
 

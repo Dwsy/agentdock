@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Clock,
   Copy,
+  Cpu,
   Inbox,
   Layers,
   Pause,
@@ -22,7 +23,7 @@ import {
   statusMeta,
   type QueueFilter,
 } from '../lib/manualLLMQueue.ts';
-import { Badge, EmptyState, Panel, SectionTitle, StatCard } from '../ui.tsx';
+import { Badge, EmptyState, Panel, SectionTitle, StatCard, relTime } from '../ui.tsx';
 import { usePersistedState } from '../lib/usePersistedState';
 
 type Props = {
@@ -52,6 +53,7 @@ export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) 
   const responsesURL = resolveFullEndpoint(origin, data.responses_path || '/v1/responses');
   const mcpURL = resolveFullEndpoint(origin, data.mcp_endpoint || '/mcp/manual');
   const entries = filterManualEntries(data.requests ?? [], filter);
+  const observedModels = data.models ?? [];
 
   const copyText = async (key: string, text: string) => {
     try {
@@ -236,6 +238,45 @@ export default function ManualLLMPage({ data, onRefresh, onOpenConfig }: Props) 
           )}
         </Panel>
       </div>
+
+      <Panel className="p-5">
+        <SectionTitle
+          icon={Cpu}
+          title="已观测模型"
+          hint={`共 ${observedModels.length} 个模型名`}
+          action={
+            <span className="font-mono text-[11px] text-muted-foreground">GET /v1/models</span>
+          }
+        />
+        {observedModels.length === 0 ? (
+          <EmptyState
+            icon={Cpu}
+            title="尚未观测到任何模型名"
+            hint="桥接不内置模型目录：模型名由调用方在请求体 model 字段自报，省略时按 manual 记录。"
+          />
+        ) : (
+          <div className="space-y-2">
+            {observedModels.map((model) => (
+              <div
+                key={model.id}
+                className="flex flex-wrap items-center gap-2 rounded-xl border border-border/50 bg-card/40 p-3 text-xs"
+              >
+                <Badge className="bg-muted font-mono text-muted-foreground">{model.id}</Badge>
+                <span className="text-muted-foreground">请求 {model.requests} 次</span>
+                <span className="text-muted-foreground" title={model.last_seen}>
+                  最后出现 {relTime(model.last_seen)}
+                </span>
+                <span className="ml-auto font-mono text-[11px] text-muted-foreground/70">
+                  首次 {new Date(model.created * 1000).toLocaleString('zh-CN')}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        <p className="mt-2.5 text-[11px] text-muted-foreground">
+          列表完全由真实 <span className="font-mono">/v1/responses</span> 流量推导，桥接不伪造供应商目录；最多保留 64 个模型名，超出后淘汰最久未出现的。
+        </p>
+      </Panel>
 
       <Panel className="p-5">
         <SectionTitle

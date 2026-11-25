@@ -23,6 +23,13 @@ const (
 	// MaxPendingQueue prevents unbounded memory growth if no LLM operator
 	// claims queued /v1/responses requests.
 	MaxPendingQueue = 32
+	// MaxTrackedModels bounds the observed model registry exposed by GET /v1/models.
+	// The bridge has no provider catalog, so entries only mirror real traffic and
+	// the least recently seen model name is evicted when the bound is exceeded.
+	MaxTrackedModels = 64
+	// MaxModelNameBytes caps a tracked model name so a malformed caller cannot
+	// retain an unbounded identifier in the registry.
+	MaxModelNameBytes = 128
 	// ConfigMaxPendingQueue caps configurable active/queued queue depth.
 	ConfigMaxPendingQueue = 512
 	// MaxStoredResponses retains recent completed turns so multi-turn callers
@@ -435,6 +442,22 @@ type QueueEntryView struct {
 	ErrorMessage    string `json:"error_message,omitempty"`
 }
 
+// ModelUsage is one model name observed on POST /v1/responses.
+// Manual mode has no provider catalog: 模型名完全由调用方在请求体 model 字段自报，
+// 这里只记录真实观测到的流量，绝不生成供应商目录。
+type ModelUsage struct {
+	ID       string `json:"id"`
+	Requests int    `json:"requests"`
+	Created  int64  `json:"created"`
+	LastSeen string `json:"last_seen"`
+}
+
+// ModelsSnapshot is the observed model registry reused by QueueSnapshot and the
+// internal locked helper, so Snapshot() never re-enters the broker mutex.
+type ModelsSnapshot struct {
+	Models []ModelUsage `json:"models"`
+}
+
 // QueueStats aggregates live queue metrics for Overview/ManualLLM pages.
 type QueueStats struct {
 	QueuedCount    int `json:"queued_count"`
@@ -452,6 +475,8 @@ type QueueSnapshot struct {
 	Tuning        *QueueTuning     `json:"tuning,omitempty"`
 	Stats         QueueStats       `json:"stats"`
 	Requests      []QueueEntryView `json:"requests"`
+	// Models 是实际观测到的模型名注册表（GET /v1/models 的同源数据）。
+	Models []ModelUsage `json:"models"`
 }
 
 // BuildManualPrompt produces the single ultra-compact copyable entry prompt

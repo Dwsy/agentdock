@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1274,5 +1275,145 @@ func TestCodexResponsesAdditionalToolsIncrementalContextAndSystemPrompt(t *testi
 	framesChars := readSSEFrames(t, recChars.Body)
 	if len(framesChars) < 2 || !strings.Contains(framesChars[len(framesChars)-2].Data, `"output_tokens":1`) {
 		t.Fatalf("expected 4 CJK chars to count as 1 output_token in chars mode, got %+v", framesChars)
+	}
+}
+
+func TestObservedModelRegistryCountsAndOrdering(t *testing.T) {
+	b := NewBrokerWithOptions(Options{MaxPendingQueue: ConfigMaxPendingQueue})
+	defer b.Close()
+
+	// 无任何请求时注册表为空且为非 nil 空切片，保证 /v1/models 返回 data: []。
+	if models := b.Models(); models == nil || len(models) != 0 {
+		t.Fatalf("expected empty non-nil model registry, got %+v", models)
+	}
+	if snap := b.Snapshot(true, "/v1/responses", "/mcp/manual"); snap.Models == nil || len(snap.Models) != 0 {
+		t.Fatalf("expected empty models in snapshot, got %+v", snap.Models)
+	}
+
+	enqueue := func(model string) {
+		t.Helper()
+		if _, err := b.enqueue(ResponsesInput{Model: model, Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+			t.Fatalf("enqueue %q: %v", model, err)
+		}
+	}
+
+	// 单模型多请求：只保留一条记录，请求计数累加。
+	for i := 0; i < 3; i++ {
+		enqueue("gpt-5.4-codex")
+	}
+	models := b.Models()
+	if len(models) != 1 {
+		t.Fatalf("expected 1 tracked model, got %+v", models)
+	}
+	if models[0].ID != "gpt-5.4-codex" || models[0].Requests != 3 {
+		t.Fatalf("expected gpt-5.4-codex with 3 requests, got %+v", models[0])
+	}
+	if models[0].Created <= 0 || models[0].LastSeen == "" {
+		t.Fatalf("expected created unix + last_seen populated, got %+v", models[0])
+	}
+	if _, err := time.Parse(time.RFC3339, models[0].LastSeen); err != nil {
+		t.Fatalf("expected RFC3339 last_seen, got %q (%v)", models[0].LastSeen, err)
+	}
+
+	// 多模型：按 last_seen 降序，最后出现的排最前。
+	time.Sleep(2 * time.Millisecond)
+	enqueue("claude-sonnet")
+	time.Sleep(2 * time.Millisecond)
+	enqueue("qwen3-coder")
+	models = b.Models()
+	if len(models) != 3 {
+		t.Fatalf("expected 3 tracked models, got %+v", models)
+	}
+	if models[0].ID != "qwen3-coder" || models[1].ID != "claude-sonnet" || models[2].ID != "gpt-5.4-codex" {
+		t.Fatalf("expected last_seen descending [qwen3-coder claude-sonnet gpt-5.4-codex], got %+v", models)
+	}
+
+	// Snapshot 必须复用同一份观测结果（并且不二次加锁导致死锁）。
+	snap := b.Snapshot(true, "/v1/responses", "/mcp/manual")
+	if len(snap.Models) != 3 || snap.Models[0].ID != "qwen3-coder" {
+		t.Fatalf("expected snapshot models in last_seen order, got %+v", snap.Models)
+	}
+}
+
+func TestObservedModelRegistryEvictsLeastRecentlySeen(t *testing.T) {
+	b := NewBrokerWithOptions(Options{MaxPendingQueue: ConfigMaxPendingQueue})
+	defer b.Close()
+
+	if _, err := b.enqueue(ResponsesInput{Model: "model-oldest", Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+		t.Fatalf("enqueue oldest: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	// 补满到上限（含已有的 model-oldest）。
+	for i := 0; i < MaxTrackedModels-1; i++ {
+		if _, err := b.enqueue(ResponsesInput{Model: fmt.Sprintf("model-%03d", i), Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	if models := b.Models(); len(models) != MaxTrackedModels {
+		t.Fatalf("expected exactly %d tracked models, got %d", MaxTrackedModels, len(models))
+	}
+
+	// 再观测一个全新模型名：最久未出现的 model-oldest 必须被淘汰。
+	time.Sleep(2 * time.Millisecond)
+	if _, err := b.enqueue(ResponsesInput{Model: "model-newest", Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+		t.Fatalf("enqueue newest: %v", err)
+	}
+	models := b.Models()
+	if len(models) != MaxTrackedModels {
+		t.Fatalf("expected registry to stay bounded at %d, got %d", MaxTrackedModels, len(models))
+	}
+	if models[0].ID != "model-newest" {
+		t.Fatalf("expected model-newest first after eviction, got %+v", models[0])
+	}
+	for _, model := range models {
+		if model.ID == "model-oldest" {
+			t.Fatalf("expected least recently seen model-oldest to be evicted, got %+v", models)
+		}
+	}
+
+	// 重复观测已有模型名只累加计数，不占用新槽位，也不触发淘汰。
+	if _, err := b.enqueue(ResponsesInput{Model: "model-000", Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+		t.Fatalf("re-enqueue existing model: %v", err)
+	}
+	if got := len(b.Models()); got != MaxTrackedModels {
+		t.Fatalf("expected repeat observation to keep %d models, got %d", MaxTrackedModels, got)
+	}
+}
+
+func TestObservedModelRegistryNormalizesAndBoundsNames(t *testing.T) {
+	b := NewBrokerWithOptions(Options{MaxPendingQueue: ConfigMaxPendingQueue})
+	defer b.Close()
+
+	// 空白模型名不入表（ParseResponsesRequest 会回退为 manual，这里验证兜底防御）。
+	if _, err := b.enqueue(ResponsesInput{Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+		t.Fatalf("enqueue blank model: %v", err)
+	}
+	if models := b.Models(); len(models) != 0 {
+		t.Fatalf("expected blank model name to be ignored, got %+v", models)
+	}
+
+	// 前后空白被裁剪。
+	if _, err := b.enqueue(ResponsesInput{Model: "  spaced-model  ", Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+		t.Fatalf("enqueue spaced model: %v", err)
+	}
+	models := b.Models()
+	if len(models) != 1 || models[0].ID != "spaced-model" {
+		t.Fatalf("expected trimmed model name, got %+v", models)
+	}
+
+	// 超长名称按 UTF-8 边界截断到上限字节。
+	longName := strings.Repeat("模", MaxModelNameBytes) // 3 字节/字符，远超字节上限
+	if _, err := b.enqueue(ResponsesInput{Model: longName, Messages: []Message{{Role: "user", Text: "hi"}}}); err != nil {
+		t.Fatalf("enqueue long model: %v", err)
+	}
+	var truncated *ModelUsage
+	for _, model := range b.Models() {
+		if model.ID != "spaced-model" {
+			entry := model
+			truncated = &entry
+		}
+	}
+	if truncated == nil || len(truncated.ID) > MaxModelNameBytes || !utf8.ValidString(truncated.ID) {
+		t.Fatalf("expected long model name truncated to <=%d valid UTF-8 bytes, got %+v", MaxModelNameBytes, truncated)
 	}
 }

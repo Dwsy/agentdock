@@ -345,3 +345,154 @@ func TestManualLLMAuthLoopbackAndEndToEndSSEBridge(t *testing.T) {
 		t.Fatalf("expected response.failed on cancelled SSE, got:\n%s", body2)
 	}
 }
+
+func TestManualV1ModelsEndpoint(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ManualLLMEnabled = true
+	cfg.AuthToken = "models-test-token"
+	runtime, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	defer runtime.Close()
+
+	oauthStore := auth.NewOAuthStore()
+	mux := http.NewServeMux()
+	registerManualLLM(mux, runtime, cfg, oauthStore)
+
+	broker := runtime.ManualLLM()
+	if broker == nil {
+		t.Fatal("expected manual LLM broker when enabled")
+	}
+
+	fetchModels := func(t *testing.T) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on GET /v1/models, got %d (%s)", rec.Code, rec.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode /v1/models body: %v (%s)", err, rec.Body.String())
+		}
+		return body
+	}
+
+	// 1. 无任何请求时返回 200 与空 data 数组，不塞假数据。
+	body := fetchModels(t)
+	if body["object"] != "list" {
+		t.Fatalf(`expected object="list", got %+v`, body["object"])
+	}
+	data, ok := body["data"].([]any)
+	if !ok || len(data) != 0 {
+		t.Fatalf("expected empty data array with no observations, got %#v", body["data"])
+	}
+
+	// 2. 实际观测到 /v1/responses 流量后按真实模型名回显。
+	sendStreamingRequest := func(model string) {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"model": model, "stream": true, "input": "hi"})
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(payload))
+		req.Header.Set("Authorization", "Bearer "+cfg.AuthToken)
+		rec := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() { defer close(done); mux.ServeHTTP(rec, req) }()
+		// 队列已登记模型后立刻取消，避免测试等待人工输入。
+		deadline := time.Now().Add(3 * time.Second)
+		var requestID string
+		for time.Now().Before(deadline) {
+			snap := broker.Snapshot(true, "/v1/responses", "/mcp/manual")
+			for _, entry := range snap.Requests {
+				if entry.Status == string(manualllm.StatusQueued) {
+					requestID = entry.RequestID
+					break
+				}
+			}
+			if requestID != "" {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if requestID == "" {
+			t.Fatalf("queued request for %q never appeared", model)
+		}
+		if _, err := broker.CancelRequest(requestID, "models endpoint test"); err != nil {
+			t.Fatalf("cancel %q: %v", model, err)
+		}
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatalf("streaming request for %q did not finish after cancel", model)
+		}
+	}
+
+	sendStreamingRequest("gpt-5.4-codex")
+	sendStreamingRequest("gpt-5.4-codex")
+
+	body = fetchModels(t)
+	data, ok = body["data"].([]any)
+	if !ok || len(data) != 1 {
+		t.Fatalf("expected exactly 1 observed model, got %#v", body["data"])
+	}
+	entry, _ := data[0].(map[string]any)
+	if entry["id"] != "gpt-5.4-codex" || entry["object"] != "model" || entry["owned_by"] != "manual-bridge" {
+		t.Fatalf("unexpected model entry shape: %#v", entry)
+	}
+	if requests, _ := entry["requests"].(float64); requests != 2 {
+		t.Fatalf("expected requests=2 for repeated model, got %#v", entry["requests"])
+	}
+	if created, _ := entry["created"].(float64); created <= 0 {
+		t.Fatalf("expected positive created unix, got %#v", entry["created"])
+	}
+	if lastSeen, _ := entry["last_seen"].(string); lastSeen == "" {
+		t.Fatalf("expected last_seen timestamp, got %#v", entry["last_seen"])
+	}
+}
+
+func TestManualV1ModelsDisabledAndMethodMismatch(t *testing.T) {
+	// manual LLM 关闭时 /v1/models 与 /v1/responses 一样返回 404。
+	cfgOff := testConfig(t)
+	cfgOff.ManualLLMEnabled = false
+	runtimeOff, err := app.NewRuntime(cfgOff)
+	if err != nil {
+		t.Fatalf("new runtime off: %v", err)
+	}
+	defer runtimeOff.Close()
+
+	offMux := http.NewServeMux()
+	registerManualLLM(offMux, runtimeOff, cfgOff, auth.NewOAuthStore())
+	offRec := httptest.NewRecorder()
+	offMux.ServeHTTP(offRec, newLocalRuntimeRequest(http.MethodGet, "/v1/models", nil))
+	if offRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on /v1/models when manual LLM disabled, got %d", offRec.Code)
+	}
+
+	// 开启后非 GET/HEAD 请求按本仓库惯例返回 405 + Allow。
+	cfgOn := testConfig(t)
+	cfgOn.ManualLLMEnabled = true
+	runtimeOn, err := app.NewRuntime(cfgOn)
+	if err != nil {
+		t.Fatalf("new runtime on: %v", err)
+	}
+	defer runtimeOn.Close()
+
+	onMux := http.NewServeMux()
+	registerManualLLM(onMux, runtimeOn, cfgOn, auth.NewOAuthStore())
+	badRec := httptest.NewRecorder()
+	onMux.ServeHTTP(badRec, newLocalRuntimeRequest(http.MethodPost, "/v1/models", strings.NewReader(`{}`)))
+	if badRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 on POST /v1/models, got %d", badRec.Code)
+	}
+	if allow := badRec.Header().Get("Allow"); !strings.Contains(allow, http.MethodGet) {
+		t.Fatalf("expected Allow header to include GET, got %q", allow)
+	}
+
+	headRec := httptest.NewRecorder()
+	onMux.ServeHTTP(headRec, newLocalRuntimeRequest(http.MethodHead, "/v1/models", nil))
+	if headRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on HEAD /v1/models, got %d", headRec.Code)
+	}
+}

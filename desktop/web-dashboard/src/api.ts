@@ -589,6 +589,18 @@ export type ManualLLMQueue = {
     sessions_count: number;
   };
   requests: ManualLLMQueueEntry[];
+  /** 实际观测到的模型名（桥接无供应商目录，仅由请求体 model 字段自报推导）。 */
+  models?: ModelUsage[];
+};
+
+/** 一条已观测模型记录，与 GET /v1/models 的 data 条目同源。 */
+export type ModelUsage = {
+  id: string;
+  requests: number;
+  /** 首次出现时间（Unix 秒）。 */
+  created: number;
+  /** 最后出现时间（RFC3339）。 */
+  last_seen: string;
 };
 
 export type ManualLLMCancelResult = {

@@ -24,6 +24,7 @@ func (r *Runtime) RuntimeManualLLMQueue() Result {
 			"tuning":         opts.TuningView(),
 			"stats":          manualllm.QueueStats{},
 			"requests":       []manualllm.QueueEntryView{},
+			"models":         []manualllm.ModelUsage{},
 		}
 	}
 	snap := broker.Snapshot(true, "/v1/responses", "/mcp/manual")
@@ -37,6 +38,7 @@ func (r *Runtime) RuntimeManualLLMQueue() Result {
 		"tuning":         snap.Tuning,
 		"stats":          snap.Stats,
 		"requests":       snap.Requests,
+		"models":         snap.Models,
 	}
 }
 

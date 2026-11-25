@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/uvwt/agentdock/internal/observability"
 )
@@ -88,6 +89,14 @@ type sessionState struct {
 	UpdatedAt           time.Time
 }
 
+// knownModel 是模型注册表内部条目：lastSeen 用于有界淘汰与排序。
+type knownModel struct {
+	id       string
+	requests int
+	created  time.Time
+	lastSeen time.Time
+}
+
 // Broker coordinates manual LLM turn queueing, progressive retrieval, and SSE streaming.
 type Broker struct {
 	mu             sync.Mutex
@@ -103,6 +112,8 @@ type Broker struct {
 	sessions       map[string]*sessionState
 	convSessions   map[string]*sessionState
 	sessionWaiters map[string]int
+	// models 只登记真实请求体里观测到的模型名（GET /v1/models 的数据源）。
+	models map[string]*knownModel
 }
 
 // NewBroker constructs an active Broker using DefaultOptions.
@@ -121,6 +132,7 @@ func NewBrokerWithOptions(opts Options) *Broker {
 		sessions:       make(map[string]*sessionState),
 		convSessions:   make(map[string]*sessionState),
 		sessionWaiters: make(map[string]int),
+		models:         make(map[string]*knownModel),
 	}
 }
 
@@ -360,8 +372,91 @@ func (b *Broker) enqueue(in ResponsesInput) (*requestRecord, error) {
 	b.queue = append(b.queue, req)
 	b.requests[req.ID] = req
 	b.responses[req.ResponseID] = req
+	// in.Model 已由 ParseResponsesRequest 归一化（TrimSpace + 空值回退 manual）。
+	b.recordModelLocked(in.Model, req.CreatedAt)
 	b.notifyWaitersLocked()
 	return req, nil
+}
+
+// recordModelLocked 登记一次真实观测到的模型名。调用方必须已持有 b.mu。
+// 注册表有界：超出 MaxTrackedModels 时淘汰 lastSeen 最早的那一个。
+func (b *Broker) recordModelLocked(model string, now time.Time) {
+	name := strings.TrimSpace(model)
+	if name == "" {
+		return
+	}
+	if len(name) > MaxModelNameBytes {
+		name = truncateUTF8Bytes(name, MaxModelNameBytes)
+	}
+	if b.models == nil {
+		b.models = make(map[string]*knownModel)
+	}
+	if entry, ok := b.models[name]; ok {
+		entry.requests++
+		entry.lastSeen = now
+		return
+	}
+	for len(b.models) >= MaxTrackedModels {
+		var evictKey string
+		evictSeen := time.Time{}
+		first := true
+		for key, entry := range b.models {
+			if first || entry.lastSeen.Before(evictSeen) {
+				evictKey, evictSeen, first = key, entry.lastSeen, false
+			}
+		}
+		delete(b.models, evictKey)
+	}
+	b.models[name] = &knownModel{id: name, requests: 1, created: now, lastSeen: now}
+}
+
+// truncateUTF8Bytes 按 UTF-8 边界截断到上限字节数，避免把多字节字符切成半个。
+func truncateUTF8Bytes(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if cut == 0 {
+		return ""
+	}
+	return s[:cut]
+}
+
+// Models returns observed model names ordered by last_seen descending.
+func (b *Broker) Models() []ModelUsage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.modelsLocked().Models
+}
+
+// modelsLocked 是 Models 的持锁版本，供 Snapshot 复用，避免二次加锁死锁。
+func (b *Broker) modelsLocked() ModelsSnapshot {
+	if len(b.models) == 0 {
+		return ModelsSnapshot{Models: []ModelUsage{}}
+	}
+	entries := make([]*knownModel, 0, len(b.models))
+	for _, entry := range b.models {
+		entries = append(entries, entry)
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].lastSeen.Equal(entries[j].lastSeen) {
+			return entries[i].id < entries[j].id
+		}
+		return entries[i].lastSeen.After(entries[j].lastSeen)
+	})
+	usages := make([]ModelUsage, 0, len(entries))
+	for _, entry := range entries {
+		usages = append(usages, ModelUsage{
+			ID:       entry.id,
+			Requests: entry.requests,
+			Created:  entry.created.Unix(),
+			LastSeen: entry.lastSeen.UTC().Format(time.RFC3339),
+		})
+	}
+	return ModelsSnapshot{Models: usages}
 }
 
 func (b *Broker) countPendingLocked() int {
@@ -1640,6 +1735,7 @@ func (b *Broker) Snapshot(enabled bool, responsesPath, mcpEndpoint string) Queue
 		Tuning:        &tuning,
 		Stats:         stats,
 		Requests:      views,
+		Models:        b.modelsLocked().Models,
 	}
 }
 

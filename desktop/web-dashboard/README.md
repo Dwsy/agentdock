@@ -49,7 +49,7 @@ pnpm dev          # http://localhost:5173（开发模式，需本机 core 在跑
 pnpm build        # tsc + vite build，产出 dist/，base 为 /dashboard/
 ```
 
-`dist/` 会被 `build-dashboard.sh` 同步到 `internal/httpx/dashboard/dist/`，再由 Go 的 `go:embed` 打进 core 二进制。该 embed 产物随仓库提交，任何 `go build ./cmd/agentdock` 都自带完整控制台；前端改动后跑一次 `make dashboard` 刷新即可（build-local.sh 和 release workflow 已自动串联）。
+`dist/` 会被 `build-dashboard.sh` 同步到 `internal/httpx/dashboard/dist/`，再由 Go 的 `go:embed` 打进 core 二进制。该 embed 产物**不入库**（哈希文件名每次构建都变），仓库只留 `dist/.gitkeep` 占位，所以裸 clone 后要先跑一次 `make dashboard` 才有控制台；前端改动后同样跑它刷新（build-local.sh 和 release workflow 已自动串联）。
 
 ## 渲染实现
 

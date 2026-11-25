@@ -18,6 +18,13 @@
 /*.test
 /agentdock.killed*
 
+# Web 仪表盘的 go:embed 产物。哈希文件名每次构建都变，入库只会制造噪音；
+# 构建时由 packaging/macos/build-dashboard.sh 生成。仓库只保留 .gitkeep
+# 让 go:embed 有占位文件（空目录会编译失败），此时控制台返回 404，
+# 需先跑 make dashboard。
+/internal/httpx/dashboard/dist/*
+!/internal/httpx/dashboard/dist/.gitkeep
+
 # Windows WPF 控制面板的本地构建产物。
 /desktop/windows/control-panel/bin/
 /desktop/windows/control-panel/obj/

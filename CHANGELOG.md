@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates u
 
 ## [Unreleased]
 
+### Changed / 变更
+
+- **Web 仪表盘的 `go:embed` 产物不再入库**：`internal/httpx/dashboard/dist` 里的哈希文件名每次构建都变，入库只制造 diff 噪音。改为被 `.gitignore` 忽略，仓库仅保留 `dist/.gitkeep` 占位；embed 指令随之改成 `all:dashboard/dist`，因为 `go:embed` 默认跳过点开头的文件、只有占位文件时会判定「目录无可嵌入内容」而编译失败。裸 clone 后需先跑 `make dashboard`（`build-dashboard.sh` 同步完会补回 `.gitkeep`），否则 `/dashboard/` 返回 404。release 工作流本来就在编译 Core 前构建仪表盘，不受影响。
+
 ### Added / 新增
 
 - **Web 仪表盘外观改为「跟随系统 / 浅色 / 深色」三档**：主题按钮按 跟随系统 → 浅色 → 深色 循环，存的是用户意图（`agentdock-theme-mode`）而不是当次渲染结果。跟随系统时监听 `prefers-color-scheme` 实时跟随系统深浅色变化，显式选定后系统变化不再覆盖。旧布尔键 `agentdock-theme` 只有渲染结果、没有意图，读到即清除并回到跟随系统，避免用户被历史渲染状态钉死。首屏脚本同步改成按意图解析，无闪烁。新增 `src/lib/theme.ts` 与 7 个 `node:test` 用例。

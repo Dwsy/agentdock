@@ -37,7 +37,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 
 ### macOS 本地构建
 
-`packaging/macos/build-local.sh` 是本地改完桌面端后的唯一推荐入口（CI 仍走 `build-app.sh` + Release 载荷）：i18n 与 `swiftc -typecheck` 先失败 → `build-dashboard.sh` 构建 Web 仪表盘 → 编译 Core 与 core-skills 载荷 → `build-app.sh` 产出 `.app/.zip/.dmg` → 安装到 `/Applications` → 加载 Core → 启动 App。用 `--build-only` 只出包不安装。仪表盘 dist 随仓库提交，任何 `go build` 都自带控制台；不装 Node 时设 `AGENTDOCK_SKIP_DASHBOARD=1` 用已提交的产物。
+`packaging/macos/build-local.sh` 是本地改完桌面端后的唯一推荐入口（CI 仍走 `build-app.sh` + Release 载荷）：i18n 与 `swiftc -typecheck` 先失败 → `build-dashboard.sh` 构建 Web 仪表盘 → 编译 Core 与 core-skills 载荷 → `build-app.sh` 产出 `.app/.zip/.dmg` → 安装到 `/Applications` → 加载 Core → 启动 App。用 `--build-only` 只出包不安装。仪表盘 dist 不入库，脚本里的 `build-dashboard.sh` 是产物唯一来源；不装 Node 时设 `AGENTDOCK_SKIP_DASHBOARD=1` 会直接跳过构建，此时沿用 `dist/` 里已有的产物（裸 clone 后为空，控制台 404）。
 
 只有 Command Line Tools、没有完整 Xcode 时：
 
@@ -62,7 +62,7 @@ scripts/        install/ 公开安装入口 · test/ 脚本与 UI 回归 · gove
 
 ### 只读 Web 仪表盘契约
 
-- 前端源码在 `desktop/web-dashboard`（pnpm + React 19 + Tailwind 4 + Solid Glass）。数据页面只读；唯一具备写入能力的页面是「配置」与「远程访问」，其余页面一律不做写操作。`make dashboard` 产出 dist 并同步到 `internal/httpx/dashboard/dist`，由 `go:embed` 打进 Core；该 dist 随仓库提交，所以 `go build ./cmd/agentdock` 无需 Node 也自带完整控制台。
+- 前端源码在 `desktop/web-dashboard`（pnpm + React 19 + Tailwind 4 + Solid Glass）。数据页面只读；唯一具备写入能力的页面是「配置」与「远程访问」，其余页面一律不做写操作。`make dashboard` 产出 dist 并同步到 `internal/httpx/dashboard/dist`，由 `go:embed` 打进 Core。**该 dist 不入库**（哈希文件名每次构建都变，入库只制造噪音），仓库只保留 `dist/.gitkeep` 占位——`go:embed` 遇到空目录会编译失败，所以 embed 指令用 `all:dashboard/dist` 让点开头的占位文件也算作可嵌入内容。裸 clone 后必须先跑 `make dashboard` 才有控制台，否则 `/dashboard/` 返回 404。
 - 浏览器访问 `http://127.0.0.1:<port>/dashboard/`（托盘右键菜单「打开 Web 仪表盘」，端口读 `agentdock.env` 的 `AGENTDOCK_PORT`，缺省 8765）。所有数据请求走同形前缀 `/dashboard/api/*`，**不要**让前端直连 `/internal/runtime/*`：
   - 生产由 `internal/httpx/dashboard.go` 的 loopback-only 代理把 `/dashboard/api/*` 重写成 `/internal/runtime/*`，服务端注入 `AGENTDOCK_AUTH_TOKEN`；开发由 `vite.config.ts` 的同形中间件代理。token 绝不进前端代码或 dist。
   - 代理对所有非 SSE 响应 JSON 递归脱敏（Authorization/Cookie/token/password 等）；SSE 事件流是摘要投影，流式透传不清头。直连 `/internal/runtime/*` 的 Bearer/OAuth 鉴权边界不变。

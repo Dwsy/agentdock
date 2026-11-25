@@ -22,10 +22,12 @@ var zeroTime time.Time
 
 // Dashboard 是随 Core 分发的只读 Web 控制台。构建产物放在 dist/ 下由
 // go:embed 打进 Core 二进制，托盘菜单通过 http://127.0.0.1:<port>/dashboard 打开。
-// dist/ 的构建产物随仓库提交，因此任何 go build 都自带完整控制台；
-// 前端改动后用 packaging/macos/build-dashboard.sh 刷新它。
+// dist/ 是构建产物、不入库（哈希文件名每次都变），仓库只留 .gitkeep 占位；
+// 因此裸 clone 后要先跑 packaging/macos/build-dashboard.sh，否则控制台 404。
+// 用 all: 前缀是因为 go:embed 默认跳过 . 开头的文件，只留 .gitkeep 会被判定为
+// 「目录里没有可嵌入文件」而直接编译失败。
 //
-//go:embed dashboard/dist
+//go:embed all:dashboard/dist
 var dashboardFS embed.FS
 
 const (

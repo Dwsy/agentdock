@@ -192,7 +192,7 @@ scripts:
     owner: release
     public_contract: false
     deletable: false
-    notes: 用 pnpm 构建只读 Web 仪表盘，把 dist 同步到 internal/httpx/dashboard/dist 供 Core go:embed。build-local.sh 与 release.yml 在编译 Core 前调用；AGENTDOCK_SKIP_DASHBOARD=1 可跳过。
+    notes: 用 pnpm 构建只读 Web 仪表盘，把 dist 同步到 internal/httpx/dashboard/dist 供 Core go:embed。该产物不入库（.gitignore 忽略），只留 .gitkeep 占位保证空目录仍可 embed。build-local.sh 与 release.yml 在编译 Core 前调用；AGENTDOCK_SKIP_DASHBOARD=1 可跳过。
 
   - path: packaging/macos/build-local.sh
     class: packaging

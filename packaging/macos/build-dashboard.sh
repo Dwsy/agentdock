@@ -1,7 +1,8 @@
 #!/bin/zsh
 # 构建随 Core 分发的只读 Web 仪表盘，并把产物放进 go:embed 目录。
-# Core 的 go build 会把 internal/httpx/dashboard/dist 打进二进制。dist 产物
-# 随仓库提交，所以不跑本脚本也能编译；本脚本用于前端改动后刷新产物。
+# Core 的 go build 会把 internal/httpx/dashboard/dist 打进二进制。
+# dist 产物不入库（哈希文件名每次构建都变），仓库只留 .gitkeep 占位，
+# 裸 clone 后必须跑一次本脚本，否则控制台 404。
 set -euo pipefail
 
 ROOT_DIR="${0:A:h:h:h}"
@@ -35,5 +36,8 @@ mkdir -p "$EMBED_DIR"
 ditto "$DASHBOARD_DIR/dist" "$EMBED_DIR"
 find "$EMBED_DIR" -type d -exec chmod 0755 {} +
 find "$EMBED_DIR" -type f -exec chmod 0644 {} +
+# 产物不入库（见 .gitignore），这个占位文件是 go:embed 在裸 clone 后仍能
+# 编译的唯一依赖；rm -rf 会把它一起删掉，所以每次同步后补回来。
+touch "$EMBED_DIR/.gitkeep"
 
 print -u2 -- "==> Web 仪表盘就绪：$EMBED_DIR/index.html"
